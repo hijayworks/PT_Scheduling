@@ -41,14 +41,6 @@
   const SLOT_SCALE = OLD_SLOT_MIN / SLOT_MIN; // 옛 슬롯 인덱스를 새 슬롯 인덱스로 환산
   const DEFAULT_LOCATION_NAMES = ["상암점", "마포점", "여의도점"];
   const DEFAULT_TRAVEL_MIN = 30;
-  // Demo roster from member.text ("지점 이름" per line): seeded with their branch on first run.
-  const DEFAULT_MEMBERS = [
-    { location: "상암점", name: "홍길동" },
-    { location: "여의도점", name: "김철수" },
-    { location: "마포점", name: "서하니" },
-    { location: "상암점", name: "박민지" },
-    { location: "마포점", name: "정진혁" }
-  ];
 
   /* ---------------- State ---------------- */
   let state = {
@@ -196,13 +188,6 @@
           state.travelTimes[pairKey(state.locations[i].id, state.locations[j].id)] = DEFAULT_TRAVEL_MIN;
         }
       }
-    }
-    // First-ever run: seed the known member roster with the branch listed in member.text.
-    if (!hadSavedState && state.members.length === 0) {
-      state.members = DEFAULT_MEMBERS.map((entry) => {
-        const loc = state.locations.find(l => l.name === entry.location);
-        return { id: uid("m"), name: entry.name, locationIds: loc ? [loc.id] : [], memo: "" };
-      });
     }
     // Migrate members saved under the old single-branch field (locationId) to the
     // multi-branch array (locationIds), backfilling from their first request if neither is set.
