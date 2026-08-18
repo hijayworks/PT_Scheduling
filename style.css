@@ -7,7 +7,6 @@
   --primary: #111111;
   --primary-dark: #000000;
   --primary-soft: #eeeeee;
-  --accent: #f97316;
   --success: #16a34a;
   --danger: #dc2626;
   --danger-soft: #fef2f2;
@@ -110,11 +109,6 @@ body {
 .card-head h2 { margin: 0 0 4px; font-size: 17px; font-weight: 700; }
 .card-desc { margin: 0; font-size: 13.5px; color: var(--text-mute); }
 
-.section-divider {
-  border: none;
-  border-top: 1px solid var(--border);
-  margin: 26px 0;
-}
 .subsection-desc { margin-bottom: 14px; }
 
 .settings-sections {
@@ -157,13 +151,6 @@ body {
 .btn-danger-ghost:hover { background: #fde2e2; }
 .btn-small { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-
-/* Toolbar */
-.toolbar {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
-  margin-bottom: 16px;
-}
-.toolbar-hint { font-size: 12.5px; color: var(--text-mute); margin-left: 4px; }
 
 /* Availability day list (time picker) */
 .avail-day-list {
@@ -214,15 +201,13 @@ body {
 }
 .avail-day-time select:disabled { background-color: #f3f4f8; color: var(--text-mute); cursor: not-allowed; }
 .avail-day-time .sep { color: var(--text-mute); font-size: 13px; }
-.avail-day-off-label { font-size: 13px; color: var(--text-mute); }
 
 /* Candidate generation rules */
 .candidate-rules-block {
   margin-bottom: 18px;
-  padding: 14px 16px;
+  padding: 2px 16px;
   border: 1px solid var(--border);
   border-radius: 12px;
-  background: #fff;
 }
 .candidate-rules-title {
   display: flex;
@@ -231,8 +216,8 @@ body {
   width: 100%;
   border: none;
   background: transparent;
-  padding: 8px 0;
-  margin: 0 0 8px;
+  padding: 2px 0;
+  margin: 0 0 4px;
   font-size: 16px;
   font-weight: 700;
   font-family: inherit;
@@ -249,13 +234,12 @@ body {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: var(--primary-soft);
   color: var(--primary);
-  transition: background 0.15s, transform 0.2s ease;
+  transition: transform 0.2s ease;
 }
-.candidate-rules-title:hover .toggle-arrow { background: #e0e0e0; }
 .candidate-rules-block:not(.collapsed) .toggle-arrow { transform: rotate(180deg); }
 .candidate-rules-block.collapsed .candidate-rules-title { margin-bottom: 0; }
+.candidate-rules-block:not(.collapsed) { padding-bottom: 16px; }
 .candidate-rules-list {
   margin: 0;
   padding-left: 18px;
@@ -266,9 +250,23 @@ body {
   color: var(--text-mute);
 }
 .candidate-rules-block.collapsed .candidate-rules-list { display: none; }
+.candidate-rules-list ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 
-/* 1회 제한 회원 선택 (candidate generation) */
-.day-start-block { margin-bottom: 18px; }
+/* 미배정 회원 · 1회 제한 회원 선택 (candidate generation) — 서로 구분되도록 카드 형태로 감싼다 */
+.day-start-block {
+  margin-bottom: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #fff;
+}
+#excludedBlock { margin-top: 18px; }
 #onceLimitBlock { margin-top: 18px; margin-bottom: 22px; }
 .once-limit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
 #onceLimitChipRow { margin-top: 0; }
@@ -611,6 +609,7 @@ body {
 
 /* Notion-style multi-select (branch picker) */
 .ms { position: relative; min-width: 180px; }
+#memberLocationMs, #memberCategoryMs { min-width: 126px; }
 .ms-control {
   display: flex;
   align-items: center;
@@ -853,10 +852,6 @@ body {
 .unassigned-box b { color: var(--text); }
 .single-assigned-box { background: #fffbeb; border-color: #fde68a; }
 
-.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-size: 12px; color: var(--text-mute); }
-.legend-item { display: flex; align-items: center; gap: 6px; }
-.legend-swatch { width: 12px; height: 12px; border-radius: 4px; }
-
 .app-footer {
   text-align: center;
   padding: 20px;
@@ -900,7 +895,8 @@ body {
 }
 .toast {
   min-width: 200px;
-  max-width: min(380px, calc(100vw - 40px));
+  width: max-content;
+  max-width: min(560px, calc(100vw - 40px));
   padding: 11px 18px;
   border-radius: 10px;
   background: var(--primary);
@@ -908,6 +904,7 @@ body {
   font-size: 13.5px;
   font-weight: 600;
   text-align: center;
+  white-space: nowrap;
   box-shadow: 0 8px 24px rgba(20, 24, 40, 0.22);
   opacity: 0;
   transform: translateY(10px);

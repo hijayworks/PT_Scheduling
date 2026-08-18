@@ -49,7 +49,8 @@
     travelTimes: {},       // { "locIdA|locIdB": minutes }
     members: [],          // {id, name, locationIds: [locId, ...]}
     requests: [],         // {id, memberId, locationId, day, startSlot, duration}
-    onceLimitedMemberIds: []  // 이번 후보 생성에서 최대 1회만 배정되어야 하는 회원 id 목록
+    onceLimitedMemberIds: [],  // 이번 후보 생성에서 최대 1회만 배정되어야 하는 회원 id 목록
+    excludedMemberIds: []  // "미배정 회원": 후보 생성에서 아예 제외할 회원 id 목록
   };
   let availableCells = new Set();
   let candidates = [];          // computed candidates
@@ -165,6 +166,7 @@
         state.members = parsed.members || [];
         state.requests = parsed.requests || [];
         state.onceLimitedMemberIds = parsed.onceLimitedMemberIds || [];
+        state.excludedMemberIds = parsed.excludedMemberIds || [];
         availableCells = new Set(parsed.availableCells || []);
         candidates = parsed.candidates || [];
         if (PAGE_IDS.indexOf(parsed.currentPage) !== -1) {
@@ -227,6 +229,8 @@
     if (hadDurationMismatch) candidates = [];
     // 삭제된 회원이나 상담 회원(이미 항상 1회로 제한됨)을 가리키는 1회 제한 설정은 정리한다.
     state.onceLimitedMemberIds = state.onceLimitedMemberIds.filter(id => isOnceLimitEligible(memberById(id)));
+    // 삭제된 회원을 가리키는 "미배정 회원" 설정은 정리한다.
+    state.excludedMemberIds = state.excludedMemberIds.filter(id => !!memberById(id));
     // 일요일 기능이 제거되어(DAYS에서 빠짐), 옛 요일 인덱스 6(일요일)을 가리키던 데이터가 남아있다면 정리한다.
     const hadSunday = state.requests.some(r => r.day >= DAYS.length)
       || Array.from(availableCells).some(k => parseInt(k.split("-")[0], 10) >= DAYS.length);
@@ -843,7 +847,7 @@
     if (memberFormLocationIds.length === 0) {
       const placeholder = document.createElement("span");
       placeholder.className = "ms-placeholder";
-      placeholder.textContent = state.locations.length === 0 ? "등록된 지점 없음" : "지점 선택";
+      placeholder.textContent = state.locations.length === 0 ? "등록된 지점 없음" : "선택";
       memberLocationChipsEl.appendChild(placeholder);
       return;
     }
@@ -938,7 +942,7 @@
       display.textContent = memberFormCategory;
     } else {
       display.className = "ms-placeholder";
-      display.textContent = "회원 구분 선택";
+      display.textContent = "선택";
     }
     memberCategoryDisplayEl.appendChild(display);
   }
@@ -1008,6 +1012,7 @@
     state.members = state.members.filter(m => m.id !== member.id);
     state.requests = state.requests.filter(r => r.memberId !== member.id);
     state.onceLimitedMemberIds = state.onceLimitedMemberIds.filter(id => id !== member.id);
+    state.excludedMemberIds = state.excludedMemberIds.filter(id => id !== member.id);
     requestsChangedSinceGenerate = true;
     saveState();
     renderMemberTable();
@@ -1051,6 +1056,7 @@
 
   function renderMemberTable() {
     renderOnceLimitUI();
+    renderExcludedUI();
     memberTableBodyEl.innerHTML = "";
     memberLocationSortArrowEl.textContent =
       memberLocationSortDir === "asc" ? "▲" : memberLocationSortDir === "desc" ? "▼" : "";
@@ -1334,7 +1340,7 @@
     const activeMember = activeScheduleMemberId ? memberById(activeScheduleMemberId) : null;
 
     const registeredCount = new Set(state.requests.map(r => r.memberId)).size;
-    requestSummaryEl.textContent = "가능 시간 등록 " + registeredCount + "명 · 미등록 " + (state.members.length - registeredCount) + "명";
+    requestSummaryEl.textContent = "등록 " + registeredCount + "명 · 미등록 " + (state.members.length - registeredCount) + "명";
     requestSummaryEl.style.display = "";
 
     sortedMembers.forEach(member => {
@@ -1451,6 +1457,12 @@
     return requestCells(req).every(k => availableCells.has(k));
   }
 
+  // "미배정 회원"으로 지정된 회원의 신청은 후보 생성에서 아예 빼고 계산한다(다른 조건은
+  // 그대로 두고 그 회원만 등록조차 안 한 것처럼 취급).
+  function isEligibleRequest(req) {
+    return isWithinAvailability(req) && !state.excludedMemberIds.includes(req.memberId);
+  }
+
   // day가 days(회원이 이미 배정된 요일들) 중 하나와 연속된 이틀을 이루는지 확인한다.
   // 일요일은 다루지 않으므로(토~월 사이에 쉬는 일요일이 끼어 있음) 주 경계 wraparound는 연속으로 보지 않는다.
   function isAdjacentDay(day, days) {
@@ -1477,7 +1489,7 @@
     return Math.ceil(raw / SLOT_MIN) * SLOT_MIN;
   }
 
-  // "후보D" 전용 tie-break(preferDaytime 옵션)의 "낮 시간대 우선"에 쓴다 — 18시 이전에
+  // "후보G" 전용 tie-break(preferDaytime 옵션)의 "낮 시간대 우선"에 쓴다 — 18시 이전에
   // 시작하는 신청인지만 보면 된다.
   const DAYTIME_END_MIN = 18 * 60;
   function isDaytimeStart(cand) {
@@ -1492,7 +1504,7 @@
   }
 
   // 그 요일의 지점 간 이동 횟수(시간순으로 지점이 바뀌는 지점 수, 이동 시간이 0분인 지점
-  // 쌍은 실제 이동으로 치지 않음)를 센다. "하루 이동은 최소화하며 최대 3회까지" 조건에 쓴다.
+  // 쌍은 실제 이동으로 치지 않음)를 센다. "하루 이동은 최소화하며 최대 허용 횟수까지" 조건에 쓴다.
   function dailyTravelCount(chain) {
     let count = 0;
     for (let i = 1; i < chain.length; i++) {
@@ -1502,7 +1514,7 @@
   }
 
   // 후보 조건을 지키며 배정한다: 회원당 1일 최대 1회, 최대 2회까지(상담 회원은 최대 1회까지), 하루 지점 간 이동은
-  // 최소화하되 최대 3회까지 하며, 스케줄과 이동시간은
+  // 최소화하되 기본 최대 3회까지(options.maxTravelsPerDay로 후보마다 강화 가능, 예: 후보F는 2회) 하며, 스케줄과 이동시간은
   // 겹치지 않게, 그리고 "이동시간·휴식시간을 제외한 빈 시간은 없도록" 한다. 다만 빈 시간을
   // 최대 ALLOWED_GAP_MIN분까지 허용했을 때 실제로 배정되는 수업(세션) 개수가 늘어난다면,
   // 그만큼만 예외로 허용한다(맨 아래 runWithGapPolicy 참고).
@@ -1524,12 +1536,12 @@
   //   인원을 줄이면서까지 강제하지는 않는, 동점 상황에서만 작동하는 선호다.)
   // options: { travelFirst: 인원(가중치 합)보다 이동 시간 최소화를 먼저 비교한다 —
   //   그래도 "빈 시간 없음"은 체인 구조 자체가 보장하므로 항상 유지된다.
-  //   preferDaytime: 인원·이동까지 같으면("후보D") 낮 시간대(18시 이전 시작) 세션이 많이
+  //   preferDaytime: 인원·이동까지 같으면("후보G") 낮 시간대(18시 이전 시작) 세션이 많이
   //   들어간 체인을 우선한다 — 저녁보다 낮에 몰아 배정하면 그만큼 그날 안에서 이동할 수 있는
   //   여지(뒤에 이어붙일 다른 회원)가 늘어나 결과적으로 이동을 줄이는 데 도움이 된다는 전제.
   //   groupByLocation: 그 다음으로(또는 preferDaytime 없이 바로) 같은 지점이 연달아
   //   이어지는(지점을 덜 옮겨다니는) 체인을 우선한다.
-  //   minimizeUnassigned("후보C"): 기본 순서로 한 번 배정해보고, 1단계(아직 아무 것도 못
+  //   minimizeUnassigned("후보H"): 기본 순서로 한 번 배정해보고, 1단계(아직 아무 것도 못
   //   받은 회원 채우기)에서 신청 가능한 회원이 적은(대안이 좁은) 요일부터 먼저 채우는
   //   순서로 한 번 더 배정해본 뒤, 실제로 배정된 인원이 더 많은 쪽을 택한다 — 요일 순서를
   //   바꾸는 것만으로는 항상 더 나아진다는 보장이 없으므로(체인끼리 얽혀 있으면 오히려
@@ -1542,7 +1554,25 @@
     const preferDaytime = !!options.preferDaytime;
     const groupByLocation = !!options.groupByLocation;
     const minimizeUnassigned = !!options.minimizeUnassigned;
-    const pinnedLocationDay = options.pinnedLocationDay || null; // { day, locationId } — 후보E/F
+    const pinnedLocationDay = options.pinnedLocationDay || null; // { day, locationId } — 후보I/J
+    const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY; // 후보F는 2회로 강화
+    const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보B·C·D)
+    // 후보A: 인원 → 이동 횟수까지만 비교하고 멈춘다 — 이동 시간, 이동시간+빈시간 합, 정렬,
+    // 슬랙 같은 세부 기준은 쓰지 않는다("인원을 최대화하도록 배정합니다. 동점이면 이동
+    // 횟수가 적은 쪽을 우선합니다."에 정확히 대응시키기 위함).
+    const travelCountOnly = !!options.travelCountOnly;
+
+    // 숨김 하드 로직(회원 개인 사정으로 인한 예외, 후보 조건에는 노출하지 않음): 상암점·여의도점·
+    // 마포점 세 지점을 모두 다니는 회원은 "이동-회원-이동"(도착도 이동, 떠날 때도 이동 — 그
+    // 지점에 그 회원 혼자만 있는 경우)으로 배정될 수 없다. 같은 지점에서 다른 회원과 붙어
+    // 있으면(이동-회원-다른회원-이동) 괜찮다. buildBestChain predecessor 탐색에서, 이 회원
+    // 자신도 이동으로 도착한 노드일 때 그 다음도 이동으로 이어지려는 연결만 걸러낸다(아래
+    // arrivedViaTravel/soloTravelMemberIds 참고).
+    const SOLO_TRAVEL_LOCATION_NAMES = ["상암점", "여의도점", "마포점"];
+    const soloTravelLocationIds = state.locations.filter(l => SOLO_TRAVEL_LOCATION_NAMES.includes(l.name)).map(l => l.id);
+    const soloTravelMemberIds = soloTravelLocationIds.length === SOLO_TRAVEL_LOCATION_NAMES.length
+      ? new Set(state.members.filter(m => soloTravelLocationIds.every(id => m.locationIds.includes(id))).map(m => m.id))
+      : new Set();
 
     // 정렬 순서(전략별 동점 처리 포함)를 "이 신청이 얼마나 우선인가"로만 쓴다 — 체인을 이을 때
     // 여러 후보가 동시에 맞물릴 수 있으면 순위가 앞선 쪽을 고르고, 체인 길이가 같으면 순위
@@ -1561,7 +1591,7 @@
     }
 
     // 하루치 배정을 처음부터 끝까지 한 번 실행한다(1~3단계 전체). stage1Order로 1단계에서
-    // 요일을 처리하는 순서만 바꿀 수 있다 — minimizeUnassigned 옵션("후보C")이 이 순서를
+    // 요일을 처리하는 순서만 바꿀 수 있다 — minimizeUnassigned 옵션("후보H")이 이 순서를
     // 두 가지로 각각 시도해보고 더 나은 쪽을 고르는 데 쓴다. allowGapMin은 이번 실행에서
     // 세션 사이에 추가로 허용할 공강(분) 한도다 — 아래 runWithGapPolicy가 0(엄격)과
     // ALLOWED_GAP_MIN(완화)을 각각 시도해보고 실제로 세션 수가 늘어날 때만 완화 쪽을 쓴다.
@@ -1584,6 +1614,18 @@
       chainByDay.get(day).push(located);
     }
 
+    // maxTravelsPerWeek 옵션("새 후보": 일주일 총 이동 횟수 제한)에 쓴다 — day를 제외한 나머지
+    // 요일에서 이미 확정된 이동 횟수의 합을 구해, 그 요일의 체인을 짜거나 늘릴 때 "이 요일
+    // 자체 이동 횟수 + 다른 요일 합"이 주간 한도를 넘지 않는지 확인하는 데 쓴다.
+    function weeklyTravelUsedExcluding(day) {
+      let total = 0;
+      chainByDay.forEach((chain, d) => {
+        if (d === day) return;
+        total += dailyTravelCount(chain);
+      });
+      return total;
+    }
+
     // 그 요일 후보 전원을 대상으로, "빈 시간 없는" 최장(가중치 합이 가장 큰) 체인을 DP로 찾는다.
     // weightFn(memberId)이 주어지면(1단계에서만 씀) 단순히 세션 "개수"가 아니라 회원별 가중치의
     // 합을 최대화한다 — 이래야 그 요일에 유독 신청이 촘촘한 다른 회원들 덕분에 체인이 길어질
@@ -1596,11 +1638,14 @@
     // 끝나는 이전 세션"을 매번 전체를 훑지 않고 바로 찾을 수 있다.
     // endBefore가 있으면({slot, locationId}), 하루 전체가 아니라 그 시각·지점 앞에 정확히
     // 맞물려 끝나는 체인만 찾는다 — 확정(고정)된 세션 앞의 빈 시간을 채울 때 쓴다.
-    // onlyLocationId가 있으면(후보E/F의 "지점 우선 배정" 사전 단계), 그 지점을 등록해둔
+    // onlyLocationId가 있으면(후보I/J의 "지점 우선 배정" 사전 단계), 그 지점을 등록해둔
     // 회원의 그 지점 후보만으로 체인을 짠다 — 같은 지점끼리는 이동 시간이 0이므로, 이 체인은
     // 곧 "그 요일에 그 지점으로 최대한 많이 배정하는" 결과가 된다.
     function buildBestChain(day, eligibleMemberIds, weightFn, endBefore, onlyLocationId) {
       weightFn = weightFn || (() => 1);
+      // 이 함수 실행 동안(= day 하루치 체인을 짜는 동안) 다른 요일의 확정 이동 횟수는 바뀌지
+      // 않으므로 한 번만 구해둔다.
+      const otherDaysTravelUsed = maxTravelsPerWeek != null ? weeklyTravelUsedExcluding(day) : 0;
       const cands = (byDay.get(day) || []).filter(r => eligibleMemberIds.has(r.memberId)
         && (!endBefore || r.startSlot + durationToSlots(r.duration) <= endBefore.slot));
       const nodes = [];
@@ -1614,26 +1659,31 @@
       nodes.sort((a, b) => a.end - b.end || priorityRank.get(a.cand.id) - priorityRank.get(b.cand.id));
 
       // "하루 이동은 최소화"를 실제로 반영하려면, 인원(가중치 합)이 같은 체인들 사이에서는
-      // 이동 시간 합이 더 적은 쪽을 골라야 한다(travelFirst 옵션이 켜지면 이 둘의 우선순위를
-      // 아예 뒤집어, 이동 시간을 인원보다 먼저 비교한다). 그다음으로, 인원·이동까지 같으면
-      // 하루의 첫 수업이 30분 단위 시각(예: 13:00, 13:30)에 시작하는 체인을 우선한다 —
-      // 인원을 줄이면서까지 정렬을 강제하지는 않고, 이미 동점인 대안들 사이에서만 고른다.
-      // preferDaytime 옵션("후보D")이 켜지면 그다음으로 낮 시간대(18시 이전 시작) 세션이
-      // 많이 들어간 체인을 우선하고, groupByLocation 옵션이 켜지면 그다음으로 같은 지점이
-      // 연달아 이어지는(지점을 덜 옮겨다니는) 체인을 우선한다. 그래서 색인은 이 값들을
-      // 옵션에 맞는 순서로 정렬해둔다 — 맨 앞이 항상 "이 시각·지점에서 끝나는 세션 중
-      // 가장 좋은 것"이 되게.
+      // 이동 횟수가 더 적은 쪽을 골라야 한다(travelFirst 옵션이 켜지면 이 둘의 우선순위를
+      // 아예 뒤집어, 이동 횟수를 인원보다 먼저 비교한다). travelCountOnly 옵션("후보A")이
+      // 켜지면 여기서 비교를 멈춘다. 아니면 그마저 동점일 때 이동 시간 합이 더 적은 쪽을,
+      // 그마저 동점이면 이동 시간 합 + 빈 시간(슬랙) 합이 더 적은 쪽을(=이동 시간이 같다면
+      // 결국 빈 시간이 적은 쪽을) 고르고, 그다음으로 하루의 첫 수업이 30분 단위 시각(예:
+      // 13:00, 13:30)에 시작하는 체인을 우선한다 — 인원을 줄이면서까지 정렬을 강제하지는
+      // 않고, 이미 동점인 대안들 사이에서만 고른다. preferDaytime 옵션("후보G")이
+      // 켜지면 그다음으로 낮 시간대(18시 이전 시작) 세션이 많이 들어간 체인을 우선하고,
+      // groupByLocation 옵션이 켜지면 그다음으로 같은 지점이 연달아 이어지는(지점을 덜
+      // 옮겨다니는) 체인을 우선한다. 그래서 색인은 이 값들을 옵션에 맞는 순서로 정렬해둔다 —
+      // 맨 앞이 항상 "이 시각·지점에서 끝나는 세션 중 가장 좋은 것"이 되게.
       const index = new Map(); // `${end}|${locId}` -> node[] (가장 좋은 것부터)
       const key = (end, locId) => end + "|" + locId;
+      function timeCostOf(n) { return n.travelMinutesSum + n.idleMinutesSum; }
       function addToIndex(node) {
         const k = key(node.end, node.locationId);
         if (!index.has(k)) index.set(k, []);
         const list = index.get(k);
         list.push(node);
         list.sort((a, b) => travelFirst
-          ? (a.travelMinutesSum - b.travelMinutesSum) || (b.dp - a.dp) || (b.alignedScore - a.alignedScore)
+          ? (a.travelCount - b.travelCount) || (b.dp - a.dp)
+            || (travelCountOnly ? 0 : (a.travelMinutesSum - b.travelMinutesSum) || (timeCostOf(a) - timeCostOf(b)) || (b.alignedScore - a.alignedScore) || (a.soloSlackPenalty - b.soloSlackPenalty))
             || (preferDaytime ? b.daytimeScore - a.daytimeScore : 0) || (groupByLocation ? b.groupScore - a.groupScore : 0)
-          : (b.dp - a.dp) || (a.travelMinutesSum - b.travelMinutesSum) || (b.alignedScore - a.alignedScore)
+          : (b.dp - a.dp) || (a.travelCount - b.travelCount)
+            || (travelCountOnly ? 0 : (a.travelMinutesSum - b.travelMinutesSum) || (timeCostOf(a) - timeCostOf(b)) || (b.alignedScore - a.alignedScore) || (a.soloSlackPenalty - b.soloSlackPenalty))
             || (preferDaytime ? b.daytimeScore - a.daytimeScore : 0) || (groupByLocation ? b.groupScore - a.groupScore : 0));
       }
       function chainScore(node) {
@@ -1641,17 +1691,27 @@
         while (n) { s += priorityRank.get(n.cand.id); n = n.prev; }
         return s;
       }
-      // (dpA, travelA, alignedA, daytimeA, groupA)가 (dpB, travelB, alignedB, daytimeB, groupB)보다
-      // 나은지, 옵션에 맞게 비교한다.
-      function isBetterPair(dpA, travelA, alignedA, daytimeA, groupA, dpB, travelB, alignedB, daytimeB, groupB) {
+      // (dpA, countA, travelA, timeCostA, alignedA, slackPenA, daytimeA, groupA)가 (dpB, countB,
+      // travelB, timeCostB, alignedB, slackPenB, daytimeB, groupB)보다 나은지, 옵션에 맞게
+      // 비교한다. count는 하루 이동 횟수, travel은 이동 시간 합, timeCost는 이동 시간 합 + 빈
+      // 시간(슬랙) 합이다 — 기본 순서는 "인원 최대화 → 이동 횟수 최소화 → (travelCountOnly가
+      // 아니면) 이동 시간 최소화 → 총 이동시간+빈 시간의 합이 적은 쪽"(마지막 비교는 이동
+      // 시간이 이미 같으므로 사실상 빈 시간만 비교하는 셈이 된다). slackPen은 숨김 하드 로직(세 지점을 모두 다니는 회원)의
+      // 연장선인 숨김 소프트 선호다 — 그런 회원이 같은 지점 앞사람에게서 공강 슬랙을 써서
+      // 이어붙는 것보다는, 슬랙 없이 이어붙고 대신 그 뒤 이동 쪽에 슬랙이 남는 배치를 우선한다.
+      function isBetterPair(dpA, countA, travelA, timeCostA, alignedA, slackPenA, daytimeA, groupA, dpB, countB, travelB, timeCostB, alignedB, slackPenB, daytimeB, groupB) {
         if (travelFirst) {
-          if (travelA !== travelB) return travelA < travelB;
+          if (countA !== countB) return countA < countB;
           if (dpA !== dpB) return dpA > dpB;
         } else {
           if (dpA !== dpB) return dpA > dpB;
-          if (travelA !== travelB) return travelA < travelB;
+          if (countA !== countB) return countA < countB;
         }
+        if (travelCountOnly) return false;
+        if (travelA !== travelB) return travelA < travelB;
+        if (timeCostA !== timeCostB) return timeCostA < timeCostB;
         if (alignedA !== alignedB) return alignedA > alignedB;
+        if (slackPenA !== slackPenB) return slackPenA < slackPenB;
         if (preferDaytime && daytimeA !== daytimeB) return daytimeA > daytimeB;
         if (groupByLocation && groupA !== groupB) return groupA > groupB;
         return false;
@@ -1662,8 +1722,9 @@
         // 회원 중복 금지는 "바로 앞 세션"뿐 아니라 체인 전체를 봐야 하므로(usedMembers), 각
         // predLoc(어느 지점에서 왔는지)마다 그 버킷에서 가장 좋은(색인이 이미 그 순서로 정렬된)
         // 항목부터 훑어 회원이 겹치지 않는 첫 항목을 취하고, predLoc들 사이에서는 결과
-        // (dp, 이동 시간 합, 정렬 점수, 낮 시간대 점수, 지점 묶기 점수)를 서로 비교해 최종적으로 가장 좋은 것을 고른다.
-        let bestPrev = null, bestPrevDp = -Infinity, bestResultTravel = Infinity, bestResultAligned = -Infinity, bestResultDaytime = -Infinity, bestResultGroup = -Infinity, bestTravelCount = 0, bestTransitionMin = 0;
+        // (dp, 이동 횟수, 이동시간+빈시간 합, 정렬 점수, 낮 시간대 점수, 지점 묶기 점수)를
+        // 서로 비교해 최종적으로 가장 좋은 것을 고른다.
+        let bestPrev = null, bestPrevDp = -Infinity, bestResultTravelOnly = Infinity, bestResultTimeCost = Infinity, bestResultAligned = -Infinity, bestResultSlackPen = Infinity, bestResultDaytime = -Infinity, bestResultGroup = -Infinity, bestTravelCount = Infinity, bestTransitionMin = 0, bestSlackMin = 0;
         allLocIds.forEach(predLoc => {
           const need = requiredGapMin(predLoc, node.locationId);
           const transitionMin = travelMinutes(predLoc, node.locationId);
@@ -1675,13 +1736,26 @@
             if (!list) continue;
             for (const prevNode of list) {
               if (prevNode.usedMembers.has(node.cand.memberId)) continue;
+              // 숨김 하드 로직: 세 지점을 모두 다니는 회원이 이동으로 도착한 세션이면, 거기서
+              // 또 이동으로 이어지는 연결은 막는다("이동-회원-이동" 금지). 같은 지점에서 다른
+              // 회원에게 이어지는 것(이동-회원-다른회원-이동)은 transitionMin이 0이라 여기 걸리지 않는다.
+              if (soloTravelMemberIds.has(prevNode.cand.memberId)
+                && prevNode.arrivedViaTravel && transitionMin > 0) continue;
               const tc = prevNode.travelCount + (transitionMin > 0 ? 1 : 0);
-              if (tc > MAX_TRAVELS_PER_DAY) continue; // 하루 이동 최대 3회
-              const resultTravel = prevNode.travelMinutesSum + transitionMin;
-              if (!bestPrev || isBetterPair(prevNode.dp, resultTravel, prevNode.alignedScore, prevNode.daytimeScore, prevNode.groupScore, bestPrevDp, bestResultTravel, bestResultAligned, bestResultDaytime, bestResultGroup)) {
+              if (tc > maxTravelsPerDay) continue; // 하루 이동 최대 허용 횟수
+              if (maxTravelsPerWeek != null && otherDaysTravelUsed + tc > maxTravelsPerWeek) continue; // 일주일 총 이동 최대 허용 횟수
+              const resultTravelOnly = prevNode.travelMinutesSum + transitionMin;
+              const resultTimeCost = resultTravelOnly + prevNode.idleMinutesSum + slackMin;
+              // 숨김 소프트 로직: 세 지점을 모두 다니는 회원이 같은 지점 앞사람에게서 슬랙(공강)을
+              // 써서 이어붙으면 그만큼 페널티를 쌓는다 — 슬랙 없이 붙거나(0) 이동으로 이어지는 경우는 0.
+              const slackPenalty = (soloTravelMemberIds.has(node.cand.memberId)
+                && transitionMin === 0 && slackMin > 0) ? slackMin : 0;
+              const resultSlackPen = prevNode.soloSlackPenalty + slackPenalty;
+              if (!bestPrev || isBetterPair(prevNode.dp, tc, resultTravelOnly, resultTimeCost, prevNode.alignedScore, resultSlackPen, prevNode.daytimeScore, prevNode.groupScore, bestPrevDp, bestTravelCount, bestResultTravelOnly, bestResultTimeCost, bestResultAligned, bestResultSlackPen, bestResultDaytime, bestResultGroup)) {
                 bestPrevDp = prevNode.dp; bestPrev = prevNode; bestTravelCount = tc;
-                bestResultTravel = resultTravel; bestTransitionMin = transitionMin;
-                bestResultAligned = prevNode.alignedScore; bestResultDaytime = prevNode.daytimeScore; bestResultGroup = prevNode.groupScore;
+                bestResultTravelOnly = resultTravelOnly; bestResultTimeCost = resultTimeCost; bestTransitionMin = transitionMin; bestSlackMin = slackMin;
+                bestResultAligned = prevNode.alignedScore; bestResultSlackPen = resultSlackPen;
+                bestResultDaytime = prevNode.daytimeScore; bestResultGroup = prevNode.groupScore;
               }
               break; // 이 버킷에서는 이미 가장 좋은 순으로 정렬돼 있으니 첫 유효 항목이 최선
             }
@@ -1693,29 +1767,40 @@
           node.prev = bestPrev;
           node.travelCount = bestTravelCount;
           node.travelMinutesSum = bestPrev.travelMinutesSum + bestTransitionMin;
+          node.idleMinutesSum = bestPrev.idleMinutesSum + bestSlackMin;
           node.alignedScore = bestPrev.alignedScore; // 하루의 첫 세션이 정렬됐는지만 그대로 이어받는다
+          node.soloSlackPenalty = bestResultSlackPen;
           node.daytimeScore = bestPrev.daytimeScore + daytimeBonus;
           node.groupScore = bestPrev.groupScore + (bestPrev.locationId === node.locationId ? 1 : 0); // 지점을 바꾸지 않고 이어지면 +1
           node.usedMembers = new Set(bestPrev.usedMembers);
           node.usedMembers.add(node.cand.memberId);
+          node.arrivedViaTravel = bestPrev.locationId !== node.locationId;
         } else {
           node.dp = weightFn(node.cand.memberId);
           node.prev = null;
           node.travelCount = 0;
           node.travelMinutesSum = 0;
+          node.idleMinutesSum = 0;
           node.alignedScore = isHalfHourStart(node.cand) ? 1 : 0;
+          node.soloSlackPenalty = 0;
           node.daytimeScore = daytimeBonus;
           node.groupScore = 0;
           node.usedMembers = new Set([node.cand.memberId]);
+          node.arrivedViaTravel = false; // 하루의 첫 세션은 "이동해서 도착"이 아니라 그냥 시작
         }
         if (node.dp > -Infinity) {
           addToIndex(node);
-          const tie = best && node.dp === best.dp && node.travelMinutesSum === best.travelMinutesSum
-            && node.alignedScore === best.alignedScore
+          const nodeTimeCost = timeCostOf(node);
+          const bestTimeCost = best ? timeCostOf(best) : null;
+          const tie = best && node.dp === best.dp && node.travelCount === best.travelCount
+            && (travelCountOnly || node.travelMinutesSum === best.travelMinutesSum)
+            && (travelCountOnly || nodeTimeCost === bestTimeCost)
+            && (travelCountOnly || node.alignedScore === best.alignedScore)
+            && (travelCountOnly || node.soloSlackPenalty === best.soloSlackPenalty)
             && (!preferDaytime || node.daytimeScore === best.daytimeScore)
             && (!groupByLocation || node.groupScore === best.groupScore);
-          if (!best || isBetterPair(node.dp, node.travelMinutesSum, node.alignedScore, node.daytimeScore, node.groupScore,
-            best.dp, best.travelMinutesSum, best.alignedScore, best.daytimeScore, best.groupScore)
+          if (!best || isBetterPair(node.dp, node.travelCount, node.travelMinutesSum, nodeTimeCost, node.alignedScore, node.soloSlackPenalty, node.daytimeScore, node.groupScore,
+            best.dp, best.travelCount, best.travelMinutesSum, bestTimeCost, best.alignedScore, best.soloSlackPenalty, best.daytimeScore, best.groupScore)
             || (tie && chainScore(node) < chainScore(best))) best = node;
         }
       });
@@ -1727,12 +1812,19 @@
         chosen = null;
         allLocIds.forEach(loc => {
           const need = requiredGapMin(loc, endBefore.locationId);
+          const transitionMin = travelMinutes(loc, endBefore.locationId);
           for (let slackMin = 0; slackMin <= allowGapMin; slackMin += SLOT_MIN) {
             const gapSlots = (need + slackMin) / SLOT_MIN;
             const list = index.get(key(endBefore.slot - gapSlots, loc));
             if (!list || list.length === 0) continue;
-            const node = list[0]; // 이미 버킷 안에서 가장 좋은 순으로 정렬되어 있음
-            if (!chosen || isBetterPair(node.dp, node.travelMinutesSum, node.alignedScore, node.daytimeScore, node.groupScore, chosen.dp, chosen.travelMinutesSum, chosen.alignedScore, chosen.daytimeScore, chosen.groupScore)) {
+            // 이미 버킷 안에서 가장 좋은 순으로 정렬되어 있으니 첫 유효 항목을 쓴다 — 다만
+            // 숨김 하드 로직에 걸리는 회원이면("이동-회원-이동") 다음 후보를 본다.
+            const node = list.find(n => !(soloTravelMemberIds.has(n.cand.memberId)
+              && n.arrivedViaTravel && transitionMin > 0));
+            if (!node) continue;
+            const nodeTimeCost = timeCostOf(node);
+            const chosenTimeCost = chosen ? timeCostOf(chosen) : null;
+            if (!chosen || isBetterPair(node.dp, node.travelCount, node.travelMinutesSum, nodeTimeCost, node.alignedScore, node.soloSlackPenalty, node.daytimeScore, node.groupScore, chosen.dp, chosen.travelCount, chosen.travelMinutesSum, chosenTimeCost, chosen.alignedScore, chosen.soloSlackPenalty, chosen.daytimeScore, chosen.groupScore)) {
               chosen = node;
             }
           }
@@ -1750,8 +1842,7 @@
     }
 
     // 이미 확정된 체인 뒤에 정확히 맞물리는 다음 신청을, 우선순위가 가장 앞선 것부터 하나씩
-    // 이어붙인다(앞으로만 확장 — 1단계에서 이미 그 요일의 가장 좋은 시작점을 찾아뒀으므로,
-    // 뒤로 늘리는 것만으로 충분하다).
+    // 이어붙인다(뒤쪽으로만 확장 — 앞쪽 빈 시간은 아래 extendChainBackward가 별도로 채운다).
     function extendExistingChain(day, eligibleMemberIds) {
       let chain = chainByDay.get(day) || [];
       if (chain.length === 0) return;
@@ -1761,6 +1852,11 @@
       while (extending) {
         extending = false;
         const chainEnd = chain[chain.length - 1];
+        // 숨김 하드 로직: chainEnd가 세 지점을 모두 다니는 회원이고 그 자신도 이동으로
+        // 도착했다면, 여기서 또 이동으로 이어붙이는 것은 막는다("이동-회원-이동" 금지,
+        // buildBestChain의 동일 로직 참고).
+        const chainEndArrivedViaTravel = chain.length >= 2 && chain[chain.length - 2].locationId !== chainEnd.locationId;
+        const chainEndIsSoloTravelMember = soloTravelMemberIds.has(chainEnd.memberId) && chainEndArrivedViaTravel;
         // "하루 이동은 최소화"하기 위해, 여러 회원이 동시에 이어붙을 수 있으면 이동 시간이
         // 적게 드는 쪽을 먼저 고르고, 그래도 같으면 우선순위(priorityRank)로 정한다.
         let bestCand = null, bestLocated = null, bestCost = Infinity;
@@ -1772,6 +1868,7 @@
             const actual = (cand.startSlot - (chainEnd.startSlot + durationToSlots(chainEnd.duration))) * SLOT_MIN;
             if (actual < need || actual > need + allowGapMin) return;
             const cost = travelMinutes(chainEnd.locationId, locId);
+            if (chainEndIsSoloTravelMember && cost > 0) return;
             if (!bestLoc || cost < bestLoc.cost) bestLoc = { locId, cost };
           });
           if (!bestLoc) return;
@@ -1787,7 +1884,10 @@
           }
         });
         if (bestLocated) {
-          if (dailyTravelCount([...chain, bestLocated]) > MAX_TRAVELS_PER_DAY) break; // 하루 이동 최대 3회
+          const projectedChain = [...chain, bestLocated];
+          if (dailyTravelCount(projectedChain) > maxTravelsPerDay) break; // 하루 이동 최대 허용 횟수
+          if (maxTravelsPerWeek != null
+            && weeklyTravelUsedExcluding(day) + dailyTravelCount(projectedChain) > maxTravelsPerWeek) break; // 일주일 총 이동 최대 허용 횟수
           commit(day, bestLocated);
           chain = chainByDay.get(day);
           usedMembers.add(bestCand.memberId);
@@ -1796,9 +1896,39 @@
       }
     }
 
+    // extendExistingChain이 체인 뒤쪽만 확장하는 것과 대칭으로, 체인 맨 앞(가장 이른 확정
+    // 세션) 앞의 빈 시간을 채운다. 확정(고정) 세션 앞을 채울 때 쓰던 buildBestChain의
+    // endBefore 기능을 그대로 재사용해, 체인 시작점 앞에 정확히 맞물리는 최선의 체인을
+    // 찾는다. 앞뒤를 합친 하루 전체가 "하루 이동 최대 허용 횟수"를 넘기면 적용하지 않는다(앞쪽
+    // 체인 자체는 자기 안에서 이 한도를 지키지만, 기존 체인과 이어지는 지점에서의 이동은
+    // buildBestChain이 알지 못하므로 합친 뒤 다시 확인해야 한다).
+    function extendChainBackward(day, eligibleMemberIds, weightFn) {
+      const chain = chainByDay.get(day) || [];
+      if (chain.length === 0) return;
+      const usedMembers = new Set(chain.map(s => s.memberId));
+      const remaining = new Set([...eligibleMemberIds].filter(id => !usedMembers.has(id)));
+      if (remaining.size === 0) return;
+      const chainStart = chain[0];
+      const frontChain = buildBestChain(day, remaining, weightFn, { slot: chainStart.startSlot, locationId: chainStart.locationId });
+      if (frontChain.length === 0) return;
+      const combined = [...frontChain, ...chain];
+      if (dailyTravelCount(combined) > maxTravelsPerDay) return;
+      if (maxTravelsPerWeek != null && weeklyTravelUsedExcluding(day) + dailyTravelCount(combined) > maxTravelsPerWeek) return;
+      frontChain.forEach(s => {
+        assigned.push(s);
+        if (!memberDays.has(s.memberId)) memberDays.set(s.memberId, new Set());
+        memberDays.get(s.memberId).add(day);
+      });
+      chainByDay.set(day, combined);
+    }
+
     function fillDay(day, eligibleMemberIds, weightFn) {
-      if ((chainByDay.get(day) || []).length > 0) extendExistingChain(day, eligibleMemberIds);
-      else buildBestChain(day, eligibleMemberIds, weightFn).forEach(s => commit(day, s));
+      if ((chainByDay.get(day) || []).length > 0) {
+        extendExistingChain(day, eligibleMemberIds);
+        extendChainBackward(day, eligibleMemberIds, weightFn);
+      } else {
+        buildBestChain(day, eligibleMemberIds, weightFn).forEach(s => commit(day, s));
+      }
     }
 
     // "각 회원은 최대한 1회 이상의 스케줄을 가질 수 있도록" 단계에서 쓸 가중치.
@@ -1809,8 +1939,8 @@
     }
 
     // 확정(고정)된 세션이 있으면, 그 요일의 맨 앞부터 첫 확정 세션 앞까지의 빈 시간을 먼저
-    // 체인으로 채운 뒤 확정 세션들을 시간순으로 커밋한다. 이후 1~3단계는 (extendExistingChain이
-    // 항상 체인의 맨 뒤에서부터만 이어붙이므로) 가장 늦은 확정 세션 뒤쪽만 이어서 채우게 된다 —
+    // 체인으로 채운 뒤 확정 세션들을 시간순으로 커밋한다. 이후 1~3단계는 extendExistingChain으로
+    // 가장 늦은 세션 뒤쪽을, extendChainBackward로 가장 이른 세션 앞쪽을 각각 채운다 —
     // 확정 세션이 여러 개인 날, 그 사이사이의 빈 시간까지 채우는 것은 지원하지 않는다(드문
     // 경우라 범위 밖으로 둔다). 확정 세션과 겹치거나 간격이 부족한 다른 신청은, 체인이 정확히
     // 맞물리는 항목만 잇는 구조상 애초에 선택되지 않는다.
@@ -1832,7 +1962,7 @@
     }
 
     // 지정한 요일에는, 지정한 지점만으로 만들 수 있는 최대(가장 많이 배정되는) 체인을 1단계보다
-    // 먼저 확정한다("후보E": 수요일 상암점, "후보F": 금요일 마포점). 그 요일에 이미 확정(고정)된
+    // 먼저 확정한다("후보I": 수요일 상암점, "후보J": 금요일 마포점). 그 요일에 이미 확정(고정)된
     // 세션이 있으면 충돌을 피해 건드리지 않는다. 이후 1~3단계는 이 체인 뒤(extendExistingChain)와
     // 나머지 요일에서 평소처럼 진행되므로 "그 지점을 최대한 먼저 배정하고 나머지를 배정"이 된다.
     if (pinnedLocationDay && !(pinned.some(p => p.day === pinnedLocationDay.day)) && (byDay.get(pinnedLocationDay.day) || []).length > 0) {
@@ -1871,7 +2001,7 @@
     }
 
     // 주어진 공강 허용 한도(allowGapMin)로 배정을 한 번 완결한다. 기본은 요일 순서
-    // 그대로 한 번 실행한다. minimizeUnassigned 옵션("후보C")이 켜지면, "신청 가능한
+    // 그대로 한 번 실행한다. minimizeUnassigned 옵션("후보H")이 켜지면, "신청 가능한
     // 회원이 적은(대안이 좁은) 요일부터 먼저 채우면 미배정이 줄어들 것"이라는 가설로
     // 1단계 처리 순서를 바꿔 한 번 더 실행해보고, 두 결과 중 실제로 배정된 회원 수가
     // 더 많은 쪽을 택한다(동점이면 총 세션 수가 많은 쪽, 그래도 동점이면 기본 순서를 우선한다).
@@ -1917,6 +2047,24 @@
     return total;
   }
 
+  // 이 후보의 한 주 전체에서 실제로 지점을 옮겨야 했던 횟수(요일별로 이동 시간이 0분보다
+  // 큰 전환만 센다 — dailyTravelCount와 같은 기준). "총 이동 n번" 배지에 쓴다.
+  function totalTravelCount(assigned) {
+    let total = 0;
+    const byDay = new Map();
+    assigned.forEach(r => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    byDay.forEach(reqs => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        if (travelMinutes(sorted[i - 1].locationId, sorted[i].locationId) > 0) total++;
+      }
+    });
+    return total;
+  }
+
   function buildCandidate(title, desc, sortedReqs, eligibleSet, allMemberIds, options, pinned) {
     const assigned = greedyAssign(sortedReqs.filter(r => eligibleSet.has(r.id)), options, pinned);
     const assignedMemberIds = new Set(assigned.map(r => r.memberId));
@@ -1957,10 +2105,11 @@
   // 바로 위 경고대로 실제 시간 순서와 어긋나는 신청이 먼저 채워져 빈 시간이 남을 수 있다.
   // (그런 "지점별로 묶기"가 필요하면 groupByLocation 옵션으로 buildBestChain의 체인 선택
   // 단계에서만, 이미 완성된 동점 체인들 사이에서 고르게 한다 — 정렬 자체를 건드리지 않는다.)
-  // 후보B는 jitter로 동점 순서만 다르게 섞어 다른 배치를 보여준다. 후보D는 preferDaytime
-  // 옵션으로 "인원·이동까지 같으면 낮 시간대(18시 이전 시작) 우선"을 추가한다. 후보C는
-  // minimizeUnassigned 옵션으로, 기본 순서와 "대안이 좁은 요일부터 먼저 채우는" 순서를 둘 다
-  // 시도해보고 실제로 미배정 회원이 더 적은 쪽을 택한다.
+  // 후보B·C·D는 maxTravelsPerWeek 옵션으로 일주일 총 이동 횟수 한도를 각각 5회·4회·3회로
+  // 제한한다. 후보E·F는 maxTravelsPerDay 옵션으로 하루 이동 횟수 한도를 각각 1회·2회로
+  // 제한/강화한다. 후보G는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
+  // 이전 시작) 우선"을 추가한다. 후보H는 minimizeUnassigned 옵션으로, 기본 순서와 "대안이
+  // 좁은 요일부터 먼저 채우는" 순서를 둘 다 시도해보고 실제로 미배정 회원이 더 적은 쪽을 택한다.
   function defaultSort(eligible, jitter) {
     return [...eligible].sort((a, b) =>
       a.day - b.day
@@ -1969,7 +2118,7 @@
       || reqEnd(a) - reqEnd(b));
   }
 
-  // 후보E/F("지점 우선 배정")용: 이름으로 지점을 찾아 { day, locationId } 형태로 돌려준다.
+  // 후보I/J("지점 우선 배정")용: 이름으로 지점을 찾아 { day, locationId } 형태로 돌려준다.
   // 지점 이름이 바뀌었거나 삭제됐으면 null을 돌려주고, 이때 greedyAssign은 이 사전 단계를
   // 그냥 건너뛴다(다른 조건은 정상 적용, 에러 없이 후보A와 같은 배치가 된다).
   function pinnedLocationDayFor(day, locationName) {
@@ -1977,45 +2126,71 @@
     return loc ? { day, locationId: loc.id } : null;
   }
 
-  // 표시 순서는 "계산 기준이 같은 것부터"로 정리한다: A(기본) → B(A와 기준은 같고 동점 순서만
-  // 다르게 섞은 대안) → C(A와 기준은 같고 요일 처리 순서를 바꿔보는 대안) → D(A의 동점 기준에
-  // 낮 시간대 우선을 한 단계 더 추가한 대안) → E/F(특정 요일에 특정 지점을 최대한 먼저
-  // 배정하는 대안).
+  // 표시 순서는 사용자가 지정한 순서를 그대로 따른다: A(기본, 인원 → 이동 횟수까지만
+  // 비교하고 멈춘다) → B(A와 기준은 같고 일주일 총 이동 횟수를 5회로 제한) → C(A와 기준은
+  // 같고 일주일 총 이동 횟수를 4회로 제한) → D(A와 기준은 같고 일주일 총 이동 횟수를 3회로
+  // 제한) → E(A와 기준은 같고 하루 이동 횟수를 1회로 제한) → F(A와 기준은 같고 하루 이동
+  // 횟수를 2회로 강화) → G(A의 동점 기준에 낮 시간대 우선을 한 단계 더 추가한 대안) →
+  // H(A와 기준은 같고 요일 처리 순서를 바꿔보는 대안) → I/J(특정 요일에 특정 지점을 최대한
+  // 먼저 배정하는 대안).
   const STRATEGIES = [
     {
-      title: "후보A - 기본",
-      desc: "인원을 최대화하도록 배정합니다. 동점이면 이동 시간이 적은 쪽을 우선합니다.",
-      options: {},
+      title: "후보A - 수업 횟수 최대화",
+      desc: "인원을 최대화하도록 배정합니다. 동점이면 이동 횟수가 적은 쪽을 우선합니다.",
+      options: { travelCountOnly: true },
       sort: defaultSort
     },
     {
-      title: "후보B - 대안",
-      desc: "계산 기준은 후보A와 같습니다(인원 최대화 → 이동 최소화). 동점 순서만 다르게 섞어 다른 배치를 시도합니다.",
-      options: {},
-      randomizeInitial: true, // 후보A와 계산 기준이 같아 jitter가 0이면 첫 생성 때 후보A와 똑같이 나오므로, 처음부터 무작위로 섞는다.
+      title: "후보B - 일주일 총 이동 횟수 5회",
+      desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 5회로 제한합니다.",
+      options: { maxTravelsPerWeek: 5 },
       sort: defaultSort
     },
     {
-      title: "후보C - 미배정 최소화",
-      desc: "계산 기준은 후보A와 같습니다(인원 최대화 → 이동 최소화). 신청 가능한 회원이 적은 요일부터 먼저 채우는 방식도 함께 시도해보고, 미배정 회원이 더 적은 쪽을 택합니다.",
-      options: { minimizeUnassigned: true },
+      title: "후보C - 일주일 총 이동 횟수 4회",
+      desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 4회로 제한합니다.",
+      options: { maxTravelsPerWeek: 4 },
       sort: defaultSort
     },
     {
-      title: "후보D - 낮 시간대 우선",
-      desc: "계산 기준은 후보A와 같습니다(인원 최대화 → 이동 최소화). 그마저 동점이면 18시 이전에 시작하는 수업이 많은 배치를 우선합니다.",
+      title: "후보D - 일주일 총 이동 횟수 3회",
+      desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 3회로 제한합니다.",
+      options: { maxTravelsPerWeek: 3 },
+      sort: defaultSort
+    },
+    {
+      title: "후보E - 하루 이동 횟수 1회",
+      desc: "후보A와 같은 기준이지만, 하루 이동 횟수를 최대 1회까지로 제한합니다.",
+      options: { maxTravelsPerDay: 1 },
+      sort: defaultSort
+    },
+    {
+      title: "후보F - 하루 이동 횟수 2회",
+      desc: "후보A와 같은 기준이지만, 하루 이동 횟수를 최대 2회까지로 강화합니다.",
+      options: { maxTravelsPerDay: 2 },
+      sort: defaultSort
+    },
+    {
+      title: "후보G - 낮 시간대 우선",
+      desc: "후보A와 같은 기준이지만, 그마저 동점이면 18시 이전에 시작하는 수업이 많은 배치를 우선합니다.",
       options: { preferDaytime: true },
       sort: defaultSort
     },
     {
-      title: "후보E - 수요일 상암점 우선",
-      desc: "계산 기준은 후보A와 같습니다(인원 최대화 → 이동 최소화). 다만 수요일에는 상암점 수업을 최대한 먼저 배정한 뒤 나머지를 배정합니다.",
+      title: "후보H - 미배정 최소화",
+      desc: "후보A와 같은 기준이지만, 신청 가능한 회원이 적은 요일부터 먼저 채우는 방식도 함께 시도해보고 미배정 회원이 더 적은 쪽을 택합니다.",
+      options: { minimizeUnassigned: true },
+      sort: defaultSort
+    },
+    {
+      title: "후보I - 수요일 상암점 우선",
+      desc: "후보A와 같은 기준이지만, 수요일에는 상암점 수업을 최대한 먼저 배정한 뒤 나머지를 배정합니다.",
       options: () => ({ pinnedLocationDay: pinnedLocationDayFor(2, "상암점") }), // 수 = index 2
       sort: defaultSort
     },
     {
-      title: "후보F - 금요일 마포점 우선",
-      desc: "계산 기준은 후보A와 같습니다(인원 최대화 → 이동 최소화). 다만 금요일에는 마포점 수업을 최대한 먼저 배정한 뒤 나머지를 배정합니다.",
+      title: "후보J - 금요일 마포점 우선",
+      desc: "후보A와 같은 기준이지만, 금요일에는 마포점 수업을 최대한 먼저 배정한 뒤 나머지를 배정합니다.",
       options: () => ({ pinnedLocationDay: pinnedLocationDayFor(4, "마포점") }), // 금 = index 4
       sort: defaultSort
     }
@@ -2045,17 +2220,19 @@
   }
 
   function generateCandidates() {
-    const allMemberIds = new Set(state.requests.map(r => r.memberId));
-    const eligible = state.requests.filter(isWithinAvailability);
+    // "미배정 회원"으로 지정된 회원은 애초에 없었던 것처럼 취급한다 — 배정 대상에서도,
+    // (배정 실패가 아니라 의도적 제외이므로) 미배정 통계에서도 뺀다.
+    const allMemberIds = new Set(
+      state.requests.filter(r => !state.excludedMemberIds.includes(r.memberId)).map(r => r.memberId)
+    );
+    const eligible = state.requests.filter(isEligibleRequest);
     const eligibleIds = new Set(eligible.map(r => r.id));
+    // 모든 후보는 처음 생성할 때 재현 가능하도록 jitter를 0으로 시작한다(후보마다 계산
+    // 기준 자체가 달라 굳이 무작위로 섞지 않아도 서로 다른 배치가 나온다).
     const zeroJitter = new Map(eligible.map(r => [r.id, 0]));
-    // 후보B는 후보A와 계산 기준이 완전히 같아서, 둘 다 jitter가 0이면 처음 생성했을 때
-    // 똑같은 배치가 나온다. 그래서 후보B만 처음부터 무작위 jitter로 시작해 바로 다른
-    // 배치를 보여준다(다른 후보는 재현 가능하도록 0으로 시작).
-    const randomJitter = new Map(eligible.map(r => [r.id, Math.random()]));
 
     const built = STRATEGIES.map((strategy, idx) =>
-      buildCandidateFromStrategy(idx, eligible, eligibleIds, allMemberIds, strategy.randomizeInitial ? randomJitter : zeroJitter));
+      buildCandidateFromStrategy(idx, eligible, eligibleIds, allMemberIds, zeroJitter));
     built.forEach((cand, idx) => { candidateHistory[idx] = new Set([candidateSignature(cand)]); });
     return built;
   }
@@ -2072,7 +2249,7 @@
     const pinnedIds = new Set(
       (prevCand ? prevCand.assigned.filter(r => confirmedIds.has(r.id)) : []).map(r => r.id)
     );
-    return state.requests.some(r => isWithinAvailability(r) && !pinnedIds.has(r.id));
+    return state.requests.some(r => isEligibleRequest(r) && !pinnedIds.has(r.id));
   }
 
   function regenerateCandidate(strategyIndex) {
@@ -2084,14 +2261,34 @@
     const confirmedIds = new Set((prevCand && prevCand.confirmedIds) || []);
     const pinned = prevCand ? prevCand.assigned.filter(r => confirmedIds.has(r.id)) : [];
     const pinnedIds = new Set(pinned.map(r => r.id));
-    const allMemberIds = new Set(state.requests.map(r => r.memberId));
-    const eligible = state.requests.filter(r => isWithinAvailability(r) && !pinnedIds.has(r.id));
+    // "미배정 회원"으로 지정된 회원은 배정 대상·미배정 통계 모두에서 뺀다(단, 이미 확정된
+    // 세션은 그대로 유지된다 — 확정은 다른 설정보다 항상 우선한다).
+    const allMemberIds = new Set(
+      state.requests.filter(r => pinnedIds.has(r.id) || !state.excludedMemberIds.includes(r.memberId)).map(r => r.memberId)
+    );
+    const eligible = state.requests.filter(r => isEligibleRequest(r) && !pinnedIds.has(r.id));
     const eligibleIds = new Set(eligible.map(r => r.id));
+
+    // 재생성은 "다른 배치를 보여주는 것"이 목적이지, "후보 조건"의 우선순위(인원 최대화 →
+    // 이동 횟수 최소화)보다 못한 결과로 후퇴하는 것은 아니다. 기준(jitter 0) 결과의 총 수업
+    // 수·총 이동 횟수를 최소 허용선으로 삼아, 그보다 수업이 적거나(수업 수가 같은데) 이동이
+    // 더 많은 시도는 아무리 새로운 조합이어도 버린다 — 안 그러면 동점 tie-break가 요일 처리
+    // 순서에 따라 우연히 더 나쁜 조합으로 이어질 수 있는데, 그런 결과까지 "새 후보"로
+    // 보여주면 안 된다.
+    const zeroJitter = new Map(eligible.map(r => [r.id, 0]));
+    const baseline = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, zeroJitter, pinned);
+    const minAcceptableSessions = baseline.assigned.length;
+    const maxAcceptableTravelCountAtMinSessions = totalTravelCount(baseline.assigned);
 
     let newCand = null;
     for (let i = 0; i < REGEN_MAX_ATTEMPTS; i++) {
       const jitter = new Map(eligible.map(r => [r.id, Math.random()]));
       const attempt = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned);
+      if (attempt.assigned.length < minAcceptableSessions) continue; // 기준보다 수업이 적으면 버린다
+      // 수업 수가 기준과 동점일 때만 이동 횟수를 비교한다 — 수업 수가 기준보다 많다면
+      // "인원 최대화"가 "이동 횟수 최소화"보다 우선이므로 이동이 늘어도 받아들인다.
+      if (attempt.assigned.length === minAcceptableSessions
+        && totalTravelCount(attempt.assigned) > maxAcceptableTravelCountAtMinSessions) continue;
       const sig = candidateSignature(attempt);
       if (!seen.has(sig)) {
         newCand = attempt;
@@ -2102,8 +2299,7 @@
 
     if (!newCand) {
       if (!confirm("새로운 후보지가 없습니다. 처음 후보지부터 다시 표시하시겠습니까?")) return;
-      const zeroJitter = new Map(eligible.map(r => [r.id, 0]));
-      newCand = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, zeroJitter, pinned);
+      newCand = baseline;
       candidateHistory[strategyIndex] = new Set([candidateSignature(newCand)]);
       newCand.confirmedIds = [...confirmedIds];
       if (prevCand) {
@@ -2361,6 +2557,129 @@
     if (e.key === "Escape" && onceLimitDropdownOpen) closeOnceLimitDropdown();
   });
 
+  // "미배정 회원": 선택한 회원은 후보 생성에서 아예 제외한다(1회 제한 회원과 같은 칩+드롭다운
+  // UI를 그대로 따른다). 구분과 무관하게 모든 회원이 대상이다.
+  const excludedMsEl = document.getElementById("excludedMs");
+  const excludedControlEl = document.getElementById("excludedControl");
+  const excludedChipRowEl = document.getElementById("excludedChipRow");
+  const excludedDropdownEl = document.getElementById("excludedDropdown");
+  let excludedDropdownOpen = false;
+
+  function onExcludedChanged() {
+    // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 후보가 있으면 즉시 비운다.
+    if (candidates.length > 0) {
+      candidates = [];
+      renderCandidates();
+      generateHintEl.textContent = "미배정 회원 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
+    } else {
+      requestsChangedSinceGenerate = true;
+    }
+    saveState();
+    renderExcludedChips();
+    renderExcludedDropdown();
+  }
+
+  function addExcludedMember(memberId) {
+    if (state.excludedMemberIds.includes(memberId)) return;
+    state.excludedMemberIds = state.excludedMemberIds.concat(memberId);
+    onExcludedChanged();
+  }
+
+  function removeExcludedMember(memberId) {
+    state.excludedMemberIds = state.excludedMemberIds.filter(id => id !== memberId);
+    onExcludedChanged();
+  }
+
+  function renderExcludedChips() {
+    excludedChipRowEl.innerHTML = "";
+    const selectedMembers = state.excludedMemberIds
+      .map(id => memberById(id))
+      .filter(Boolean)
+      .sort(compareOnceLimitMembers);
+    if (selectedMembers.length === 0) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "ms-placeholder";
+      placeholder.textContent = "설정된 회원 없음";
+      excludedChipRowEl.appendChild(placeholder);
+      return;
+    }
+    selectedMembers.forEach(m => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      appendOnceLimitMemberLabel(chip, m);
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.textContent = "×";
+      removeBtn.title = "제거";
+      removeBtn.addEventListener("click", () => removeExcludedMember(m.id));
+      chip.appendChild(removeBtn);
+      excludedChipRowEl.appendChild(chip);
+    });
+  }
+
+  function renderExcludedDropdown() {
+    excludedDropdownEl.innerHTML = "";
+    const addable = state.members
+      .filter(m => !state.excludedMemberIds.includes(m.id))
+      .sort(compareOnceLimitMembers);
+    if (state.members.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "등록된 회원이 없습니다.";
+      excludedDropdownEl.appendChild(empty);
+      return;
+    }
+    if (addable.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "모든 회원이 이미 추가되어 있습니다.";
+      excludedDropdownEl.appendChild(empty);
+      return;
+    }
+    addable.forEach(m => {
+      const item = document.createElement("div");
+      item.className = "ms-option";
+      item.setAttribute("role", "option");
+      appendOnceLimitMemberLabel(item, m);
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        addExcludedMember(m.id);
+      });
+      excludedDropdownEl.appendChild(item);
+    });
+  }
+
+  function openExcludedDropdown() {
+    if (state.members.length === 0) return;
+    excludedDropdownOpen = true;
+    excludedMsEl.classList.add("open");
+    excludedControlEl.setAttribute("aria-expanded", "true");
+  }
+
+  function closeExcludedDropdown() {
+    excludedDropdownOpen = false;
+    excludedMsEl.classList.remove("open");
+    excludedControlEl.setAttribute("aria-expanded", "false");
+  }
+
+  excludedControlEl.addEventListener("click", () => {
+    if (excludedDropdownOpen) closeExcludedDropdown();
+    else openExcludedDropdown();
+  });
+
+  function renderExcludedUI() {
+    state.excludedMemberIds = state.excludedMemberIds.filter(id => !!memberById(id));
+    renderExcludedChips();
+    renderExcludedDropdown();
+  }
+
+  document.addEventListener("click", (e) => {
+    if (excludedDropdownOpen && !excludedMsEl.contains(e.target)) closeExcludedDropdown();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && excludedDropdownOpen) closeExcludedDropdown();
+  });
+
   const candidateRulesBlockEl = document.getElementById("candidateRulesBlock");
   const candidateRulesToggleEl = document.getElementById("candidateRulesToggle");
   candidateRulesToggleEl.addEventListener("click", () => {
@@ -2392,8 +2711,10 @@
 
   function renderCandidates() {
     candidatesEl.innerHTML = "";
-    const totalMembers = new Set(state.requests.map(r => r.memberId)).size;
-    const excludedCount = state.requests.length - state.requests.filter(isWithinAvailability).length;
+    // "미배정 회원"으로 제외한 회원은 애초에 대상이 아니었으므로 전체 인원 수에서도 뺀다.
+    const totalMembers = new Set(
+      state.requests.filter(r => !state.excludedMemberIds.includes(r.memberId)).map(r => r.memberId)
+    ).size;
 
     candidates.forEach((cand) => {
       const card = document.createElement("div");
@@ -2456,6 +2777,10 @@
       pill2.className = "stat-pill";
       pill2.textContent = "총 수업 " + cand.assigned.length + "건";
       stats.appendChild(pill2);
+      const pill3 = document.createElement("span");
+      pill3.className = "stat-pill";
+      pill3.textContent = "총 이동 " + totalTravelCount(cand.assigned) + "번";
+      stats.appendChild(pill3);
       card.appendChild(stats);
 
       const gridWrap = document.createElement("div");
@@ -2488,14 +2813,6 @@
 
       candidatesEl.appendChild(card);
     });
-
-    if (excludedCount > 0) {
-      const note = document.createElement("p");
-      note.className = "generate-hint";
-      note.style.gridColumn = "1 / -1";
-      note.textContent = "※ 근무 가능 시간을 벗어난 신청 " + excludedCount + "건은 후보 계산에서 제외되었습니다.";
-      candidatesEl.appendChild(note);
-    }
   }
 
   /* ---------------- Page navigation (left sidebar, no forced order) ---------------- */
