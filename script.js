@@ -39,8 +39,22 @@
   const OLD_STORAGE_KEY = "pt_schedule_state_v2"; // pre-migration key: 30분 슬롯 기준
   const OLD_SLOT_MIN = 30;
   const SLOT_SCALE = OLD_SLOT_MIN / SLOT_MIN; // 옛 슬롯 인덱스를 새 슬롯 인덱스로 환산
-  const DEFAULT_LOCATION_NAMES = ["상암점", "마포점", "여의도점"];
+  const DEFAULT_LOCATION_NAMES = ["여의도점", "상암점", "마포점"];
   const DEFAULT_TRAVEL_MIN = 30;
+  // 지점 쌍별 기본 이동 시간(분) — 이름 순서는 상관없이 두 이름을 짝으로 찾는다.
+  const DEFAULT_TRAVEL_PAIRS = [
+    ["여의도점", "상암점", 60],
+    ["여의도점", "마포점", 30],
+    ["상암점", "마포점", 30]
+  ];
+  function defaultTravelMinutesFor(nameA, nameB) {
+    const pair = DEFAULT_TRAVEL_PAIRS.find(([a, b]) => (a === nameA && b === nameB) || (a === nameB && b === nameA));
+    return pair ? pair[2] : DEFAULT_TRAVEL_MIN;
+  }
+  // 첫 실행 시 기본으로 채워둘 근무 가능 시간: 월~금 14:00~23:30 (토요일은 비워둠)
+  const DEFAULT_BUSINESS_DAY_INDICES = [0, 1, 2, 3, 4]; // 월~금
+  const DEFAULT_BUSINESS_START_MIN = 14 * 60;   // 14:00
+  const DEFAULT_BUSINESS_END_MIN = 23 * 60 + 30; // 23:30 (마지막으로 시작 가능한 시각)
 
   /* ---------------- State ---------------- */
   let state = {
@@ -182,14 +196,23 @@
     } catch (e) {
       console.warn("failed to load saved state", e);
     }
-    // First-ever run: seed the trainer's usual branches so the location step isn't empty.
+    // First-ever run: seed the trainer's usual branches, 지점 간 이동 시간, 근무 가능 시간
+    // 이 비어있지 않도록 기본값을 채워둔다.
     if (!hadSavedState && state.locations.length === 0) {
       state.locations = DEFAULT_LOCATION_NAMES.map(name => ({ id: uid("loc"), name }));
       for (let i = 0; i < state.locations.length; i++) {
         for (let j = i + 1; j < state.locations.length; j++) {
-          state.travelTimes[pairKey(state.locations[i].id, state.locations[j].id)] = DEFAULT_TRAVEL_MIN;
+          const locA = state.locations[i], locB = state.locations[j];
+          state.travelTimes[pairKey(locA.id, locB.id)] = defaultTravelMinutesFor(locA.name, locB.name);
         }
       }
+    }
+    if (!hadSavedState && availableCells.size === 0) {
+      DEFAULT_BUSINESS_DAY_INDICES.forEach(di => {
+        const startSlot = (DEFAULT_BUSINESS_START_MIN - START_MIN) / SLOT_MIN;
+        const endSlot = (DEFAULT_BUSINESS_END_MIN - START_MIN) / SLOT_MIN;
+        for (let s = startSlot; s < endSlot; s++) availableCells.add(cellKey(di, s));
+      });
     }
     // Migrate members saved under the old single-branch field (locationId) to the
     // multi-branch array (locationIds), backfilling from their first request if neither is set.
