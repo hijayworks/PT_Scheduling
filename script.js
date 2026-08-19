@@ -1624,7 +1624,7 @@
   }
 
   // 후보 조건을 지키며 배정한다: 회원당 1일 최대 1회, 최대 2회까지(상담 회원은 최대 1회까지), 하루 지점 간 이동은
-  // 최소화하되 기본 최대 3회까지(options.maxTravelsPerDay로 후보마다 강화 가능, 예: 후보F는 2회) 하며, 스케줄과 이동시간은
+  // 최소화하되 기본 최대 3회까지(options.maxTravelsPerDay로 후보마다 강화 가능, 예: 후보E는 2회) 하며, 스케줄과 이동시간은
   // 겹치지 않게, 그리고 "이동시간·휴식시간을 제외한 빈 시간은 없도록" 한다. 다만 빈 시간을
   // 최대 ALLOWED_GAP_MIN분까지 허용했을 때 실제로 배정되는 수업(세션) 개수가 늘어난다면,
   // 그만큼만 예외로 허용한다(맨 아래 runWithGapPolicy 참고).
@@ -1665,7 +1665,7 @@
     const groupByLocation = !!options.groupByLocation;
     const minimizeUnassigned = !!options.minimizeUnassigned;
     const pinnedLocationDay = options.pinnedLocationDay || null; // { day, locationId } — 후보I/J
-    const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY; // 후보F는 2회로 강화
+    const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY; // 후보E는 2회로 강화
     const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보B·C·D)
     // 후보A: 인원 → 이동 횟수까지만 비교하고 멈춘다 — 이동 시간, 이동시간+빈시간 합, 정렬,
     // 슬랙 같은 세부 기준은 쓰지 않는다("인원을 최대화하도록 배정합니다. 동점이면 이동
@@ -2218,8 +2218,8 @@
   // (그런 "지점별로 묶기"가 필요하면 groupByLocation 옵션으로 buildBestChain의 체인 선택
   // 단계에서만, 이미 완성된 동점 체인들 사이에서 고르게 한다 — 정렬 자체를 건드리지 않는다.)
   // 후보B·C·D는 maxTravelsPerWeek 옵션으로 일주일 총 이동 횟수 한도를 각각 5회·4회·3회로
-  // 제한한다. 후보E·F는 maxTravelsPerDay 옵션으로 하루 이동 횟수 한도를 각각 1회·2회로
-  // 제한/강화한다. 후보G는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
+  // 제한한다. 후보E·F는 maxTravelsPerDay 옵션으로 하루 이동 횟수 한도를 각각 2회·1회로
+  // 강화/제한한다. 후보G는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
   // 이전 시작) 우선"을 추가한다. 후보H는 minimizeUnassigned 옵션으로, 기본 순서와 "대안이
   // 좁은 요일부터 먼저 채우는" 순서를 둘 다 시도해보고 실제로 미배정 회원이 더 적은 쪽을 택한다.
   function defaultSort(eligible, jitter) {
@@ -2241,8 +2241,8 @@
   // 표시 순서는 사용자가 지정한 순서를 그대로 따른다: A(기본, 인원 → 이동 횟수까지만
   // 비교하고 멈춘다) → B(A와 기준은 같고 일주일 총 이동 횟수를 5회로 제한) → C(A와 기준은
   // 같고 일주일 총 이동 횟수를 4회로 제한) → D(A와 기준은 같고 일주일 총 이동 횟수를 3회로
-  // 제한) → E(A와 기준은 같고 하루 이동 횟수를 1회로 제한) → F(A와 기준은 같고 하루 이동
-  // 횟수를 2회로 강화) → G(A의 동점 기준에 낮 시간대 우선을 한 단계 더 추가한 대안) →
+  // 제한) → E(A와 기준은 같고 하루 이동 횟수를 2회로 강화) → F(A와 기준은 같고 하루 이동
+  // 횟수를 1회로 제한) → G(A의 동점 기준에 낮 시간대 우선을 한 단계 더 추가한 대안) →
   // H(A와 기준은 같고 요일 처리 순서를 바꿔보는 대안) → I/J(특정 요일에 특정 지점을 최대한
   // 먼저 배정하는 대안).
   const STRATEGIES = [
@@ -2271,15 +2271,15 @@
       sort: defaultSort
     },
     {
-      title: "후보E - 하루 이동 횟수 1회",
-      desc: "후보A와 같은 기준이지만, 하루 이동 횟수를 최대 1회까지로 제한합니다.",
-      options: { maxTravelsPerDay: 1 },
+      title: "후보E - 하루 이동 횟수 2회",
+      desc: "후보A와 같은 기준이지만, 하루 이동 횟수를 최대 2회까지로 강화합니다.",
+      options: { maxTravelsPerDay: 2 },
       sort: defaultSort
     },
     {
-      title: "후보F - 하루 이동 횟수 2회",
-      desc: "후보A와 같은 기준이지만, 하루 이동 횟수를 최대 2회까지로 강화합니다.",
-      options: { maxTravelsPerDay: 2 },
+      title: "후보F - 하루 이동 횟수 1회",
+      desc: "후보A와 같은 기준이지만, 하루 이동 횟수를 최대 1회까지로 제한합니다.",
+      options: { maxTravelsPerDay: 1 },
       sort: defaultSort
     },
     {
