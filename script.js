@@ -2828,10 +2828,6 @@
 
   function renderCandidates() {
     candidatesEl.innerHTML = "";
-    // "미배정 회원"으로 제외한 회원은 애초에 대상이 아니었으므로 전체 인원 수에서도 뺀다.
-    const totalMembers = new Set(
-      state.requests.filter(r => !state.excludedMemberIds.includes(r.memberId)).map(r => r.memberId)
-    ).size;
 
     candidates.forEach((cand) => {
       const card = document.createElement("div");
@@ -2883,20 +2879,27 @@
         card.appendChild(desc);
       }
 
-      const assignedMemberCount = new Set(cand.assigned.map(r => r.memberId)).size;
       const stats = document.createElement("div");
       stats.className = "candidate-stats";
       const pill1 = document.createElement("span");
       pill1.className = "stat-pill";
-      pill1.textContent = "배정 인원 " + assignedMemberCount + " / " + totalMembers + "명";
+      if (cand.unassignedMembers.length > 0) {
+        pill1.textContent = "미배정 " + cand.unassignedMembers.length + "명";
+      } else {
+        pill1.append("미배정 ");
+        const none = document.createElement("span");
+        none.className = "stat-pill-muted";
+        none.textContent = "없음";
+        pill1.appendChild(none);
+      }
       stats.appendChild(pill1);
       const pill2 = document.createElement("span");
       pill2.className = "stat-pill";
-      pill2.textContent = "총 수업 " + cand.assigned.length + "건";
+      pill2.textContent = "수업 " + cand.assigned.length + "건";
       stats.appendChild(pill2);
       const pill3 = document.createElement("span");
       pill3.className = "stat-pill";
-      pill3.textContent = "총 이동 " + totalTravelCount(cand.assigned) + "번";
+      pill3.textContent = "이동 " + totalTravelCount(cand.assigned) + "번";
       stats.appendChild(pill3);
       card.appendChild(stats);
 
