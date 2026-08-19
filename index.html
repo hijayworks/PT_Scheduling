@@ -90,7 +90,7 @@
               <li>각 회원은 최대 2회까지의 스케줄을 가질 수 있습니다. (상담 회원의 경우 최대 1회까지)</li>
               <li>1회 제한 회원에 선택된 회원은 수업 스케줄 생성 시 스케줄이 1회만 배정됩니다.</li>
               <li>하루 이동은 최소화하며, 이동할 경우 최대 3회까지 합니다.</li>
-              <li>이동시간, 휴식시간을 제외한 빈 시간은 없도록 합니다. (단, 빈 시간을 허용해서 수업의 횟수가 늘어난다면 빈 시간은 10분까지 허용합니다.)</li>
+              <li>이동시간, 휴식시간을 제외한 빈 시간은 없도록 합니다. (단, 빈 시간을 허용해서 수업의 횟수가 늘어난다면 10분까지 허용합니다.)</li>
               <li>각 회원은 최대한 1회 이상의 스케줄을 가질 수 있도록 합니다.</li>
               <li>인원을 최대화하도록 배정합니다.
                 <ul>
@@ -105,8 +105,7 @@
           <div class="day-start-block" id="excludedBlock">
             <p class="day-start-title" id="excludedTitle">미배정 회원 <span class="optional-tag">(선택사항)</span></p>
             <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 제외됩니다.</p>
-            <div class="once-limit-row">
-              <div class="chip-row" id="excludedChipRow"></div>
+            <div class="chip-row" id="excludedChipRow">
               <div class="ms once-limit-add" id="excludedMs">
                 <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="excludedControl" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="excludedTitle">+ 추가</button>
                 <div class="ms-dropdown" id="excludedDropdown" role="listbox"></div>
@@ -117,8 +116,7 @@
           <div class="day-start-block" id="onceLimitBlock">
             <p class="day-start-title" id="onceLimitTitle">1회 제한 회원 <span class="optional-tag">(선택사항)</span></p>
             <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 최대 1회만 배정됩니다. 상담회원은 무조건 1회만 배정됩니다.</p>
-            <div class="once-limit-row">
-              <div class="chip-row" id="onceLimitChipRow"></div>
+            <div class="chip-row" id="onceLimitChipRow">
               <div class="ms once-limit-add" id="onceLimitMs">
                 <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="onceLimitControl" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="onceLimitTitle">+ 추가</button>
                 <div class="ms-dropdown" id="onceLimitDropdown" role="listbox"></div>
@@ -144,7 +142,7 @@
 
       <form id="memberForm" class="request-form">
         <div class="field">
-          <label id="memberLocationLabel">지점</label>
+          <label id="memberLocationLabel">지점 <span class="label-hint">(중복 선택 가능)</span></label>
           <div class="ms" id="memberLocationMs">
             <button type="button" class="ms-control" id="memberLocationControl" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="memberLocationLabel">
               <span class="ms-chips" id="memberLocationChips"></span>
