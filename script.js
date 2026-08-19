@@ -51,10 +51,10 @@
     const pair = DEFAULT_TRAVEL_PAIRS.find(([a, b]) => (a === nameA && b === nameB) || (a === nameB && b === nameA));
     return pair ? pair[2] : DEFAULT_TRAVEL_MIN;
   }
-  // 첫 실행 시 기본으로 채워둘 근무 가능 시간: 월~금 14:00~23:30 (토요일은 비워둠)
+  // 첫 실행 시 기본으로 채워둘 근무 가능 시간: 월~금 14:00~23:40 (토요일은 비워둠)
   const DEFAULT_BUSINESS_DAY_INDICES = [0, 1, 2, 3, 4]; // 월~금
   const DEFAULT_BUSINESS_START_MIN = 14 * 60;   // 14:00
-  const DEFAULT_BUSINESS_END_MIN = 23 * 60 + 30; // 23:30 (마지막으로 시작 가능한 시각)
+  const DEFAULT_BUSINESS_END_MIN = 23 * 60 + 40; // 23:40 (마지막으로 시작 가능한 시각)
 
   /* ---------------- State ---------------- */
   let state = {
