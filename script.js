@@ -3,7 +3,7 @@
 
   /* ---------------- Constants ---------------- */
   const DAYS = ["월", "화", "수", "목", "금", "토"];
-  const START_MIN = 13 * 60;  // 13:00 (오후 1시)
+  const START_MIN = 12 * 60;  // 12:00 (정오) — 근무 가능 시간 시작 선택창에 12:00, 12:30도 넣기 위해 13:00에서 당김
   const END_MIN = 24 * 60;    // 24:00 (오전 12시)
   const SLOT_MIN = 10;
   const SLOT_COUNT = (END_MIN - START_MIN) / SLOT_MIN;
@@ -121,7 +121,26 @@
     state.availableCells = Array.from(availableCells);
     state.candidates = candidates;
     state.currentPage = currentPage;
+    state.startMinBase = START_MIN; // 슬롯 인덱스가 어느 시작 시각을 기준으로 저장됐는지 기록 (마이그레이션용)
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  }
+
+  // 근무 가능 시간 시작 선택창에 12:00, 12:30을 추가하면서 하루 슬롯의 기준 시각이 13:00에서
+  // 12:00으로 1시간(6슬롯) 당겨졌다. 옛 기준(13:00 또는 그 이전 버전)으로 저장된 슬롯 인덱스는
+  // 그대로 두면 시각이 1시간씩 밀려 보이므로, 새 기준에 맞게 전부 +shiftSlots만큼 옮겨준다.
+  // 이미 새 기준으로 저장된 데이터(startMinBase === START_MIN)는 다시 옮기지 않는다.
+  const LEGACY_START_MIN = 13 * 60;
+  function migrateStartMinShift(parsed) {
+    const savedBase = typeof parsed.startMinBase === "number" ? parsed.startMinBase : LEGACY_START_MIN;
+    if (savedBase === START_MIN) return;
+    const shiftSlots = (savedBase - START_MIN) / SLOT_MIN;
+    parsed.availableCells = (parsed.availableCells || []).map(key => {
+      const [dayStr, slotStr] = key.split("-");
+      return cellKey(parseInt(dayStr, 10), parseInt(slotStr, 10) + shiftSlots);
+    });
+    (parsed.requests || []).forEach(r => { r.startSlot += shiftSlots; });
+    // 옛 기준으로 계산된 후보는 시각이 안 맞으므로 다시 생성하도록 비운다.
+    parsed.candidates = [];
   }
 
   // Pre-page-nav saves stored a numeric wizard step (1~5); map it onto the closest page.
@@ -174,6 +193,7 @@
         }
       }
       if (parsed) {
+        migrateStartMinShift(parsed);
         hadSavedState = true;
         state.locations = parsed.locations || [];
         state.travelTimes = parsed.travelTimes || {};
@@ -663,6 +683,26 @@
     }
   }
 
+  // 근무 가능 시간(기본 설정) 전용 시간 선택창: 시작은 13:00~22:00, 종료는 14:00~24:00을
+  // 30분 단위로 보여주되, 23:00~24:00 구간만 10분 단위로 더 촘촘하게 보여준다.
+  function fillAvailabilityTimeSelect(sel, kind) {
+    sel.innerHTML = "";
+    const slots = [];
+    if (kind === "start") {
+      for (let m = 12 * 60; m <= 22 * 60; m += 30) slots.push((m - START_MIN) / SLOT_MIN);
+    } else {
+      const fineFromMin = 23 * 60;
+      for (let m = 14 * 60; m <= fineFromMin; m += 30) slots.push((m - START_MIN) / SLOT_MIN);
+      for (let m = fineFromMin + 10; m <= 24 * 60; m += 10) slots.push((m - START_MIN) / SLOT_MIN);
+    }
+    slots.forEach(s => {
+      const opt = document.createElement("option");
+      opt.value = String(s);
+      opt.textContent = minutesLabel(START_MIN + s * SLOT_MIN);
+      sel.appendChild(opt);
+    });
+  }
+
   function renderAvailabilityList() {
     availabilityListEl.innerHTML = "";
     DAYS.forEach((d, di) => {
@@ -690,8 +730,8 @@
       sep.className = "sep";
       sep.textContent = "~";
       const endSel = document.createElement("select");
-      fillTimeSelect(startSel, "start");
-      fillTimeSelect(endSel, "end");
+      fillAvailabilityTimeSelect(startSel, "start");
+      fillAvailabilityTimeSelect(endSel, "end");
       startSel.value = String(range ? range.start : 0);
       endSel.value = String(range ? range.end : SLOT_COUNT);
       startSel.disabled = !isOn;
