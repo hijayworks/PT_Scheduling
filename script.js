@@ -1208,12 +1208,17 @@
       nameWrap.appendChild(nameSpan);
       tr.appendChild(nameCell);
 
-      // 메모
+      // 메모 (길어지면 잘리지 않고 여러 줄로 늘어나도록 textarea + 자동 높이 조절)
       const memoCell = document.createElement("td");
       memoCell.className = "memo-cell";
-      const memoInput = document.createElement("input");
-      memoInput.type = "text";
+      const memoInput = document.createElement("textarea");
+      memoInput.rows = 1;
       memoInput.value = member.memo || "";
+      const growMemo = () => {
+        memoInput.style.height = "auto";
+        memoInput.style.height = memoInput.scrollHeight + "px";
+      };
+      memoInput.addEventListener("input", growMemo);
       memoInput.addEventListener("change", () => setMemberMemo(member, memoInput.value));
       memoCell.appendChild(memoInput);
       tr.appendChild(memoCell);
@@ -1230,6 +1235,7 @@
       tr.appendChild(actionCell);
 
       memberTableBodyEl.appendChild(tr);
+      growMemo();
     });
   }
 

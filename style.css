@@ -390,7 +390,25 @@ body {
   color: var(--text);
 }
 .member-table input[type="text"]:focus { outline: 2px solid var(--primary-soft); border-color: var(--primary); }
-.member-table .memo-cell input { min-width: 160px; }
+.member-table .memo-cell textarea {
+  width: 100%;
+  min-width: 160px;
+  min-height: 34px;
+  box-sizing: border-box;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.4;
+  background: #fff;
+  color: var(--text);
+  resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.member-table .memo-cell textarea:focus { outline: 2px solid var(--primary-soft); border-color: var(--primary); }
 .member-table .action-cell { width: 32px; }
 .member-table .action-cell button {
   border: none; background: transparent; cursor: pointer;
