@@ -383,11 +383,15 @@
     }
 
     // travel/break-time indicators (이동·휴식 시간), rendered under the session blocks
+    // 표시 범위(rangeStart~rangeEnd) 밖으로 걸치는 부분은 잘라내고, 완전히 범위 밖이면 그리지 않는다.
     (options.travelBlocks || []).forEach(t => {
+      const clippedStart = Math.max(t.startSlot, rangeStart);
+      const clippedEnd = Math.min(t.startSlot + Math.round(t.duration / SLOT_MIN), rangeEnd);
+      if (clippedEnd <= clippedStart) return;
       const travel = document.createElement("div");
       travel.className = t.type === "break" ? "cal-break-block" : "cal-travel-block";
       travel.style.gridColumn = String(t.day + 2);
-      travel.style.gridRow = (t.startSlot - rangeStart + 2) + " / span " + Math.max(1, Math.round(t.duration / SLOT_MIN));
+      travel.style.gridRow = (clippedStart - rangeStart + 2) + " / span " + (clippedEnd - clippedStart);
       travel.title = t.label;
       travel.textContent = t.label;
       container.appendChild(travel);
@@ -395,6 +399,9 @@
 
     // blocks (assigned sessions) on top
     (options.blocks || []).forEach(b => {
+      const clippedStart = Math.max(b.startSlot, rangeStart);
+      const clippedEnd = Math.min(b.startSlot + durationToSlots(b.duration), rangeEnd);
+      if (clippedEnd <= clippedStart) return;
       const block = document.createElement("div");
       block.className = "cal-block" + (b.excluded ? " excluded" : "") + (b.confirmed ? " confirmed" : "");
       // 확정된 일정은 흰색을 넉넉히 섞은 배경으로 칠하고, 테두리는 원래 회원 색상 그대로 두껍게
@@ -406,7 +413,7 @@
         if (b.confirmed) block.style.borderColor = b.color;
       }
       block.style.gridColumn = String(b.day + 2);
-      block.style.gridRow = (b.startSlot - rangeStart + 2) + " / span " + durationToSlots(b.duration);
+      block.style.gridRow = (clippedStart - rangeStart + 2) + " / span " + (clippedEnd - clippedStart);
       block.title = b.label + (b.loc ? " (" + b.loc + ")" : "") + (b.sublabel ? " · " + b.sublabel : "");
       const nameEl = document.createElement("span");
       nameEl.className = "name";
@@ -672,10 +679,10 @@
   // 회원 스케줄 추가 · 수업 스케줄 생성 결과 그리드는 항상 12:00~24:00 전체를 보여주지 않고,
   // 근무 가능 시간(기본 설정)을 모두 포함하는 가장 좁은 "정시" 범위만 보여준다.
   // 예: 14:00~23:30 설정 → 14:00~24:00 표시 / 13:30~23:00 설정 → 13:00~23:00 표시.
-  // extraSlotBounds: 그리드에 실제로 그려질 블록이 근무 가능 시간 밖으로 나갈 수 있는 경우
-  // (예: 회원이 근무 가능 시간 밖 시간대를 희망 시간으로 등록한 경우), 그 블록까지 항상 포함하도록
-  // 범위를 넓히기 위한 {start, end} 슬롯 경계. 없으면 근무 가능 시간만으로 범위를 정한다.
-  function businessHoursGridRange(extraSlotBounds) {
+  // 회원이 근무 가능 시간 밖의 시간대를 희망 시간으로 등록했더라도 그리드 범위를 넓히지 않는다 —
+  // 근무 가능 시간 밖은 어차피 배정될 수 없으므로 굳이 보여줄 필요가 없다. 그 부분은
+  // renderGrid에서 범위 밖을 잘라내(clip) 그린다.
+  function businessHoursGridRange() {
     let minStart = null, maxEnd = null;
     DAYS.forEach((d, di) => {
       const range = dayRange(di);
@@ -683,10 +690,6 @@
       if (minStart === null || range.start < minStart) minStart = range.start;
       if (maxEnd === null || range.end > maxEnd) maxEnd = range.end;
     });
-    if (extraSlotBounds) {
-      if (minStart === null || extraSlotBounds.start < minStart) minStart = extraSlotBounds.start;
-      if (maxEnd === null || extraSlotBounds.end > maxEnd) maxEnd = extraSlotBounds.end;
-    }
     if (minStart === null) return { rangeStartSlot: 0, rangeEndSlot: SLOT_COUNT };
     const roundedStartMin = Math.floor((START_MIN + minStart * SLOT_MIN) / 60) * 60;
     const roundedEndMin = Math.ceil((START_MIN + maxEnd * SLOT_MIN) / 60) * 60;
@@ -1520,17 +1523,7 @@
     // 더 늦춰서 보여준다 (별도 구간으로 나누지 않고 하나의 블록에 합쳐서). 마감 시간은 넘지 않는다.
     const breakSlots = durationToSlots(BREAK_MIN);
 
-    // 회원이 근무 가능 시간 밖의 시간대를 희망 시간으로 등록했을 수 있으므로, 그 블록들도
-    // 항상 그리드 범위 안에 들어오도록 실제로 그려질 블록들의 최소/최대 슬롯을 함께 반영한다.
-    let reqMinStart = null, reqMaxEnd = null;
-    runs.forEach(run => {
-      const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);
-      if (reqMinStart === null || run.startSlot < reqMinStart) reqMinStart = run.startSlot;
-      if (reqMaxEnd === null || displayEndSlot > reqMaxEnd) reqMaxEnd = displayEndSlot;
-    });
-    const scheduleGridRange = businessHoursGridRange(
-      reqMinStart === null ? null : { start: reqMinStart, end: reqMaxEnd }
-    );
+    const scheduleGridRange = businessHoursGridRange();
     renderGrid(scheduleGridEl, availableCells, {
       blocks: runs.map(run => {
         const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);

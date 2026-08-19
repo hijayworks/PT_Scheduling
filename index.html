@@ -202,8 +202,15 @@
       <div class="settings-sections">
         <div class="settings-section">
           <h3 class="subsection-title">가능 시간 설정</h3>
-          <p class="card-desc subsection-desc">회원을 선택한 뒤, 요일별로 원하는 시작~종료 시간대를 각각 골라 "시간 추가"를 누르면 설정한 모든 요일의 시간대가 한 번에 등록됩니다.</p>
-          <p class="pc-only-note">🖥️ 등록된 시간에 마우스를 올리면 나타나는 × 버튼으로 삭제할 수 있어요. (PC 전용)</p>
+          <p class="card-desc subsection-desc">회원을 선택한 뒤, 시간 추가 가능합니다. 등록된 시간에 마우스를 올리면 나타나는 × 버튼으로 삭제 가능합니다.</p>
+          <div class="schedule-example">
+            <p class="schedule-example-title">등록 예시)</p>
+            <ul class="schedule-example-list">
+              <li>17시만 가능할 경우: 17:00~17:00</li>
+              <li>17시까지만 가능할 경우: 선택안함~17:00</li>
+              <li>17시부터 가능한 경우: 17:00~선택안함</li>
+            </ul>
+          </div>
 
           <div class="request-summary" id="requestSummary">등록된 회원이 없습니다.</div>
           <div class="member-tabs" id="memberTabs"></div>

@@ -723,6 +723,24 @@ body {
   margin: 0 0 14px;
 }
 
+.schedule-example {
+  margin: 0 0 14px;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.schedule-example-title { margin: 0 0 4px; font-size: 13px; font-weight: 700; color: var(--text); }
+.schedule-example-list {
+  margin: 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-mute);
+}
+
 .request-summary { font-size: 13px; color: var(--text-mute); margin-bottom: 10px; font-weight: 600; }
 
 .member-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
