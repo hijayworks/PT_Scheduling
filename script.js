@@ -2722,7 +2722,7 @@
     }
     selectedMembers.forEach(m => {
       const chip = document.createElement("span");
-      chip.className = "chip";
+      chip.className = "chip chip-excluded";
       appendOnceLimitMemberLabel(chip, m);
       const removeBtn = document.createElement("button");
       removeBtn.type = "button";

@@ -147,6 +147,8 @@ body {
 .btn-lg { padding: 12px 22px; font-size: 14.5px; }
 .btn-ghost { background: var(--primary-soft); color: var(--primary); }
 .btn-ghost:hover { background: #e0e0e0; }
+.once-limit-add-btn { background: var(--text); border: 1.5px solid var(--text); color: #fff; font-weight: 700; }
+.once-limit-add-btn:hover { background: var(--primary-dark); }
 .btn-danger-ghost { background: var(--danger-soft); color: var(--danger); }
 .btn-danger-ghost:hover { background: #fde2e2; }
 .btn-small { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
@@ -854,6 +856,9 @@ body {
   width: 18px; height: 18px; border-radius: 50%;
 }
 .chip button:hover { background: var(--danger-soft); color: var(--danger); }
+.chip-excluded { background: var(--danger-soft); border-color: var(--danger); color: var(--text); font-weight: 600; }
+.chip-excluded button { color: var(--text-mute); }
+.chip-excluded button:hover { background: #fecaca; color: var(--danger); }
 
 /* Candidates */
 .generate-hint { font-size: 13px; color: var(--text-mute); margin: 10px 0 0; }
