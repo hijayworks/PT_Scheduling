@@ -34,6 +34,7 @@
   // (최대한 1회 이상은 greedyAssign 1단계 배정에서 우선순위로 반영)
   const MAX_SESSIONS_PER_MEMBER = 2;
   const MAX_TRAVELS_PER_DAY = 3; // 하루 지점 간 이동은 최소화하되, 하더라도 최대 3회까지
+  const REQUIRED_MEMBER_WEIGHT = 1e6; // "필수 배정 회원"이 1단계 배정에서 다른 회원들보다 항상 우선하도록 주는 가중치
 
   const STORAGE_KEY = "pt_schedule_state_v3";
   const OLD_STORAGE_KEY = "pt_schedule_state_v2"; // pre-migration key: 30분 슬롯 기준
@@ -64,7 +65,8 @@
     members: [],          // {id, name, locationIds: [locId, ...]}
     requests: [],         // {id, memberId, locationId, day, startSlot, duration}
     onceLimitedMemberIds: [],  // 이번 후보 생성에서 최대 1회만 배정되어야 하는 회원 id 목록
-    excludedMemberIds: []  // "미배정 회원": 후보 생성에서 아예 제외할 회원 id 목록
+    excludedMemberIds: [],  // "미배정 회원": 후보 생성에서 아예 제외할 회원 id 목록
+    requiredMemberIds: []  // "필수 배정 회원": 가능하면 무조건 1회 이상 배정되어야 하는 회원 id 목록
   };
   let availableCells = new Set();
   let candidates = [];          // computed candidates
@@ -201,6 +203,7 @@
         state.requests = parsed.requests || [];
         state.onceLimitedMemberIds = parsed.onceLimitedMemberIds || [];
         state.excludedMemberIds = parsed.excludedMemberIds || [];
+        state.requiredMemberIds = parsed.requiredMemberIds || [];
         availableCells = new Set(parsed.availableCells || []);
         candidates = parsed.candidates || [];
         if (PAGE_IDS.indexOf(parsed.currentPage) !== -1) {
@@ -1109,6 +1112,7 @@
     state.requests = state.requests.filter(r => r.memberId !== member.id);
     state.onceLimitedMemberIds = state.onceLimitedMemberIds.filter(id => id !== member.id);
     state.excludedMemberIds = state.excludedMemberIds.filter(id => id !== member.id);
+    state.requiredMemberIds = state.requiredMemberIds.filter(id => id !== member.id);
     requestsChangedSinceGenerate = true;
     saveState();
     renderMemberTable();
@@ -1153,6 +1157,7 @@
   function renderMemberTable() {
     renderOnceLimitUI();
     renderExcludedUI();
+    renderRequiredUI();
     memberTableBodyEl.innerHTML = "";
     memberLocationSortArrowEl.textContent =
       memberLocationSortDir === "asc" ? "▲" : memberLocationSortDir === "desc" ? "▼" : "";
@@ -2037,10 +2042,12 @@
     }
 
     // "각 회원은 최대한 1회 이상의 스케줄을 가질 수 있도록" 단계에서 쓸 가중치.
-    // 모든 회원을 동일하게 취급한다(한때 회원별 가중치를 뒀지만 "최소 1회는 다른 조건보다
-    // 낮은 가중치여야 한다"는 결정에 따라 제거했다).
-    function fairnessWeight() {
-      return 1;
+    // 기본적으로 모든 회원을 동일하게 취급한다(한때 회원별 가중치를 뒀지만 "최소 1회는 다른
+    // 조건보다 낮은 가중치여야 한다"는 결정에 따라 제거했다). 다만 "필수 배정 회원"으로 지정된
+    // 회원은 이 1단계에서 압도적으로 큰 가중치를 줘서, 다른 회원 여러 명을 태우는 조합보다
+    // 항상 우선 선택되게 한다 — 이렇게 하면 가능한 자리가 있는 한 사실상 무조건 배정된다.
+    function fairnessWeight(memberId) {
+      return state.requiredMemberIds.includes(memberId) ? REQUIRED_MEMBER_WEIGHT : 1;
     }
 
     // 확정(고정)된 세션이 있으면, 그 요일의 맨 앞부터 첫 확정 세션 앞까지의 빈 시간을 먼저
@@ -2696,6 +2703,10 @@
       alert("1회 제한 회원에 추가되어 있는 회원입니다.\n1회 제한 회원에서 삭제 후 다시 추가해 주세요.");
       return;
     }
+    if (state.requiredMemberIds.includes(memberId)) {
+      alert("필수 배정 회원에 추가되어 있는 회원입니다.\n필수 배정 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
     state.excludedMemberIds = state.excludedMemberIds.concat(memberId);
     onExcludedChanged();
   }
@@ -2795,6 +2806,140 @@
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && excludedDropdownOpen) closeExcludedDropdown();
+  });
+
+  // "필수 배정 회원": 선택한 회원은 가능하다면 무조건 1회 이상 배정한다(미배정 회원·1회 제한
+  // 회원과 같은 칩+드롭다운 UI를 그대로 따른다). "미배정 회원"과는 의미가 정반대라 동시에
+  // 지정할 수 없고, "1회 제한 회원"과는 함께 지정하면 정확히 1회로 배정된다.
+  const requiredMsEl = document.getElementById("requiredMs");
+  const requiredControlEl = document.getElementById("requiredControl");
+  const requiredChipRowEl = document.getElementById("requiredChipRow");
+  const requiredDropdownEl = document.getElementById("requiredDropdown");
+  let requiredDropdownOpen = false;
+
+  function onRequiredChanged() {
+    // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 후보가 있으면 즉시 비운다.
+    if (candidates.length > 0) {
+      candidates = [];
+      renderCandidates();
+      generateHintEl.textContent = "필수 배정 회원 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
+    } else {
+      requestsChangedSinceGenerate = true;
+    }
+    saveState();
+    renderRequiredChips();
+    renderRequiredDropdown();
+  }
+
+  function addRequiredMember(memberId) {
+    if (state.requiredMemberIds.includes(memberId)) return;
+    if (state.excludedMemberIds.includes(memberId)) {
+      alert("미배정 회원에 추가되어 있는 회원입니다.\n미배정 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
+    if (!state.requests.some(r => r.memberId === memberId)) {
+      alert("회원 스케줄이 없습니다. 회원 스케줄을 추가해 주세요.");
+      return;
+    }
+    state.requiredMemberIds = state.requiredMemberIds.concat(memberId);
+    onRequiredChanged();
+  }
+
+  function removeRequiredMember(memberId) {
+    state.requiredMemberIds = state.requiredMemberIds.filter(id => id !== memberId);
+    onRequiredChanged();
+  }
+
+  function renderRequiredChips() {
+    requiredChipRowEl.innerHTML = "";
+    // "+ 추가" 버튼은 회원 칩이 몇 개든 항상 목록 맨 앞(같은 자리)에 오도록 매번 다시 붙인다.
+    requiredChipRowEl.appendChild(requiredMsEl);
+    const selectedMembers = state.requiredMemberIds
+      .map(id => memberById(id))
+      .filter(Boolean)
+      .sort(compareOnceLimitMembers);
+    if (selectedMembers.length === 0) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "ms-placeholder";
+      placeholder.textContent = "설정된 회원 없음";
+      requiredChipRowEl.appendChild(placeholder);
+      return;
+    }
+    selectedMembers.forEach(m => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      appendOnceLimitMemberLabel(chip, m);
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.textContent = "×";
+      removeBtn.title = "제거";
+      removeBtn.addEventListener("click", () => removeRequiredMember(m.id));
+      chip.appendChild(removeBtn);
+      requiredChipRowEl.appendChild(chip);
+    });
+  }
+
+  function renderRequiredDropdown() {
+    requiredDropdownEl.innerHTML = "";
+    const addable = state.members
+      .filter(m => !state.requiredMemberIds.includes(m.id))
+      .sort(compareOnceLimitMembers);
+    if (state.members.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "등록된 회원이 없습니다.";
+      requiredDropdownEl.appendChild(empty);
+      return;
+    }
+    if (addable.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "모든 회원이 이미 추가되어 있습니다.";
+      requiredDropdownEl.appendChild(empty);
+      return;
+    }
+    addable.forEach(m => {
+      const item = document.createElement("div");
+      item.className = "ms-option";
+      item.setAttribute("role", "option");
+      appendOnceLimitMemberLabel(item, m);
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        addRequiredMember(m.id);
+      });
+      requiredDropdownEl.appendChild(item);
+    });
+  }
+
+  function openRequiredDropdown() {
+    if (state.members.length === 0) return;
+    requiredDropdownOpen = true;
+    requiredMsEl.classList.add("open");
+    requiredControlEl.setAttribute("aria-expanded", "true");
+  }
+
+  function closeRequiredDropdown() {
+    requiredDropdownOpen = false;
+    requiredMsEl.classList.remove("open");
+    requiredControlEl.setAttribute("aria-expanded", "false");
+  }
+
+  requiredControlEl.addEventListener("click", () => {
+    if (requiredDropdownOpen) closeRequiredDropdown();
+    else openRequiredDropdown();
+  });
+
+  function renderRequiredUI() {
+    state.requiredMemberIds = state.requiredMemberIds.filter(id => !!memberById(id));
+    renderRequiredChips();
+    renderRequiredDropdown();
+  }
+
+  document.addEventListener("click", (e) => {
+    if (requiredDropdownOpen && !requiredMsEl.contains(e.target)) closeRequiredDropdown();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && requiredDropdownOpen) closeRequiredDropdown();
   });
 
   const candidateRulesBlockEl = document.getElementById("candidateRulesBlock");

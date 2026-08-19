@@ -268,7 +268,18 @@ body {
   border-radius: 12px;
   background: #fff;
 }
-#excludedBlock { margin-top: 18px; }
+.day-start-block-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 18px;
+  margin-bottom: 18px;
+}
+.day-start-block-row .day-start-block {
+  flex: 1 1 240px;
+  min-width: 0;
+  margin-bottom: 0;
+}
 #onceLimitBlock { margin-top: 18px; margin-bottom: 22px; }
 /* "+ 추가" 버튼을 회원 칩과 같은 .chip-row 안 맨 앞자리에 둔다 — 칩이 몇 개든 항상 그 목록의
    맨 앞(고정된 자리)에 있으므로 위치가 바뀌지도 않고, 무엇을 추가하는 버튼인지도 바로 보인다. */
