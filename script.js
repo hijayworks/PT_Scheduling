@@ -335,8 +335,10 @@
   // onDelete(있는 블록만): 마우스 호버 시 우측 상단에 삭제(×) 버튼이 나타난다 (PC 전용 기능).
   function renderGrid(container, availableSet, options) {
     options = options || {};
+    const rangeStart = typeof options.rangeStartSlot === "number" ? options.rangeStartSlot : 0;
+    const rangeEnd = typeof options.rangeEndSlot === "number" ? options.rangeEndSlot : SLOT_COUNT;
     container.innerHTML = "";
-    container.style.gridTemplateRows = "30px repeat(" + SLOT_COUNT + ", 16px)";
+    container.style.gridTemplateRows = "30px repeat(" + (rangeEnd - rangeStart) + ", 16px)";
 
     // corner
     const corner = document.createElement("div");
@@ -356,14 +358,15 @@
     });
 
     // time labels + background cells
-    for (let s = 0; s < SLOT_COUNT; s++) {
+    for (let s = rangeStart; s < rangeEnd; s++) {
+      const row = s - rangeStart + 2;
       const isHour = (START_MIN + s * SLOT_MIN) % 60 === 0;
       if (isHour) {
         const label = document.createElement("div");
-        label.className = "cal-timelabel" + (s === 0 ? " cal-timelabel-first" : "");
+        label.className = "cal-timelabel" + (s === rangeStart ? " cal-timelabel-first" : "");
         label.textContent = slotLabel(s);
         label.style.gridColumn = "1";
-        label.style.gridRow = String(s + 2);
+        label.style.gridRow = String(row);
         container.appendChild(label);
       }
       for (let di = 0; di < DAYS.length; di++) {
@@ -374,7 +377,7 @@
         cell.dataset.day = String(di);
         cell.dataset.slot = String(s);
         cell.style.gridColumn = String(di + 2);
-        cell.style.gridRow = String(s + 2);
+        cell.style.gridRow = String(row);
         container.appendChild(cell);
       }
     }
@@ -384,7 +387,7 @@
       const travel = document.createElement("div");
       travel.className = t.type === "break" ? "cal-break-block" : "cal-travel-block";
       travel.style.gridColumn = String(t.day + 2);
-      travel.style.gridRow = (t.startSlot + 2) + " / span " + Math.max(1, Math.round(t.duration / SLOT_MIN));
+      travel.style.gridRow = (t.startSlot - rangeStart + 2) + " / span " + Math.max(1, Math.round(t.duration / SLOT_MIN));
       travel.title = t.label;
       travel.textContent = t.label;
       container.appendChild(travel);
@@ -403,7 +406,7 @@
         if (b.confirmed) block.style.borderColor = b.color;
       }
       block.style.gridColumn = String(b.day + 2);
-      block.style.gridRow = (b.startSlot + 2) + " / span " + durationToSlots(b.duration);
+      block.style.gridRow = (b.startSlot - rangeStart + 2) + " / span " + durationToSlots(b.duration);
       block.title = b.label + (b.loc ? " (" + b.loc + ")" : "") + (b.sublabel ? " · " + b.sublabel : "");
       const nameEl = document.createElement("span");
       nameEl.className = "name";
@@ -664,6 +667,26 @@
 
   function clearDay(di) {
     for (let s = 0; s < SLOT_COUNT; s++) availableCells.delete(cellKey(di, s));
+  }
+
+  // 회원 스케줄 추가 · 수업 스케줄 생성 결과 그리드는 항상 12:00~24:00 전체를 보여주지 않고,
+  // 근무 가능 시간(기본 설정)을 모두 포함하는 가장 좁은 "정시" 범위만 보여준다.
+  // 예: 14:00~23:30 설정 → 14:00~24:00 표시 / 13:30~23:00 설정 → 13:00~23:00 표시.
+  function businessHoursGridRange() {
+    let minStart = null, maxEnd = null;
+    DAYS.forEach((d, di) => {
+      const range = dayRange(di);
+      if (!range) return;
+      if (minStart === null || range.start < minStart) minStart = range.start;
+      if (maxEnd === null || range.end > maxEnd) maxEnd = range.end;
+    });
+    if (minStart === null) return { rangeStartSlot: 0, rangeEndSlot: SLOT_COUNT };
+    const roundedStartMin = Math.floor((START_MIN + minStart * SLOT_MIN) / 60) * 60;
+    const roundedEndMin = Math.ceil((START_MIN + maxEnd * SLOT_MIN) / 60) * 60;
+    return {
+      rangeStartSlot: (roundedStartMin - START_MIN) / SLOT_MIN,
+      rangeEndSlot: (roundedEndMin - START_MIN) / SLOT_MIN
+    };
   }
 
   // 시간 선택창에는 30분 단위 옵션만 보여준다 (실제 배정은 여전히 10분 단위로 계산됨).
@@ -1490,6 +1513,7 @@
     // 더 늦춰서 보여준다 (별도 구간으로 나누지 않고 하나의 블록에 합쳐서). 마감 시간은 넘지 않는다.
     const breakSlots = durationToSlots(BREAK_MIN);
 
+    const scheduleGridRange = businessHoursGridRange();
     renderGrid(scheduleGridEl, availableCells, {
       blocks: runs.map(run => {
         const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);
@@ -1503,7 +1527,9 @@
           color,
           onDelete: () => removeRequests(run.reqs.map(r => r.id))
         };
-      })
+      }),
+      rangeStartSlot: scheduleGridRange.rangeStartSlot,
+      rangeEndSlot: scheduleGridRange.rangeEndSlot
     });
 
     if (myReqs.length === 0) {
@@ -2518,6 +2544,10 @@
 
   function addOnceLimitMember(memberId) {
     if (state.onceLimitedMemberIds.includes(memberId)) return;
+    if (state.excludedMemberIds.includes(memberId)) {
+      alert("미배정 회원에 추가되어 있는 회원입니다.\n삭제 후 다시 추가해 주세요.");
+      return;
+    }
     state.onceLimitedMemberIds = state.onceLimitedMemberIds.concat(memberId);
     onOnceLimitChanged();
   }
@@ -2537,6 +2567,8 @@
 
   function renderOnceLimitChips() {
     onceLimitChipRowEl.innerHTML = "";
+    // "+ 추가" 버튼은 회원 칩이 몇 개든 항상 목록 맨 앞(같은 자리)에 오도록 매번 다시 붙인다.
+    onceLimitChipRowEl.appendChild(onceLimitMsEl);
     const selectedMembers = state.onceLimitedMemberIds
       .map(id => memberById(id))
       .filter(isOnceLimitEligible)
@@ -2650,6 +2682,10 @@
 
   function addExcludedMember(memberId) {
     if (state.excludedMemberIds.includes(memberId)) return;
+    if (state.onceLimitedMemberIds.includes(memberId)) {
+      alert("1회 제한 회원에 추가되어 있는 회원입니다.\n삭제 후 다시 추가해 주세요.");
+      return;
+    }
     state.excludedMemberIds = state.excludedMemberIds.concat(memberId);
     onExcludedChanged();
   }
@@ -2661,6 +2697,8 @@
 
   function renderExcludedChips() {
     excludedChipRowEl.innerHTML = "";
+    // "+ 추가" 버튼은 회원 칩이 몇 개든 항상 목록 맨 앞(같은 자리)에 오도록 매번 다시 붙인다.
+    excludedChipRowEl.appendChild(excludedMsEl);
     const selectedMembers = state.excludedMemberIds
       .map(id => memberById(id))
       .filter(Boolean)
@@ -2859,9 +2897,12 @@
       gridWrap.appendChild(gridEl);
       card.appendChild(gridWrap);
 
+      const gridRange = businessHoursGridRange();
       renderGrid(gridEl, availableCells, {
         blocks: candidateToBlocks(cand),
-        travelBlocks: candidateToTravelBlocks(cand)
+        travelBlocks: candidateToTravelBlocks(cand),
+        rangeStartSlot: gridRange.rangeStartSlot,
+        rangeEndSlot: gridRange.rangeEndSlot
       });
 
       if (cand.unassignedMembers.length > 0) {

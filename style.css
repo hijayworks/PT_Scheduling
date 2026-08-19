@@ -239,7 +239,7 @@ body {
 }
 .candidate-rules-block:not(.collapsed) .toggle-arrow { transform: rotate(180deg); }
 .candidate-rules-block.collapsed .candidate-rules-title { margin-bottom: 0; }
-.candidate-rules-block:not(.collapsed) { padding-bottom: 16px; }
+.candidate-rules-block:not(.collapsed) { padding-bottom: 20px; }
 .candidate-rules-list {
   margin: 0;
   padding-left: 18px;
@@ -268,9 +268,9 @@ body {
 }
 #excludedBlock { margin-top: 18px; }
 #onceLimitBlock { margin-top: 18px; margin-bottom: 22px; }
-.once-limit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
-#onceLimitChipRow { margin-top: 0; }
-.once-limit-add { position: relative; flex: 0 0 auto; min-width: 0; }
+/* "+ 추가" 버튼을 회원 칩과 같은 .chip-row 안 맨 앞자리에 둔다 — 칩이 몇 개든 항상 그 목록의
+   맨 앞(고정된 자리)에 있으므로 위치가 바뀌지도 않고, 무엇을 추가하는 버튼인지도 바로 보인다. */
+.once-limit-add.ms { position: relative; flex: 0 0 auto; min-width: 0; }
 .once-limit-add .ms-dropdown { min-width: 200px; }
 .day-start-title { font-size: 13.5px; font-weight: 700; margin: 0 0 4px; }
 .optional-tag { font-weight: 500; color: var(--text-mute); font-size: 12px; }
@@ -603,6 +603,7 @@ body {
 .field { display: flex; flex-direction: column; gap: 5px; min-width: 110px; }
 #memberName { width: 119px; } /* 이름 등록 입력 영역 30% 축소 (기존 170px → 119px) */
 .field label { font-size: 12px; font-weight: 700; color: var(--text-mute); }
+.label-hint { font-size: 10px; font-weight: 500; color: var(--text-mute); }
 .field input, .field select {
   height: 36px;
   box-sizing: border-box;
