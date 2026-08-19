@@ -147,8 +147,8 @@ body {
 .btn-lg { padding: 12px 22px; font-size: 14.5px; }
 .btn-ghost { background: var(--primary-soft); color: var(--primary); }
 .btn-ghost:hover { background: #e0e0e0; }
-.once-limit-add-btn { background: var(--text); border: 1.5px solid var(--text); color: #fff; font-weight: 700; }
-.once-limit-add-btn:hover { background: var(--primary-dark); }
+.once-limit-add-btn { background: #dbe1ea; color: var(--text); font-weight: 700; }
+.once-limit-add-btn:hover { background: #c7cfdb; }
 .btn-danger-ghost { background: var(--danger-soft); color: var(--danger); }
 .btn-danger-ghost:hover { background: #fde2e2; }
 .btn-small { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
