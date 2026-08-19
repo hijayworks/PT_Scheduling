@@ -672,7 +672,10 @@
   // 회원 스케줄 추가 · 수업 스케줄 생성 결과 그리드는 항상 12:00~24:00 전체를 보여주지 않고,
   // 근무 가능 시간(기본 설정)을 모두 포함하는 가장 좁은 "정시" 범위만 보여준다.
   // 예: 14:00~23:30 설정 → 14:00~24:00 표시 / 13:30~23:00 설정 → 13:00~23:00 표시.
-  function businessHoursGridRange() {
+  // extraSlotBounds: 그리드에 실제로 그려질 블록이 근무 가능 시간 밖으로 나갈 수 있는 경우
+  // (예: 회원이 근무 가능 시간 밖 시간대를 희망 시간으로 등록한 경우), 그 블록까지 항상 포함하도록
+  // 범위를 넓히기 위한 {start, end} 슬롯 경계. 없으면 근무 가능 시간만으로 범위를 정한다.
+  function businessHoursGridRange(extraSlotBounds) {
     let minStart = null, maxEnd = null;
     DAYS.forEach((d, di) => {
       const range = dayRange(di);
@@ -680,6 +683,10 @@
       if (minStart === null || range.start < minStart) minStart = range.start;
       if (maxEnd === null || range.end > maxEnd) maxEnd = range.end;
     });
+    if (extraSlotBounds) {
+      if (minStart === null || extraSlotBounds.start < minStart) minStart = extraSlotBounds.start;
+      if (maxEnd === null || extraSlotBounds.end > maxEnd) maxEnd = extraSlotBounds.end;
+    }
     if (minStart === null) return { rangeStartSlot: 0, rangeEndSlot: SLOT_COUNT };
     const roundedStartMin = Math.floor((START_MIN + minStart * SLOT_MIN) / 60) * 60;
     const roundedEndMin = Math.ceil((START_MIN + maxEnd * SLOT_MIN) / 60) * 60;
@@ -1513,7 +1520,17 @@
     // 더 늦춰서 보여준다 (별도 구간으로 나누지 않고 하나의 블록에 합쳐서). 마감 시간은 넘지 않는다.
     const breakSlots = durationToSlots(BREAK_MIN);
 
-    const scheduleGridRange = businessHoursGridRange();
+    // 회원이 근무 가능 시간 밖의 시간대를 희망 시간으로 등록했을 수 있으므로, 그 블록들도
+    // 항상 그리드 범위 안에 들어오도록 실제로 그려질 블록들의 최소/최대 슬롯을 함께 반영한다.
+    let reqMinStart = null, reqMaxEnd = null;
+    runs.forEach(run => {
+      const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);
+      if (reqMinStart === null || run.startSlot < reqMinStart) reqMinStart = run.startSlot;
+      if (reqMaxEnd === null || displayEndSlot > reqMaxEnd) reqMaxEnd = displayEndSlot;
+    });
+    const scheduleGridRange = businessHoursGridRange(
+      reqMinStart === null ? null : { start: reqMinStart, end: reqMaxEnd }
+    );
     renderGrid(scheduleGridEl, availableCells, {
       blocks: runs.map(run => {
         const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);
@@ -2545,7 +2562,7 @@
   function addOnceLimitMember(memberId) {
     if (state.onceLimitedMemberIds.includes(memberId)) return;
     if (state.excludedMemberIds.includes(memberId)) {
-      alert("미배정 회원에 추가되어 있는 회원입니다.\n삭제 후 다시 추가해 주세요.");
+      alert("미배정 회원에 추가되어 있는 회원입니다.\n미배정 회원에서 삭제 후 다시 추가해 주세요.");
       return;
     }
     state.onceLimitedMemberIds = state.onceLimitedMemberIds.concat(memberId);
@@ -2683,7 +2700,7 @@
   function addExcludedMember(memberId) {
     if (state.excludedMemberIds.includes(memberId)) return;
     if (state.onceLimitedMemberIds.includes(memberId)) {
-      alert("1회 제한 회원에 추가되어 있는 회원입니다.\n삭제 후 다시 추가해 주세요.");
+      alert("1회 제한 회원에 추가되어 있는 회원입니다.\n1회 제한 회원에서 삭제 후 다시 추가해 주세요.");
       return;
     }
     state.excludedMemberIds = state.excludedMemberIds.concat(memberId);
