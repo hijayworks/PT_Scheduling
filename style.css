@@ -856,7 +856,7 @@ body {
   width: 18px; height: 18px; border-radius: 50%;
 }
 .chip button:hover { background: var(--danger-soft); color: var(--danger); }
-.chip-excluded { background: var(--danger-soft); border-color: var(--danger); color: var(--text); font-weight: 600; }
+.chip-excluded { background: var(--danger-soft); border-color: var(--danger); color: var(--text-mute); font-weight: 600; }
 .chip-excluded button { color: var(--text-mute); }
 .chip-excluded button:hover { background: #fecaca; color: var(--danger); }
 
