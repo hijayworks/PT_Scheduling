@@ -220,7 +220,7 @@ body {
   background: transparent;
   padding: 2px 0;
   margin: 0 0 4px;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 700;
   font-family: inherit;
   color: var(--text);
@@ -431,6 +431,7 @@ body {
 .member-table .action-cell button:hover { background: var(--danger-soft); color: var(--danger); }
 
 .subsection-title { font-size: 14px; font-weight: 700; margin: 0 0 10px; }
+.subsection-subtitle { font-size: 12.5px; font-weight: 700; color: var(--text-mute); margin: 0 0 10px; }
 .travel-matrix {
   display: flex;
   flex-direction: column;
@@ -613,7 +614,7 @@ body {
   border: 1px solid var(--border);
   border-radius: 12px;
 }
-.field { display: flex; flex-direction: column; gap: 5px; min-width: 110px; }
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 110px; position: relative; }
 #memberName { width: 119px; } /* 이름 등록 입력 영역 30% 축소 (기존 170px → 119px) */
 .field label { font-size: 12px; font-weight: 700; color: var(--text-mute); }
 .label-hint { font-size: 10px; font-weight: 500; color: var(--text-mute); }
@@ -873,6 +874,22 @@ body {
 
 /* Candidates */
 .generate-hint { font-size: 13px; color: var(--text-mute); margin: 10px 0 0; }
+.generate-hint-error { color: var(--danger); }
+/* Positioned out of flow so a field's error text can't grow that flex item and push its
+   siblings around (.request-form bottom-aligns items, so any in-flow height change here
+   shifts every other field in the row). */
+.field .generate-hint {
+  margin-top: 0;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  padding-top: 5px;
+  white-space: nowrap;
+}
+/* Since the hint text above is out of flow, reserve room for it on the form itself so it
+   doesn't overlap whatever comes right after the form (e.g. the table below). Only added
+   while a hint is actually showing, so the form doesn't carry dead space normally. */
+.request-form.has-hint { padding-bottom: 40px; }
 .candidates {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));

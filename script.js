@@ -462,6 +462,7 @@
   /* ---------------- Settings page: locations & travel time ---------------- */
   const locationForm = document.getElementById("locationForm");
   const locationNameInput = document.getElementById("locationName");
+  const locationHintEl = document.getElementById("locationHint");
   const locationListEl = document.getElementById("locationList");
   const travelTitleEl = document.getElementById("travelTitle");
   const travelMatrixEl = document.getElementById("travelMatrix");
@@ -535,6 +536,11 @@
         function commit() {
           const trimmed = input.value.trim();
           const changed = trimmed && trimmed !== loc.name;
+          if (changed && state.locations.some(l => l.id !== loc.id && l.name === trimmed)) {
+            showToast("이미 등록된 지점 이름입니다.", "danger");
+            input.focus();
+            return;
+          }
           if (trimmed) loc.name = trimmed;
           editingLocationId = null;
           saveState();
@@ -633,10 +639,24 @@
     }
   }
 
+  function setLocationHint(message) {
+    locationHintEl.textContent = message;
+    locationHintEl.classList.toggle("generate-hint-error", !!message);
+    locationForm.classList.toggle("has-hint", !!message);
+  }
+
   locationForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const name = locationNameInput.value.trim();
-    if (!name) return;
+    if (!name) {
+      setLocationHint("지점 이름을 입력해주세요.");
+      return;
+    }
+    if (state.locations.some(l => l.name === name)) {
+      setLocationHint("이미 등록된 지점 이름입니다.");
+      return;
+    }
+    setLocationHint("");
     const loc = { id: uid("loc"), name };
     state.locations.push(loc);
     // seed travel time with existing locations so nothing is silently 0.
@@ -823,7 +843,22 @@
   const memberCategoryDisplayEl = document.getElementById("memberCategoryDisplay");
   const memberCategoryDropdownEl = document.getElementById("memberCategoryDropdown");
   const memberMemoInput = document.getElementById("memberMemo");
-  const memberHintEl = document.getElementById("memberHint");
+  const memberLocationHintEl = document.getElementById("memberLocationHint");
+  const memberCategoryHintEl = document.getElementById("memberCategoryHint");
+  const memberNameHintEl = document.getElementById("memberNameHint");
+  const memberHintEls = [memberLocationHintEl, memberCategoryHintEl, memberNameHintEl];
+  function syncMemberHintSpacing() {
+    memberForm.classList.toggle("has-hint", memberHintEls.some(el => el.textContent !== ""));
+  }
+  function setMemberHint(el, message, isError) {
+    el.textContent = message;
+    el.classList.toggle("generate-hint-error", !!isError);
+    syncMemberHintSpacing();
+  }
+  function clearMemberHints() {
+    memberHintEls.forEach(el => { el.textContent = ""; el.classList.remove("generate-hint-error"); });
+    syncMemberHintSpacing();
+  }
   const memberTableBodyEl = document.getElementById("memberTableBody");
   const memberLocationSortThEl = document.getElementById("memberLocationSortTh");
   const memberLocationSortArrowEl = document.getElementById("memberLocationSortArrow");
@@ -1026,7 +1061,7 @@
     const hasLocations = state.locations.length > 0;
     memberSubmitBtn.disabled = !hasLocations;
     memberLocationControlEl.disabled = !hasLocations;
-    memberHintEl.textContent = hasLocations ? "" : "설정 페이지에서 지점을 먼저 등록해주세요.";
+    setMemberHint(memberLocationHintEl, hasLocations ? "" : "설정 페이지에서 지점을 먼저 등록해주세요.", false);
   }
 
   // 같은 위젯을 재사용한 구분 단일 선택: 클릭 한 번으로 값을 고르고, 고르면 바로 닫힌다.
@@ -1248,6 +1283,16 @@
         function commit() {
           const trimmed = input.value.trim();
           const changed = trimmed && trimmed !== member.name;
+          // 이름만 같은 건 동명이인일 수 있어 그냥 저장하지만, 지점까지 같으면 실수로 중복된
+          // 경우일 가능성이 높으므로 확인을 거친다.
+          if (changed && state.members.some(m => m.id !== member.id && m.name === trimmed
+            && m.locationIds.some(id => member.locationIds.includes(id)))) {
+            const proceed = confirm("'" + trimmed + "' 이름의 회원이 같은 지점에 이미 있습니다. 이름만 같은 다른 회원으로 저장할까요?");
+            if (!proceed) {
+              input.focus();
+              return;
+            }
+          }
           if (trimmed) member.name = trimmed;
           editingMemberNameId = null;
           saveState();
@@ -1320,19 +1365,25 @@
   memberForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const name = memberNameInput.value.trim();
-    if (!name) return;
     if (state.locations.length === 0) return;
-    if (state.members.some(m => m.name === name)) {
-      memberHintEl.textContent = "이미 등록된 회원 이름입니다.";
+    clearMemberHints();
+    if (!name) {
+      setMemberHint(memberNameHintEl, "이름을 입력해주세요.", true);
       return;
     }
     if (memberFormLocationIds.length === 0) {
-      memberHintEl.textContent = "지점을 하나 이상 선택해주세요.";
+      setMemberHint(memberLocationHintEl, "지점을 하나 이상 선택해주세요.", true);
       return;
     }
     if (!memberFormCategory) {
-      memberHintEl.textContent = "회원 구분을 선택해주세요.";
+      setMemberHint(memberCategoryHintEl, "회원 구분을 선택해주세요.", true);
       return;
+    }
+    // 이름만 같은 건 동명이인일 수 있어 그냥 등록하지만, 지점까지 같으면 실수로 중복
+    // 등록하는 경우일 가능성이 높으므로 확인을 거친다.
+    if (state.members.some(m => m.name === name && m.locationIds.some(id => memberFormLocationIds.includes(id)))) {
+      const proceed = confirm("'" + name + "' 이름의 회원이 같은 지점에 이미 있습니다. 이름만 같은 다른 회원으로 등록할까요?");
+      if (!proceed) return;
     }
     const member = {
       id: uid("m"),
@@ -1351,7 +1402,7 @@
     renderMemberLocationControl();
     renderMemberLocationDropdown();
     memberNameInput.focus();
-    memberHintEl.textContent = "";
+    clearMemberHints();
     renderMemberTable();
     renderRequestList();
     saveState();
