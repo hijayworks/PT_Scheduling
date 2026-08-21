@@ -2174,9 +2174,14 @@
       ? new Set(options.doubleAssignMemberIds) : null;
     const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY;
     const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보C·D·E)
-    // 후보A·B: 인원(또는 세션 수) → 이동 횟수까지만 비교하고 멈춘다 — 이동 시간, 이동시간+빈시간 합, 정렬,
-    // 슬랙 같은 세부 기준은 쓰지 않는다("인원을 최대화하도록 배정합니다. 동점이면 이동
-    // 횟수가 적은 쪽을 우선합니다."에 정확히 대응시키기 위함).
+    // travelCountOnly: 인원(또는 세션 수) → 이동 횟수까지만 비교하고 멈추게 하는 옵션 —
+    // 이동 시간, 이동시간+빈시간 합 같은 세부 기준(아래 addToIndex 참고)은 건너뛴다. 한때
+    // 후보A·B가 이 옵션을 켜뒀지만, 그러면 인원·세션·이동 횟수까지 완전히 동점인 배치들
+    // 사이에서 빈 시간(간격)이 굳이 더 큰 쪽이 우연히 선택될 수 있었다 — 예를 들어 회원이
+    // 20:00부터 가능한데 다른 조건이 모두 같은데도 20:10에 배정되는 식("이동시간·휴식시간을
+    // 제외한 빈 시간은 없도록 합니다" 규칙과 어긋남). 그래서 지금은 어떤 후보도 이 옵션을
+    // 켜지 않는다 — 모든 후보가 이동 횟수까지 동점이면 이동 시간, 그마저 동점이면 빈 시간
+    // 합까지 비교해 가장 빈틈없는 배치를 고른다. 옵션 자체는 나중에 다시 필요할 수 있어 남겨둔다.
     const travelCountOnly = !!options.travelCountOnly;
 
     // 숨김 하드 로직(회원 개인 사정으로 인한 예외, 후보 조건에는 노출하지 않음): 상암점·여의도점·
@@ -2277,8 +2282,8 @@
 
       // "하루 이동은 최소화"를 실제로 반영하려면, 인원(가중치 합)이 같은 체인들 사이에서는
       // 이동 횟수가 더 적은 쪽을 골라야 한다(travelFirst 옵션이 켜지면 이 둘의 우선순위를
-      // 아예 뒤집어, 이동 횟수를 인원보다 먼저 비교한다). travelCountOnly 옵션("후보A·B")이
-      // 켜지면 여기서 비교를 멈춘다. 아니면 그마저 동점일 때 이동 시간 합이 더 적은 쪽을,
+      // 아예 뒤집어, 이동 횟수를 인원보다 먼저 비교한다). travelCountOnly 옵션이 켜지면
+      // 여기서 비교를 멈춘다(지금은 어떤 후보도 켜지 않는다). 아니면 그마저 동점일 때 이동 시간 합이 더 적은 쪽을,
       // 그마저 동점이면 이동 시간 합 + 빈 시간(슬랙) 합이 더 적은 쪽을(=이동 시간이 같다면
       // 결국 빈 시간이 적은 쪽을) 고르고, 그다음으로 하루의 첫 수업이 30분 단위 시각(예:
       // 13:00, 13:30)에 시작하는 체인을 우선한다 — 인원을 줄이면서까지 정렬을 강제하지는
@@ -2839,37 +2844,37 @@
       // 분리해뒀지만, 대안이 기본 순서보다 나쁠 수는 없는 구조라(runWithGapPolicy 참고) 후보A
       // 자체에 통합했다. 분리해뒀을 때는 후보A와 후보H가 대부분 똑같거나, 다르면 항상 후보H가
       // 후보A보다 낫거나 같아서 후보A를 고를 이유가 없는 중복이었다.
-      options: { travelCountOnly: true, strengthenSearch: "count", minimizeUnassigned: true },
+      options: { strengthenSearch: "count", minimizeUnassigned: true },
       sort: defaultSort
     },
     {
       title: "후보B - 수업 횟수 최대화",
       desc: "총 수업 건수 → 인원 최대화 → 이동 횟수 순으로 배정합니다.",
-      options: { sessionCountFirst: true, travelCountOnly: true, strengthenSearch: "sessions" },
+      options: { sessionCountFirst: true, strengthenSearch: "sessions" },
       sort: defaultSort
     },
     {
       title: "후보C - 일주일 총 이동 횟수 5회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 5회까지로 제한합니다.",
-      options: { travelCountOnly: true, strengthenSearch: "count", maxTravelsPerWeek: 5 },
+      options: { strengthenSearch: "count", maxTravelsPerWeek: 5 },
       sort: defaultSort
     },
     {
       title: "후보D - 일주일 총 이동 횟수 4회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 4회까지로 제한합니다.",
-      options: { travelCountOnly: true, strengthenSearch: "count", maxTravelsPerWeek: 4 },
+      options: { strengthenSearch: "count", maxTravelsPerWeek: 4 },
       sort: defaultSort
     },
     {
       title: "후보E - 일주일 총 이동 횟수 3회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 3회까지로 제한합니다.",
-      options: { travelCountOnly: true, strengthenSearch: "count", maxTravelsPerWeek: 3 },
+      options: { strengthenSearch: "count", maxTravelsPerWeek: 3 },
       sort: defaultSort
     },
     {
       title: "후보G - 낮 시간대 우선",
       desc: "후보A와 같은 기준이지만, 그마저 동점이면 18시 이전에 시작하는 수업이 많은 배치를 우선합니다.",
-      options: { travelCountOnly: true, strengthenSearch: "count", preferDaytime: true },
+      options: { strengthenSearch: "count", preferDaytime: true },
       sort: defaultSort
     },
     {
@@ -2900,7 +2905,6 @@
   // 기준을 오히려 후퇴시킬 수 있다(실제로 28건 → 27건으로 줄어드는 문제가 있었다). 세 값을
   // 모두, 선언한 순서 그대로 비교해 이런 후퇴를 막는다.
   function strengthenCandidate(baseline, sorted, eligibleIds, allMemberIds, options, pinned, primary) {
-    if (state.locations.length < 2) return baseline;
     function score(cand) {
       const count = new Set(cand.assigned.map(r => r.memberId)).size;
       const sessions = cand.assigned.length;
@@ -2914,16 +2918,31 @@
     }
     let best = baseline;
     let bestScore = score(best);
-    DAYS.forEach((d, day) => {
-      state.locations.forEach(loc => {
-        const pinOptions = Object.assign({}, options, { pinnedLocationDay: { day, locationId: loc.id } });
-        const attempt = buildCandidate(baseline.title, baseline.desc, sorted, eligibleIds, allMemberIds, pinOptions, pinned);
-        const attemptScore = score(attempt);
-        if (isBetter(attemptScore, bestScore)) {
-          best = attempt; bestScore = attemptScore;
-        }
+    function consider(opts) {
+      const attempt = buildCandidate(baseline.title, baseline.desc, sorted, eligibleIds, allMemberIds, opts, pinned);
+      const attemptScore = score(attempt);
+      if (isBetter(attemptScore, bestScore)) {
+        best = attempt; bestScore = attemptScore;
+      }
+    }
+
+    // 요일별 1단계 처리 순서(sessionCountFirst)를 반대로 뒤집은 옵션도 함께 시도한다. 후보A
+    // (count 우선)와 후보B(sessions 우선)는 이 옵션 하나만 다른데, 그리디 특성상 반대쪽
+    // 순서가 스스로 내세운 기준(예: 후보A라면 인원이 동점일 때 총 수업 건수)에서 오히려 더
+    // 나은 결과를 우연히 찾아내는 경우가 있다. 뒤집은 옵션에도 아래 day×지점 사전 배정을
+    // 똑같이 시도해야, 상대 후보가 자기 자신을 강화할 때 찾아낸 조합까지 놓치지 않는다.
+    const flippedOptions = Object.assign({}, options, { sessionCountFirst: !options.sessionCountFirst });
+    consider(flippedOptions);
+
+    if (state.locations.length >= 2) {
+      [options, flippedOptions].forEach(optsVariant => {
+        DAYS.forEach((d, day) => {
+          state.locations.forEach(loc => {
+            consider(Object.assign({}, optsVariant, { pinnedLocationDay: { day, locationId: loc.id } }));
+          });
+        });
       });
-    });
+    }
     return best;
   }
 
@@ -3012,25 +3031,33 @@
     const eligibleIds = new Set(eligible.map(r => r.id));
 
     // 재생성은 "다른 배치를 보여주는 것"이 목적이지, "후보 조건"의 우선순위(인원 최대화 →
-    // 이동 횟수 최소화)보다 못한 결과로 후퇴하는 것은 아니다. 기준(jitter 0) 결과의 총 수업
-    // 수·총 이동 횟수를 최소 허용선으로 삼아, 그보다 수업이 적거나(수업 수가 같은데) 이동이
-    // 더 많은 시도는 아무리 새로운 조합이어도 버린다 — 안 그러면 동점 tie-break가 요일 처리
-    // 순서에 따라 우연히 더 나쁜 조합으로 이어질 수 있는데, 그런 결과까지 "새 후보"로
-    // 보여주면 안 된다.
+    // 수업 건수 → 이동 횟수 최소화)보다 못한 결과로 후퇴하는 것은 아니다. 최소 허용선은
+    // 기준(jitter 0) 결과 하나만이 아니라, 지금 화면에 이미 표시된 후보(prevCand)와 비교해도
+    // 정해야 한다 — prevCand는 (운 좋은 jitter나 사전 탐색으로) 기준보다 이미 더 나은 상태일
+    // 수 있는데, 기준만 최소 허용선으로 삼으면 "지금 보고 있는 것보다 못한" 결과도 통과해
+    // 버린다(실제로 미배정 인원은 그대로인데 수업 건수만 줄어든 후보가 표시되는 문제가 있었다).
+    // 그래서 둘 중 더 나은 쪽을 최소 허용선으로 삼고, 인원 → 수업 건수 → 이동 횟수 순으로,
+    // 그보다 못한 시도는 아무리 새로운 조합이어도 버린다.
+    function regenScore(cand) {
+      const count = new Set(cand.assigned.map(r => r.memberId)).size;
+      return [count, cand.assigned.length, totalTravelCount(cand.assigned)];
+    }
+    function isWorseThan(a, b) {
+      if (a[0] !== b[0]) return a[0] < b[0];
+      if (a[1] !== b[1]) return a[1] < b[1];
+      return a[2] > b[2];
+    }
     const zeroJitter = new Map(eligible.map(r => [r.id, 0]));
     const baseline = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, zeroJitter, pinned);
-    const minAcceptableSessions = baseline.assigned.length;
-    const maxAcceptableTravelCountAtMinSessions = totalTravelCount(baseline.assigned);
+    const baselineScore = regenScore(baseline);
+    const floorScore = (prevCand && isWorseThan(baselineScore, regenScore(prevCand)))
+      ? regenScore(prevCand) : baselineScore;
 
     let newCand = null;
     for (let i = 0; i < REGEN_MAX_ATTEMPTS; i++) {
       const jitter = new Map(eligible.map(r => [r.id, Math.random()]));
       const attempt = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned);
-      if (attempt.assigned.length < minAcceptableSessions) continue; // 기준보다 수업이 적으면 버린다
-      // 수업 수가 기준과 동점일 때만 이동 횟수를 비교한다 — 수업 수가 기준보다 많다면
-      // "인원 최대화"가 "이동 횟수 최소화"보다 우선이므로 이동이 늘어도 받아들인다.
-      if (attempt.assigned.length === minAcceptableSessions
-        && totalTravelCount(attempt.assigned) > maxAcceptableTravelCountAtMinSessions) continue;
+      if (isWorseThan(regenScore(attempt), floorScore)) continue; // 최소 허용선보다 못하면 버린다
       const sig = candidateSignature(attempt);
       if (!seen.has(sig)) {
         newCand = attempt;
