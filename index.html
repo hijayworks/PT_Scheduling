@@ -91,6 +91,7 @@
               <li>각 회원은 최대 2회까지의 스케줄을 가질 수 있습니다. (상담 회원의 경우 최대 1회까지)</li>
               <li>1회 제한 회원에 선택된 회원은 수업 스케줄 생성 시 스케줄이 최대 1회까지 배정됩니다.</li>
               <li>필수 배정 회원에 선택된 회원은 다른 회원보다 우선적으로 배정해, 최대한 1회 이상 배정되도록 합니다.</li>
+              <li>2회 배정 회원에 선택된 회원은 1회 배정된 뒤, 다른 회원의 2번째 수업보다 그 회원의 2번째 수업을 먼저 배정합니다. (상담 회원·1회 제한 회원은 대상에서 제외됩니다)</li>
               <li>마포점 우선 2회 배정을 체크하면, 마포점 회원의 2번째 수업을 다른 지점 회원의 2번째 수업보다 먼저 배정합니다.</li>
               <li>하루 이동은 최소화하며, 이동할 경우 최대 3회까지 합니다.</li>
               <li>이동시간, 휴식시간을 제외한 빈 시간은 없도록 합니다. (단, 빈 시간을 허용해서 수업의 횟수가 늘어난다면 10분까지 허용합니다.)</li>
@@ -130,23 +131,41 @@
             </div>
           </div>
 
-          <div class="day-start-block" id="onceLimitBlock">
-            <p class="day-start-title" id="onceLimitTitle">1회 제한 회원 <span class="optional-tag">(선택사항)</span></p>
-            <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 최대 1회까지 배정됩니다. 상담회원도 동일하게 최대 1회까지 배정됩니다.</p>
-            <div class="chip-row" id="onceLimitChipRow">
-              <div class="ms once-limit-add" id="onceLimitMs">
-                <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="onceLimitControl" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="onceLimitTitle">+ 추가</button>
-                <div class="ms-dropdown" id="onceLimitDropdown" role="listbox"></div>
+          <div class="day-start-block-row">
+            <div class="day-start-block" id="onceLimitBlock">
+              <p class="day-start-title" id="onceLimitTitle">1회 제한 회원 <span class="optional-tag">(선택사항)</span></p>
+              <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 최대 1회까지 배정됩니다. 상담회원도 동일하게 최대 1회까지 배정됩니다.</p>
+              <div class="chip-row" id="onceLimitChipRow">
+                <div class="ms once-limit-add" id="onceLimitMs">
+                  <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="onceLimitControl" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="onceLimitTitle">+ 추가</button>
+                  <div class="ms-dropdown" id="onceLimitDropdown" role="listbox"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="day-start-block" id="doubleAssignBlock">
+              <p class="day-start-title" id="doubleAssignTitle">2회 배정 회원 <span class="optional-tag">(선택사항)</span></p>
+              <p class="card-desc subsection-desc">선택한 회원은 1회 배정된 뒤, 다른 회원보다 우선적으로 2번째 수업이 배정되도록 합니다. (상담 회원·1회 제한 회원 제외)</p>
+              <div class="chip-row" id="doubleAssignChipRow">
+                <div class="ms once-limit-add" id="doubleAssignMs">
+                  <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="doubleAssignControl" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="doubleAssignTitle">+ 추가</button>
+                  <div class="ms-dropdown" id="doubleAssignDropdown" role="listbox"></div>
+                </div>
               </div>
             </div>
           </div>
 
           <div class="day-start-block" id="priorityMapoDoubleBlock">
-            <label class="checkbox-row" for="priorityMapoDoubleCheckbox">
-              <input type="checkbox" id="priorityMapoDoubleCheckbox" />
-              <span>마포점 우선 2회 배정</span>
-            </label>
-            <p class="card-desc subsection-desc">체크하면 마포점 회원의 2번째 수업을 다른 지점 회원의 2번째 수업보다 먼저 배정합니다.</p>
+            <div class="checkbox-row-line">
+              <label class="checkbox-row" for="priorityMapoDoubleCheckbox">
+                <input type="checkbox" id="priorityMapoDoubleCheckbox" />
+                <span>마포점 우선 2회 배정</span>
+              </label>
+              <span class="info-tip" tabindex="0">
+                <span class="info-tip-icon" aria-hidden="true">i</span>
+                <span class="info-tip-bubble" role="tooltip">체크하면 마포점 회원의 2번째 수업을 다른 지점 회원의 2번째 수업보다 먼저 배정합니다.</span>
+              </span>
+            </div>
           </div>
 
           <div class="generate-row">
@@ -235,7 +254,10 @@
           <h2>회원 스케줄 추가</h2>
           <p class="card-desc">회원별로 요일과 시작 시간을 선택해 가능 시간을 추가하세요. 회원 등록은 회원관리 메뉴에서 합니다.</p>
         </div>
-        <button type="button" id="resetAllSchedulesBtn" class="btn btn-danger-ghost">전체 스케줄 초기화</button>
+        <div class="card-head-actions">
+          <button type="button" id="bulkImportOpenBtn" class="btn btn-ghost btn-ghost-green">붙여넣기로 일괄 등록</button>
+          <button type="button" id="resetAllSchedulesBtn" class="btn btn-danger-ghost">전체 스케줄 초기화</button>
+        </div>
       </div>
 
       <div class="settings-sections">
@@ -269,6 +291,46 @@
 
   </main>
 
+</div>
+
+<div class="modal-overlay" id="bulkImportOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bulkImportTitle">
+    <div class="modal-head">
+      <h3 id="bulkImportTitle">붙여넣기로 일괄 등록</h3>
+      <button type="button" class="modal-close" id="bulkImportCloseBtn" aria-label="닫기">×</button>
+    </div>
+
+    <div class="modal-body" id="bulkImportStepInput">
+      <p class="card-desc subsection-desc">
+        한 줄에 회원 한 명씩, "이름 요일 시간..." 형식으로 붙여넣으세요.
+        <br>요일은 이어 붙여 쓸 수 있고(예: 화목), 시간은 오후 기준 시각입니다. (예: 7 → 19:00, 730 → 19:30, 8910 → 20:00·21:00·22:00 세 타임)
+        <br>시간 뒤에 물결(~)을 붙이면 그 시각부터 마감 시간까지 전부 가능한 것으로 등록됩니다. (예: 630~)
+      </p>
+      <div class="schedule-example">
+        <p class="schedule-example-title">예시)</p>
+        <ul class="schedule-example-list">
+          <li>홍길동  월 7 730 금 7 730</li>
+          <li>김철수  화목 5 530</li>
+          <li>짐회원  월화 630~ 금 1~</li>
+          <li>홍길동  월 2~5</li>
+        </ul>
+      </div>
+      <textarea id="bulkImportTextarea" class="bulk-import-textarea" rows="14" placeholder="홍길동  월 7 730 금 7 730&#10;김철수  화목 5 530"></textarea>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="bulkImportCancelBtn">취소</button>
+        <button type="button" class="btn btn-primary" id="bulkImportPreviewBtn">미리보기</button>
+      </div>
+    </div>
+
+    <div class="modal-body" id="bulkImportStepPreview" style="display:none;">
+      <p class="card-desc subsection-desc" id="bulkImportPreviewSummary"></p>
+      <div id="bulkImportPreviewList" class="bulk-preview-list"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="bulkImportBackBtn">다시 붙여넣기</button>
+        <button type="button" class="btn btn-primary" id="bulkImportApplyBtn">선택한 회원 일괄 등록</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <footer class="app-footer">

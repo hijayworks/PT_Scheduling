@@ -106,6 +106,8 @@ body {
   margin-bottom: 18px;
 }
 .card-head > .btn { flex: 0 0 auto; white-space: nowrap; }
+.card-head-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.card-head-actions > .btn { white-space: nowrap; }
 .card-head h2 { margin: 0 0 4px; font-size: 17px; font-weight: 700; }
 .card-desc { margin: 0; font-size: 13.5px; color: var(--text-mute); }
 
@@ -147,6 +149,8 @@ body {
 .btn-lg { padding: 12px 22px; font-size: 14.5px; }
 .btn-ghost { background: var(--primary-soft); color: var(--primary); }
 .btn-ghost:hover { background: #e0e0e0; }
+.btn-ghost-green { background: var(--cell-available); color: var(--success); }
+.btn-ghost-green:hover { background: #bbf7d0; }
 .once-limit-add-btn { background: #dcdcdc; color: var(--text); font-weight: 700; }
 .once-limit-add-btn:hover { background: #c7c7c7; }
 .btn-danger-ghost { background: var(--danger-soft); color: var(--danger); }
@@ -280,7 +284,6 @@ body {
   min-width: 0;
   margin-bottom: 0;
 }
-#onceLimitBlock { margin-top: 18px; margin-bottom: 22px; }
 /* "+ 추가" 버튼을 회원 칩과 같은 .chip-row 안 맨 앞자리에 둔다 — 칩이 몇 개든 항상 그 목록의
    맨 앞(고정된 자리)에 있으므로 위치가 바뀌지도 않고, 무엇을 추가하는 버튼인지도 바로 보인다. */
 .once-limit-add.ms { position: relative; flex: 0 0 auto; min-width: 0; }
@@ -298,6 +301,59 @@ body {
   margin-bottom: 4px;
 }
 .checkbox-row input { width: 17px; height: 17px; accent-color: var(--primary); cursor: pointer; }
+
+.checkbox-row-line { display: flex; align-items: center; gap: 6px; }
+.checkbox-row-line .checkbox-row { margin-bottom: 0; }
+
+/* Hover/focus tooltip for a short inline explanation (e.g. next to a checkbox label) */
+.info-tip { position: relative; display: inline-flex; }
+.info-tip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--primary-soft);
+  color: var(--text-mute);
+  font-size: 10px;
+  font-weight: 800;
+  font-style: italic;
+  font-family: Georgia, "Times New Roman", serif;
+  cursor: help;
+}
+.info-tip-bubble {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: 260px;
+  background: #1f2434;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  padding: 8px 10px;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(20, 24, 40, 0.25);
+  z-index: 30;
+  white-space: normal;
+  text-align: left;
+}
+.info-tip-bubble::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-top-color: #1f2434;
+}
+.info-tip:hover .info-tip-bubble,
+.info-tip:focus .info-tip-bubble,
+.info-tip:focus-within .info-tip-bubble { display: block; }
 
 .generate-row {
   display: flex;
@@ -1046,3 +1102,128 @@ body {
 .toast-success { background: var(--success); }
 .toast-danger { background: var(--danger); }
 .toast-info { background: #1f2434; }
+
+/* Bulk import modal (회원 스케줄 추가: 붙여넣기로 일괄 등록) */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 24, 40, 0.5);
+  z-index: 500;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+  overflow-y: auto;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  width: 100%;
+  max-width: 660px;
+  background: var(--card-bg);
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(20, 24, 40, 0.3);
+  padding: 22px;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.modal-head h3 { margin: 0; font-size: 16px; font-weight: 800; }
+.modal-close {
+  border: none;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+}
+.modal-close:hover { background: var(--danger-soft); color: var(--danger); }
+.bulk-import-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 13.5px;
+  font-family: inherit;
+  line-height: 1.6;
+  resize: vertical;
+  color: var(--text);
+}
+.bulk-import-textarea:focus { outline: 2px solid var(--primary-soft); border-color: var(--primary); }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.bulk-preview-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 55vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.bulk-preview-row {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: #fafbfe;
+}
+.bulk-preview-row.skip { opacity: 0.55; }
+.bulk-preview-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.bulk-preview-name { font-size: 14px; font-weight: 800; }
+.bulk-preview-row-head select,
+.bulk-preview-new-fields select {
+  height: 32px;
+  box-sizing: border-box;
+  padding: 0 28px 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-family: inherit;
+  background-color: #fff;
+  color: var(--text);
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%23707585' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  background-size: 10px 6px;
+}
+.bulk-preview-row-head select:focus,
+.bulk-preview-new-fields select:focus { outline: 2px solid var(--primary-soft); border-color: var(--primary); }
+.bulk-preview-new-fields { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.bulk-preview-schedule { display: flex; flex-wrap: wrap; gap: 6px; }
+.bulk-preview-day-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: #eef0fa;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--text);
+}
+.bulk-preview-day-chip b { font-weight: 800; }
+.bulk-preview-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.bulk-preview-note.warning { color: #92400e; }
+.bulk-preview-note.error { color: var(--danger); font-weight: 600; }

@@ -67,6 +67,7 @@
     onceLimitedMemberIds: [],  // 이번 후보 생성에서 최대 1회만 배정되어야 하는 회원 id 목록
     excludedMemberIds: [],  // "미배정 회원": 후보 생성에서 아예 제외할 회원 id 목록
     requiredMemberIds: [],  // "필수 배정 회원": 가능하면 무조건 1회 이상 배정되어야 하는 회원 id 목록
+    doubleAssignMemberIds: [],  // "2회 배정 회원": 1회 배정된 뒤 2번째 수업을 다른 회원보다 먼저 배정할 회원 id 목록
     priorityMapoDouble: false  // "마포점 우선 2회 배정": 마포점 회원의 2번째 수업을 다른 지점보다 먼저 배정
   };
   let availableCells = new Set();
@@ -205,6 +206,7 @@
         state.onceLimitedMemberIds = parsed.onceLimitedMemberIds || [];
         state.excludedMemberIds = parsed.excludedMemberIds || [];
         state.requiredMemberIds = parsed.requiredMemberIds || [];
+        state.doubleAssignMemberIds = parsed.doubleAssignMemberIds || [];
         state.priorityMapoDouble = !!parsed.priorityMapoDouble;
         availableCells = new Set(parsed.availableCells || []);
         candidates = parsed.candidates || [];
@@ -309,6 +311,12 @@
   // 상담 회원은 이미 항상 최대 1회로 제한되므로(위 규칙), "1회 제한 회원" 목록에는 표시하지 않는다.
   function isOnceLimitEligible(member) {
     return !!member && (member.category || "상담") !== "상담";
+  }
+
+  // "2회 배정 회원": 상담 회원과 "1회 제한 회원"은 이미 최대 1회로 캡되어 있어 2번째 수업
+  // 자체가 있을 수 없으므로 대상에서 제외한다.
+  function isDoubleAssignEligible(member) {
+    return isOnceLimitEligible(member) && !state.onceLimitedMemberIds.includes(member.id);
   }
 
   function locationById(id) { return state.locations.find(l => l.id === id); }
@@ -965,6 +973,401 @@
     showToast("전체 스케줄이 초기화되었습니다", "info");
   });
 
+  /* ---------------- 회원 스케줄 추가: 붙여넣기로 일괄 등록 ---------------- */
+  // 트레이너가 평소 쓰는 "이름  요일 시간..." 텍스트를 그대로 붙여넣으면 파싱해서 회원별
+  // 희망 시간으로 한 번에 등록한다. 이름 다음에는 요일 토큰(월화수목금토를 이어 붙인 것,
+  // 예: 화목)과 시간 토큰이 번갈아 나오고, 시간 토큰의 숫자는 새 요일 토큰이 나오기 전까지
+  // 직전 요일 토큰 전체에 적용된다. "화목8910"처럼 요일과 시간 사이에 공백이 없어도
+  // 요일 글자 뒤에 남는 숫자를 그대로 시간 토큰으로 이어서 처리한다.
+  const DAY_CHAR_TO_INDEX = {};
+  DAYS.forEach((d, i) => { DAY_CHAR_TO_INDEX[d] = i; });
+
+  function parseDayGroupToken(token) {
+    if (!token || !/^[월화수목금토]+$/.test(token)) return null;
+    return Array.from(token).map(ch => DAY_CHAR_TO_INDEX[ch]);
+  }
+
+  // 숫자만 이어진 문자열을 "시(오후 기준, 1~12)"들의 나열로 되돌린다. 예: "8910" -> 8시·9시·10시,
+  // "730" -> 7시30분, "1030" -> 10시30분. 앞에서부터 그리디하게 2자리(10/11/12)를 먼저 시도하고,
+  // 뒤에 "30"이 바로 붙으면 반시간으로 묶는다(백트래킹으로 전체 문자열이 소진되는 경우만 채택).
+  function tokenizeHourDigits(digits) {
+    function rec(s) {
+      if (s === "") return [];
+      for (const len of [2, 1]) {
+        if (s.length < len) continue;
+        const num = parseInt(s.slice(0, len), 10);
+        const valid = len === 2 ? (num === 10 || num === 11 || num === 12) : (num >= 1 && num <= 9);
+        if (!valid) continue;
+        const rest = s.slice(len);
+        if (rest.slice(0, 2) === "30") {
+          const sub = rec(rest.slice(2));
+          if (sub) return [{ hour: num, half: true }].concat(sub);
+        }
+        const sub2 = rec(rest);
+        if (sub2) return [{ hour: num, half: false }].concat(sub2);
+      }
+      return null;
+    }
+    return rec(digits);
+  }
+
+  // "시(1~12, 오후 기준)"를 그리드 startSlot으로 바꾼다. 근무 가능 시간이 12:00~24:00
+  // 기준이라 12시는 정오, 1~11시는 모두 오후(13:00~23:00)로 취급한다.
+  function hourMarkToStartSlot(mark) {
+    const hour24 = (mark.hour % 12) + 12;
+    const minutes = hour24 * 60 + (mark.half ? 30 : 0);
+    return (minutes - START_MIN) / SLOT_MIN;
+  }
+
+  function hourMarkLabel(mark) {
+    const hour24 = (mark.hour % 12) + 12;
+    return minutesLabel(hour24 * 60 + (mark.half ? 30 : 0));
+  }
+
+  // "2~5"(왼쪽·오른쪽 모두 시각이 있는 물결)는 "2345"를 이어 쓴 것과 같은 뜻으로, 두 시각
+  // 사이의 매시 정각을 전부 개별 희망 시작 시각으로 펼친다(오후 기준 1~12시를 순환). 양쪽
+  // 끝의 반시간(30분) 표기는 그 끝에서만 그대로 반영한다.
+  function expandHourRange(leftMark, rightMark) {
+    const marks = [{ hour: leftMark.hour, half: leftMark.half }];
+    if (leftMark.hour === rightMark.hour) {
+      if (rightMark.half && !leftMark.half) marks.push({ hour: rightMark.hour, half: true });
+      return marks;
+    }
+    let h = leftMark.hour;
+    for (let i = 0; i < 12; i++) {
+      h = h === 12 ? 1 : h + 1;
+      if (h === rightMark.hour) { marks.push({ hour: h, half: rightMark.half }); return marks; }
+      marks.push({ hour: h, half: false });
+    }
+    return null; // 12시간을 넘게 순회하면(형식 오류) 안전하게 실패 처리
+  }
+
+  // 시간 토큰 하나를 해석한다.
+  //  - "8910" 같은 순수 숫자열 -> { type:"point", marks:[...] } (각각 독립된 희망 시작 시각)
+  //  - "2~5" 처럼 물결 양쪽에 시각이 있으면 -> { type:"point", marks:[...] } ("2345"와 동일하게 확장)
+  //  - "630~" -> { type:"openStart", mark:{...} } (그 시각부터 마감까지 전부 가능)
+  //  - "~730" -> { type:"openEnd", mark:{...} } (마감 이전부터 그 시각까지 전부 가능)
+  function parseTimeToken(token) {
+    const cleanMatch = token.match(/^[\d~]+/);
+    let warning = null;
+    if (!cleanMatch) return { error: "알 수 없는 시간 표기: \"" + token + "\"" };
+    const clean = cleanMatch[0];
+    if (clean.length < token.length) {
+      warning = "\"" + token + "\"에서 뒤쪽 문자(\"" + token.slice(clean.length) + "\")는 무시했습니다.";
+    }
+    const tildeCount = (clean.match(/~/g) || []).length;
+    if (tildeCount > 1) return { error: "알 수 없는 시간 표기: \"" + token + "\"", warning };
+    if (tildeCount === 1) {
+      const [leftStr, rightStr] = clean.split("~");
+      if (leftStr !== "" && rightStr !== "") {
+        const leftMarks = tokenizeHourDigits(leftStr);
+        const rightMarks = tokenizeHourDigits(rightStr);
+        if (!leftMarks || leftMarks.length !== 1 || !rightMarks || rightMarks.length !== 1) {
+          return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+        }
+        const marks = expandHourRange(leftMarks[0], rightMarks[0]);
+        if (!marks) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+        return { type: "point", marks, warning };
+      }
+      if (rightStr === "") {
+        const marks = tokenizeHourDigits(leftStr);
+        if (!marks || marks.length !== 1) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+        return { type: "openStart", mark: marks[0], warning };
+      }
+      const marks = tokenizeHourDigits(rightStr);
+      if (!marks || marks.length !== 1) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+      return { type: "openEnd", mark: marks[0], warning };
+    }
+    const marks = tokenizeHourDigits(clean);
+    if (!marks) return { error: "시간 해석 실패: \"" + token + "\"", warning };
+    return { type: "point", marks, warning };
+  }
+
+  // 한 줄("이름  요일 시간...")을 해석한다.
+  function parseBulkImportLine(line) {
+    const tokens = line.trim().split(/\s+/).filter(Boolean);
+    if (tokens.length === 0) return null;
+    const name = tokens[0];
+    const result = { raw: line.trim(), name, days: [], warnings: [], errors: [] };
+    let currentDays = null;
+
+    function applyTimeToken(tok) {
+      if (!currentDays) {
+        result.errors.push("요일 지정 전에 나온 시간 표기라 건너뜁니다: \"" + tok + "\"");
+        return;
+      }
+      const parsed = parseTimeToken(tok);
+      if (parsed.warning) result.warnings.push(parsed.warning);
+      if (parsed.error) { result.errors.push(parsed.error); return; }
+      currentDays.forEach(day => {
+        let dayEntry = result.days.find(d => d.day === day);
+        if (!dayEntry) { dayEntry = { day, specs: [] }; result.days.push(dayEntry); }
+        dayEntry.specs.push(parsed);
+      });
+    }
+
+    for (let i = 1; i < tokens.length; i++) {
+      let tok = tokens[i];
+      const dayPrefixMatch = tok.match(/^[월화수목금토]+/);
+      if (dayPrefixMatch) {
+        currentDays = parseDayGroupToken(dayPrefixMatch[0]);
+        tok = tok.slice(dayPrefixMatch[0].length);
+        if (tok === "") continue;
+      }
+      applyTimeToken(tok);
+    }
+    result.days.sort((a, b) => a.day - b.day);
+    return result;
+  }
+
+  function parseBulkImportText(text) {
+    return text.split("\n").map(parseBulkImportLine).filter(Boolean);
+  }
+
+  // 파싱된 하루치 스케줄(day.specs)을 사람이 읽을 문구로 만든다 (미리보기 칩용).
+  function describeDaySpecs(specs) {
+    const parts = [];
+    specs.forEach(spec => {
+      if (spec.type === "point") {
+        spec.marks.forEach(m => parts.push(hourMarkLabel(m)));
+      } else if (spec.type === "openStart") {
+        parts.push(hourMarkLabel(spec.mark) + "~마감");
+      } else if (spec.type === "openEnd") {
+        parts.push("시작~" + hourMarkLabel(spec.mark));
+      }
+    });
+    return parts.join(", ");
+  }
+
+  function findMembersByName(name) {
+    return state.members.filter(m => m.name === name);
+  }
+
+  /* ---- 붙여넣기 모달 ---- */
+  const bulkImportOverlayEl = document.getElementById("bulkImportOverlay");
+  const bulkImportOpenBtn = document.getElementById("bulkImportOpenBtn");
+  const bulkImportCloseBtn = document.getElementById("bulkImportCloseBtn");
+  const bulkImportCancelBtn = document.getElementById("bulkImportCancelBtn");
+  const bulkImportBackBtn = document.getElementById("bulkImportBackBtn");
+  const bulkImportPreviewBtn = document.getElementById("bulkImportPreviewBtn");
+  const bulkImportApplyBtn = document.getElementById("bulkImportApplyBtn");
+  const bulkImportTextareaEl = document.getElementById("bulkImportTextarea");
+  const bulkImportStepInputEl = document.getElementById("bulkImportStepInput");
+  const bulkImportStepPreviewEl = document.getElementById("bulkImportStepPreview");
+  const bulkImportPreviewSummaryEl = document.getElementById("bulkImportPreviewSummary");
+  const bulkImportPreviewListEl = document.getElementById("bulkImportPreviewList");
+
+  // { parsed, choice: memberId | "__new__" | "__skip__", newLocationId, newCategory }
+  let bulkImportRows = [];
+
+  function openBulkImportModal() {
+    bulkImportTextareaEl.value = "";
+    bulkImportStepInputEl.style.display = "";
+    bulkImportStepPreviewEl.style.display = "none";
+    bulkImportOverlayEl.classList.add("open");
+    setTimeout(() => bulkImportTextareaEl.focus(), 0);
+  }
+
+  function closeBulkImportModal() {
+    bulkImportOverlayEl.classList.remove("open");
+  }
+
+  bulkImportOpenBtn.addEventListener("click", openBulkImportModal);
+  bulkImportCloseBtn.addEventListener("click", closeBulkImportModal);
+  bulkImportCancelBtn.addEventListener("click", closeBulkImportModal);
+  bulkImportOverlayEl.addEventListener("click", (e) => {
+    if (e.target === bulkImportOverlayEl) closeBulkImportModal();
+  });
+  bulkImportBackBtn.addEventListener("click", () => {
+    bulkImportStepInputEl.style.display = "";
+    bulkImportStepPreviewEl.style.display = "none";
+  });
+
+  function renderBulkImportPreview() {
+    const lines = parseBulkImportText(bulkImportTextareaEl.value);
+    if (lines.length === 0) {
+      alert("붙여넣은 내용이 없습니다.");
+      return;
+    }
+    bulkImportRows = lines.map(parsed => {
+      const matches = findMembersByName(parsed.name);
+      return {
+        parsed,
+        choice: matches.length >= 1 ? matches[0].id : "__new__",
+        newLocationId: state.locations[0] ? state.locations[0].id : "",
+        newCategory: "등록"
+      };
+    });
+
+    bulkImportPreviewListEl.innerHTML = "";
+    let willApply = 0, willCreate = 0, willSkip = 0;
+
+    bulkImportRows.forEach(row => {
+      const parsed = row.parsed;
+      const matches = findMembersByName(parsed.name);
+
+      const rowEl = document.createElement("div");
+      rowEl.className = "bulk-preview-row";
+
+      const head = document.createElement("div");
+      head.className = "bulk-preview-row-head";
+
+      const nameEl = document.createElement("span");
+      nameEl.className = "bulk-preview-name";
+      nameEl.textContent = parsed.name;
+      head.appendChild(nameEl);
+
+      const select = document.createElement("select");
+      matches.forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m.id;
+        const locNames = m.locationIds.map(id => locationById(id)).filter(Boolean).map(l => l.name).join("·");
+        opt.textContent = "기존 회원 등록(" + (locNames || "지점 미지정") + ")" + (matches.length > 1 ? " #" + m.id.slice(-4) : "");
+        select.appendChild(opt);
+      });
+      const newOpt = document.createElement("option");
+      newOpt.value = "__new__";
+      newOpt.textContent = "새 회원으로 등록";
+      select.appendChild(newOpt);
+      const skipOpt = document.createElement("option");
+      skipOpt.value = "__skip__";
+      skipOpt.textContent = "건너뛰기";
+      select.appendChild(skipOpt);
+      select.value = row.choice;
+      select.addEventListener("change", () => {
+        row.choice = select.value;
+        renderRowState();
+      });
+      head.appendChild(select);
+      rowEl.appendChild(head);
+
+      const newFields = document.createElement("div");
+      newFields.className = "bulk-preview-new-fields";
+      const locSelect = document.createElement("select");
+      state.locations.forEach(loc => {
+        const opt = document.createElement("option");
+        opt.value = loc.id;
+        opt.textContent = loc.name;
+        locSelect.appendChild(opt);
+      });
+      if (row.newLocationId) locSelect.value = row.newLocationId;
+      locSelect.addEventListener("change", () => { row.newLocationId = locSelect.value; });
+      const catSelect = document.createElement("select");
+      CATEGORY_OPTIONS.forEach(opt => {
+        const optionEl = document.createElement("option");
+        optionEl.value = opt;
+        optionEl.textContent = opt;
+        catSelect.appendChild(optionEl);
+      });
+      catSelect.value = row.newCategory;
+      catSelect.addEventListener("change", () => { row.newCategory = catSelect.value; });
+      newFields.appendChild(locSelect);
+      newFields.appendChild(catSelect);
+      rowEl.appendChild(newFields);
+
+      const scheduleEl = document.createElement("div");
+      scheduleEl.className = "bulk-preview-schedule";
+      if (parsed.days.length > 0) {
+        parsed.days.forEach(dayEntry => {
+          const chip = document.createElement("span");
+          chip.className = "bulk-preview-day-chip";
+          chip.innerHTML = "<b>" + DAYS[dayEntry.day] + "</b> " + describeDaySpecs(dayEntry.specs);
+          scheduleEl.appendChild(chip);
+        });
+      } else {
+        const chip = document.createElement("span");
+        chip.className = "bulk-preview-day-chip";
+        chip.textContent = "등록할 시간 없음";
+        scheduleEl.appendChild(chip);
+      }
+      rowEl.appendChild(scheduleEl);
+
+      parsed.warnings.forEach(w => {
+        const p = document.createElement("p");
+        p.className = "bulk-preview-note warning";
+        p.textContent = "⚠ " + w;
+        rowEl.appendChild(p);
+      });
+      parsed.errors.forEach(err => {
+        const p = document.createElement("p");
+        p.className = "bulk-preview-note error";
+        p.textContent = "✕ " + err;
+        rowEl.appendChild(p);
+      });
+
+      function renderRowState() {
+        rowEl.classList.toggle("skip", row.choice === "__skip__");
+        newFields.style.display = row.choice === "__new__" ? "flex" : "none";
+      }
+      renderRowState();
+
+      bulkImportPreviewListEl.appendChild(rowEl);
+
+      if (row.choice === "__skip__") willSkip++;
+      else if (row.choice === "__new__") willCreate++;
+      else willApply++;
+    });
+
+    bulkImportPreviewSummaryEl.textContent =
+      "총 " + bulkImportRows.length + "줄 · 기존 회원 적용 " + willApply + "명 · 신규 등록 " + willCreate +
+      "명 · 건너뛰기 " + willSkip + "명. 적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다.";
+
+    bulkImportStepInputEl.style.display = "none";
+    bulkImportStepPreviewEl.style.display = "";
+  }
+
+  bulkImportPreviewBtn.addEventListener("click", renderBulkImportPreview);
+
+  bulkImportApplyBtn.addEventListener("click", () => {
+    if (state.locations.length === 0) {
+      alert("설정 페이지에서 지점을 먼저 등록해주세요.");
+      return;
+    }
+    let appliedCount = 0, createdCount = 0;
+    bulkImportRows.forEach(row => {
+      if (row.choice === "__skip__") return;
+      let member;
+      if (row.choice === "__new__") {
+        if (!row.newLocationId) return;
+        member = {
+          id: uid("m"),
+          name: row.parsed.name,
+          locationIds: [row.newLocationId],
+          category: row.newCategory,
+          memo: ""
+        };
+        state.members.unshift(member);
+        createdCount++;
+      } else {
+        member = memberById(row.choice);
+        if (!member) return;
+      }
+      state.requests = state.requests.filter(r => r.memberId !== member.id);
+      row.parsed.days.forEach(dayEntry => {
+        dayEntry.specs.forEach(spec => {
+          if (spec.type === "point") {
+            spec.marks.forEach(mark => {
+              const slot = hourMarkToStartSlot(mark);
+              addDesiredRange(member, dayEntry.day, slot, slot);
+            });
+          } else if (spec.type === "openStart") {
+            addDesiredRange(member, dayEntry.day, hourMarkToStartSlot(spec.mark), SLOT_COUNT);
+          } else if (spec.type === "openEnd") {
+            addDesiredRange(member, dayEntry.day, 0, hourMarkToStartSlot(spec.mark));
+          }
+        });
+      });
+      appliedCount++;
+    });
+
+    requestsChangedSinceGenerate = true;
+    saveState();
+    renderMemberTable();
+    renderRequestList();
+    closeBulkImportModal();
+    showToast(appliedCount + "명 스케줄 등록 완료" + (createdCount ? " (신규 " + createdCount + "명)" : ""), "success");
+  });
+
   // Notion 스타일 지점 다중 선택 위젯: 드롭다운에서 클릭 한 번으로 지점을 추가/제거한다.
   let memberFormLocationIds = [];
   let memberLocationDropdownOpen = false;
@@ -1149,6 +1552,7 @@
     state.onceLimitedMemberIds = state.onceLimitedMemberIds.filter(id => id !== member.id);
     state.excludedMemberIds = state.excludedMemberIds.filter(id => id !== member.id);
     state.requiredMemberIds = state.requiredMemberIds.filter(id => id !== member.id);
+    state.doubleAssignMemberIds = state.doubleAssignMemberIds.filter(id => id !== member.id);
     requestsChangedSinceGenerate = true;
     saveState();
     renderMemberTable();
@@ -1194,6 +1598,7 @@
     renderOnceLimitUI();
     renderExcludedUI();
     renderRequiredUI();
+    renderDoubleAssignUI();
     memberTableBodyEl.innerHTML = "";
     memberLocationSortArrowEl.textContent =
       memberLocationSortDir === "asc" ? "▲" : memberLocationSortDir === "desc" ? "▼" : "";
@@ -1722,6 +2127,9 @@
     const sessionCountFirst = !!options.sessionCountFirst;
     const pinnedLocationDay = options.pinnedLocationDay || null; // { day, locationId } — 후보I/J
     const priorityDoubleLocationId = options.priorityDoubleLocationId || null; // "마포점 우선 2회 배정" 체크박스
+    // "2회 배정 회원": 지정된 회원의 2번째 세션을 다른 회원들의 2번째 세션보다 먼저 채운다.
+    const doubleAssignMemberIds = (options.doubleAssignMemberIds && options.doubleAssignMemberIds.length)
+      ? new Set(options.doubleAssignMemberIds) : null;
     const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY; // 후보F는 2회로 강화
     const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보C·D·E)
     // 후보A·B: 인원(또는 세션 수) → 이동 횟수까지만 비교하고 멈춘다 — 이동 시간, 이동시간+빈시간 합, 정렬,
@@ -2103,8 +2511,14 @@
     // 조건보다 낮은 가중치여야 한다"는 결정에 따라 제거했다). 다만 "필수 배정 회원"으로 지정된
     // 회원은 이 1단계에서 압도적으로 큰 가중치를 줘서, 다른 회원 여러 명을 태우는 조합보다
     // 항상 우선 선택되게 한다 — 이렇게 하면 가능한 자리가 있는 한 사실상 무조건 배정된다.
+    // "2회 배정 회원"도 같은 크기의 가중치를 준다 — sessionCountFirst(후보B)처럼 1단계에서부터
+    // 한 회원이 2회까지 채워질 수 있는 전략에서는, 1.4단계(1회 배정된 뒤 끼워 넣기)가 실행될
+    // 때 이미 그 날짜들이 다른 회원들로 빈틈없이 채워져 있어 끼워 넣을 자리가 없는 경우가
+    // 흔하기 때문 — 1단계 자체에서부터 이 회원의 두 세션 모두를 우선 선택하게 해야 한다.
     function fairnessWeight(memberId) {
-      return state.requiredMemberIds.includes(memberId) ? REQUIRED_MEMBER_WEIGHT : 1;
+      if (state.requiredMemberIds.includes(memberId)) return REQUIRED_MEMBER_WEIGHT;
+      if (doubleAssignMemberIds && doubleAssignMemberIds.has(memberId)) return REQUIRED_MEMBER_WEIGHT;
+      return 1;
     }
 
     // 확정(고정)된 세션이 있으면, 그 요일의 맨 앞부터 첫 확정 세션 앞까지의 빈 시간을 먼저
@@ -2142,9 +2556,13 @@
     // 1단계: 아직 아무 것도 못 받은 회원들만으로 요일별 체인을 새로 짠다. stage1Order가 그 순서를 정한다.
     // sessionCountFirst(후보B)이면 "아직 못 받은 회원만"이라는 제약을 두지 않는다 —
     // 인원(서로 다른 회원 수) 우선이 아니라 세션 총 개수 자체를 곧바로 최대화하기 위함이다.
+    // "2회 배정 회원"도 같은 이유로 이 제약에서 예외를 둔다 — sessionCountFirst가 아닌
+    // 전략에서도, 1회 배정된 뒤에는 stage1에서 배제돼버려 이후 이미 빈틈없이 채워진 요일에
+    // 끼워 넣지 못하는(1.4단계 한계) 문제가 생기므로, fairnessWeight의 큰 가중치를 받으며
+    // stage1 안에서 곧바로 2번째 세션까지 경쟁하게 한다.
     stage1Order.forEach(day => {
       const elig = new Set([...allMemberIdsForDay(day)].filter(id => {
-        if (!sessionCountFirst) {
+        if (!sessionCountFirst && !(doubleAssignMemberIds && doubleAssignMemberIds.has(id))) {
           const usedDays = memberDays.get(id);
           if (usedDays && usedDays.size >= 1) return false;
         }
@@ -2152,6 +2570,20 @@
       }));
       fillDay(day, elig, fairnessWeight);
     });
+
+    // 1.4단계("2회 배정 회원" 목록): 지정된 회원 중 1단계에서 이미 1회 배정된 회원의 2번째
+    // 세션을, "마포점 우선 2회 배정"(1.5단계)과 다른 회원들의 2번째 세션(2·3단계)보다 먼저 채운다.
+    if (doubleAssignMemberIds) {
+      days.forEach(day => {
+        const elig = new Set([...allMemberIdsForDay(day)].filter(id => {
+          if (!withinCaps(id, day)) return false;
+          const usedDays = memberDays.get(id);
+          if (!usedDays || usedDays.size !== 1) return false; // 이미 1회 배정된 회원만
+          return doubleAssignMemberIds.has(id);
+        }));
+        fillDay(day, elig);
+      });
+    }
 
     // 1.5단계("마포점 우선 2회 배정" 체크박스): 지정된 지점(마포점) 소속 회원 중 1단계에서
     // 이미 1회 배정된 회원의 2번째 세션을, 다른 회원들의 2번째 세션(2·3단계)보다 먼저 채운다.
@@ -2456,11 +2888,12 @@
     const strategy = STRATEGIES[strategyIndex];
     const sorted = strategy.sort(eligible, jitter);
     const strategyOptions = typeof strategy.options === "function" ? strategy.options() : strategy.options;
-    // "마포점 우선 2회 배정" 체크박스: 모든 후보 전략에 공통으로 적용되는 전역 옵션이므로,
-    // 전략별 options 위에 덧씌운다.
-    const options = state.priorityMapoDouble
-      ? Object.assign({}, strategyOptions, { priorityDoubleLocationId: locationIdByName("마포점") })
-      : strategyOptions;
+    // "마포점 우선 2회 배정" 체크박스·"2회 배정 회원" 목록: 모든 후보 전략에 공통으로 적용되는
+    // 전역 옵션이므로, 전략별 options 위에 덧씌운다.
+    const globalOptions = {};
+    if (state.priorityMapoDouble) globalOptions.priorityDoubleLocationId = locationIdByName("마포점");
+    if (state.doubleAssignMemberIds.length > 0) globalOptions.doubleAssignMemberIds = state.doubleAssignMemberIds;
+    const options = Object.assign({}, strategyOptions, globalOptions);
     let cand = buildCandidate(strategy.title, strategy.desc, sorted, eligibleIds, allMemberIds, options, pinned);
     // strengthenSearch는 전략의 "이름"(배열 위치가 아니라)에 매인 명시적 플래그다 — 배열 순서가
     // 또 바뀌어도 엉뚱한 후보에 이 사전 탐색이 붙거나 빠지지 않도록.
@@ -2722,6 +3155,10 @@
       alert("미배정 회원에 추가되어 있는 회원입니다.\n미배정 회원에서 삭제 후 다시 추가해 주세요.");
       return;
     }
+    if (state.doubleAssignMemberIds.includes(memberId)) {
+      alert("2회 배정 회원에 추가되어 있는 회원입니다.\n2회 배정 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
     state.onceLimitedMemberIds = state.onceLimitedMemberIds.concat(memberId);
     onOnceLimitChanged();
   }
@@ -2862,6 +3299,10 @@
     }
     if (state.requiredMemberIds.includes(memberId)) {
       alert("필수 배정 회원에 추가되어 있는 회원입니다.\n필수 배정 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
+    if (state.doubleAssignMemberIds.includes(memberId)) {
+      alert("2회 배정 회원에 추가되어 있는 회원입니다.\n2회 배정 회원에서 삭제 후 다시 추가해 주세요.");
       return;
     }
     state.excludedMemberIds = state.excludedMemberIds.concat(memberId);
@@ -3097,6 +3538,145 @@
   });
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && requiredDropdownOpen) closeRequiredDropdown();
+  });
+
+  // "2회 배정 회원": 선택한 회원은 1회 배정된 뒤 2번째 수업을 다른 회원보다 먼저 배정한다
+  // (미배정 회원·1회 제한 회원과 같은 칩+드롭다운 UI를 그대로 따른다). 상담 회원·1회 제한
+  // 회원은 애초에 2번째 수업이 있을 수 없어 대상에서 제외한다(isDoubleAssignEligible).
+  const doubleAssignMsEl = document.getElementById("doubleAssignMs");
+  const doubleAssignControlEl = document.getElementById("doubleAssignControl");
+  const doubleAssignChipRowEl = document.getElementById("doubleAssignChipRow");
+  const doubleAssignDropdownEl = document.getElementById("doubleAssignDropdown");
+  let doubleAssignDropdownOpen = false;
+
+  function onDoubleAssignChanged() {
+    // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 후보가 있으면 즉시 비운다.
+    if (candidates.length > 0) {
+      candidates = [];
+      renderCandidates();
+      generateHintEl.textContent = "2회 배정 회원 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
+    } else {
+      requestsChangedSinceGenerate = true;
+    }
+    saveState();
+    renderDoubleAssignChips();
+    renderDoubleAssignDropdown();
+  }
+
+  function addDoubleAssignMember(memberId) {
+    if (state.doubleAssignMemberIds.includes(memberId)) return;
+    if (state.excludedMemberIds.includes(memberId)) {
+      alert("미배정 회원에 추가되어 있는 회원입니다.\n미배정 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
+    if (state.onceLimitedMemberIds.includes(memberId)) {
+      alert("1회 제한 회원에 추가되어 있는 회원입니다.\n1회 제한 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
+    if (!state.requests.some(r => r.memberId === memberId)) {
+      alert("회원 스케줄이 없습니다. 회원 스케줄을 추가해 주세요.");
+      return;
+    }
+    state.doubleAssignMemberIds = state.doubleAssignMemberIds.concat(memberId);
+    onDoubleAssignChanged();
+  }
+
+  function removeDoubleAssignMember(memberId) {
+    state.doubleAssignMemberIds = state.doubleAssignMemberIds.filter(id => id !== memberId);
+    onDoubleAssignChanged();
+  }
+
+  function renderDoubleAssignChips() {
+    doubleAssignChipRowEl.innerHTML = "";
+    // "+ 추가" 버튼은 회원 칩이 몇 개든 항상 목록 맨 앞(같은 자리)에 오도록 매번 다시 붙인다.
+    doubleAssignChipRowEl.appendChild(doubleAssignMsEl);
+    const selectedMembers = state.doubleAssignMemberIds
+      .map(id => memberById(id))
+      .filter(isDoubleAssignEligible)
+      .sort(compareOnceLimitMembers);
+    if (selectedMembers.length === 0) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "ms-placeholder";
+      placeholder.textContent = "설정된 회원 없음";
+      doubleAssignChipRowEl.appendChild(placeholder);
+      return;
+    }
+    selectedMembers.forEach(m => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      appendOnceLimitMemberLabel(chip, m);
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.textContent = "×";
+      removeBtn.title = "제거";
+      removeBtn.addEventListener("click", () => removeDoubleAssignMember(m.id));
+      chip.appendChild(removeBtn);
+      doubleAssignChipRowEl.appendChild(chip);
+    });
+  }
+
+  function renderDoubleAssignDropdown() {
+    doubleAssignDropdownEl.innerHTML = "";
+    const eligibleMembers = state.members.filter(isDoubleAssignEligible);
+    const addable = eligibleMembers
+      .filter(m => !state.doubleAssignMemberIds.includes(m.id))
+      .sort(compareOnceLimitMembers);
+    if (eligibleMembers.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "등록 회원이 없습니다. (상담 회원·1회 제한 회원은 대상에서 제외됩니다)";
+      doubleAssignDropdownEl.appendChild(empty);
+      return;
+    }
+    if (addable.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "모든 회원이 이미 추가되어 있습니다.";
+      doubleAssignDropdownEl.appendChild(empty);
+      return;
+    }
+    addable.forEach(m => {
+      const item = document.createElement("div");
+      item.className = "ms-option";
+      item.setAttribute("role", "option");
+      appendOnceLimitMemberLabel(item, m);
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        addDoubleAssignMember(m.id);
+      });
+      doubleAssignDropdownEl.appendChild(item);
+    });
+  }
+
+  function openDoubleAssignDropdown() {
+    if (!state.members.some(isDoubleAssignEligible)) return;
+    doubleAssignDropdownOpen = true;
+    doubleAssignMsEl.classList.add("open");
+    doubleAssignControlEl.setAttribute("aria-expanded", "true");
+  }
+
+  function closeDoubleAssignDropdown() {
+    doubleAssignDropdownOpen = false;
+    doubleAssignMsEl.classList.remove("open");
+    doubleAssignControlEl.setAttribute("aria-expanded", "false");
+  }
+
+  doubleAssignControlEl.addEventListener("click", () => {
+    if (doubleAssignDropdownOpen) closeDoubleAssignDropdown();
+    else openDoubleAssignDropdown();
+  });
+
+  function renderDoubleAssignUI() {
+    state.doubleAssignMemberIds = state.doubleAssignMemberIds.filter(id => isDoubleAssignEligible(memberById(id)));
+    renderDoubleAssignChips();
+    renderDoubleAssignDropdown();
+  }
+
+  document.addEventListener("click", (e) => {
+    if (doubleAssignDropdownOpen && !doubleAssignMsEl.contains(e.target)) closeDoubleAssignDropdown();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && doubleAssignDropdownOpen) closeDoubleAssignDropdown();
   });
 
   const priorityMapoDoubleCheckboxEl = document.getElementById("priorityMapoDoubleCheckbox");
