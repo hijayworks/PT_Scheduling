@@ -66,7 +66,8 @@
     requests: [],         // {id, memberId, locationId, day, startSlot, duration}
     onceLimitedMemberIds: [],  // 이번 후보 생성에서 최대 1회만 배정되어야 하는 회원 id 목록
     excludedMemberIds: [],  // "미배정 회원": 후보 생성에서 아예 제외할 회원 id 목록
-    requiredMemberIds: []  // "필수 배정 회원": 가능하면 무조건 1회 이상 배정되어야 하는 회원 id 목록
+    requiredMemberIds: [],  // "필수 배정 회원": 가능하면 무조건 1회 이상 배정되어야 하는 회원 id 목록
+    priorityMapoDouble: false  // "마포점 우선 2회 배정": 마포점 회원의 2번째 수업을 다른 지점보다 먼저 배정
   };
   let availableCells = new Set();
   let candidates = [];          // computed candidates
@@ -204,6 +205,7 @@
         state.onceLimitedMemberIds = parsed.onceLimitedMemberIds || [];
         state.excludedMemberIds = parsed.excludedMemberIds || [];
         state.requiredMemberIds = parsed.requiredMemberIds || [];
+        state.priorityMapoDouble = !!parsed.priorityMapoDouble;
         availableCells = new Set(parsed.availableCells || []);
         candidates = parsed.candidates || [];
         if (PAGE_IDS.indexOf(parsed.currentPage) !== -1) {
@@ -955,8 +957,7 @@
 
   resetAllSchedulesBtn.addEventListener("click", () => {
     if (state.requests.length === 0) return;
-    const memberCount = new Set(state.requests.map(r => r.memberId)).size;
-    if (!confirm("전체 회원(" + memberCount + "명)의 등록된 가능 시간 " + state.requests.length + "건을 모두 지우고 초기화할까요?")) return;
+    if (!confirm("스케줄이 등록된 회원의 가능 시간을 모두 지우고 초기화할까요?")) return;
     state.requests = [];
     requestsChangedSinceGenerate = true;
     saveState();
@@ -1716,6 +1717,7 @@
     const groupByLocation = !!options.groupByLocation;
     const minimizeUnassigned = !!options.minimizeUnassigned;
     const pinnedLocationDay = options.pinnedLocationDay || null; // { day, locationId } — 후보I/J
+    const priorityDoubleLocationId = options.priorityDoubleLocationId || null; // "마포점 우선 2회 배정" 체크박스
     const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY; // 후보E는 2회로 강화
     const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보B·C·D)
     // 후보A: 인원 → 이동 횟수까지만 비교하고 멈춘다 — 이동 시간, 이동시간+빈시간 합, 정렬,
@@ -2143,6 +2145,21 @@
       fillDay(day, elig, fairnessWeight);
     });
 
+    // 1.5단계("마포점 우선 2회 배정" 체크박스): 지정된 지점(마포점) 소속 회원 중 1단계에서
+    // 이미 1회 배정된 회원의 2번째 세션을, 다른 회원들의 2번째 세션(2·3단계)보다 먼저 채운다.
+    if (priorityDoubleLocationId) {
+      days.forEach(day => {
+        const elig = new Set([...allMemberIdsForDay(day)].filter(id => {
+          if (!withinCaps(id, day)) return false;
+          const usedDays = memberDays.get(id);
+          if (!usedDays || usedDays.size !== 1) return false; // 이미 1회 배정된 회원만
+          const member = memberById(id);
+          return !!member && member.locationIds.includes(priorityDoubleLocationId);
+        }));
+        fillDay(day, elig);
+      });
+    }
+
     // 2단계: 남는 자리 중 연속된 요일이 아닌 곳부터 추가로 채운다.
     days.forEach(day => {
       const elig = new Set([...allMemberIdsForDay(day)].filter(id => {
@@ -2237,8 +2254,10 @@
       .filter(Boolean);
     const sessionCountByMember = new Map();
     assigned.forEach(r => sessionCountByMember.set(r.memberId, (sessionCountByMember.get(r.memberId) || 0) + 1));
+    // "1회 제한 회원"으로 선택된 회원은 원래부터 1회만 배정되는 게 정상이므로, 예외적으로
+    // 1회만 배정된 회원을 알려주는 이 목록에는 표시하지 않는다.
     const singleAssignedMembers = [...assignedMemberIds]
-      .filter(id => sessionCountByMember.get(id) === 1)
+      .filter(id => sessionCountByMember.get(id) === 1 && !state.onceLimitedMemberIds.includes(id))
       .map(id => memberById(id))
       .filter(Boolean);
     return { title, desc, assigned, unassignedMembers, singleAssignedMembers, travelMinutes: totalTravelMinutes(assigned) };
@@ -2287,6 +2306,13 @@
   function pinnedLocationDayFor(day, locationName) {
     const loc = state.locations.find(l => l.name === locationName);
     return loc ? { day, locationId: loc.id } : null;
+  }
+
+  // "마포점 우선 2회 배정" 체크박스용: 이름으로 지점을 찾는다. 지점이 삭제/개명되어 없으면
+  // null을 돌려주고, greedyAssign은 이때 그 옵션을 그냥 무시한다.
+  function locationIdByName(locationName) {
+    const loc = state.locations.find(l => l.name === locationName);
+    return loc ? loc.id : null;
   }
 
   // 표시 순서는 사용자가 지정한 순서를 그대로 따른다: A(기본, 인원 → 이동 횟수까지만
@@ -2362,7 +2388,12 @@
   function buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned) {
     const strategy = STRATEGIES[strategyIndex];
     const sorted = strategy.sort(eligible, jitter);
-    const options = typeof strategy.options === "function" ? strategy.options() : strategy.options;
+    const strategyOptions = typeof strategy.options === "function" ? strategy.options() : strategy.options;
+    // "마포점 우선 2회 배정" 체크박스: 모든 후보 전략에 공통으로 적용되는 전역 옵션이므로,
+    // 전략별 options 위에 덧씌운다.
+    const options = state.priorityMapoDouble
+      ? Object.assign({}, strategyOptions, { priorityDoubleLocationId: locationIdByName("마포점") })
+      : strategyOptions;
     const cand = buildCandidate(strategy.title, strategy.desc, sorted, eligibleIds, allMemberIds, options, pinned);
     cand.strategyIndex = strategyIndex;
     return cand;
@@ -2993,6 +3024,20 @@
     if (e.key === "Escape" && requiredDropdownOpen) closeRequiredDropdown();
   });
 
+  const priorityMapoDoubleCheckboxEl = document.getElementById("priorityMapoDoubleCheckbox");
+  priorityMapoDoubleCheckboxEl.addEventListener("change", () => {
+    state.priorityMapoDouble = priorityMapoDoubleCheckboxEl.checked;
+    // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 후보가 있으면 즉시 비운다.
+    if (candidates.length > 0) {
+      candidates = [];
+      renderCandidates();
+      generateHintEl.textContent = "마포점 우선 2회 배정 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
+    } else {
+      requestsChangedSinceGenerate = true;
+    }
+    saveState();
+  });
+
   const candidateRulesBlockEl = document.getElementById("candidateRulesBlock");
   const candidateRulesToggleEl = document.getElementById("candidateRulesToggle");
   candidateRulesToggleEl.addEventListener("click", () => {
@@ -3080,6 +3125,7 @@
       const pill1 = document.createElement("span");
       pill1.className = "stat-pill";
       if (cand.unassignedMembers.length > 0) {
+        pill1.classList.add("stat-pill-danger");
         pill1.textContent = "미배정 " + cand.unassignedMembers.length + "명";
       } else {
         pill1.append("미배정 ");
@@ -3116,7 +3162,7 @@
 
       if (cand.unassignedMembers.length > 0) {
         const box = document.createElement("div");
-        box.className = "unassigned-box";
+        box.className = "unassigned-box unassigned-box-danger";
         box.innerHTML = "<b>미배정 회원 (" + cand.unassignedMembers.length + "명)</b> · " +
           cand.unassignedMembers.map(m => m.name).join(", ");
         card.appendChild(box);
@@ -3192,6 +3238,7 @@
     renderMemberTable();
     renderAvailabilityList();
     renderRequestList();
+    priorityMapoDoubleCheckboxEl.checked = state.priorityMapoDouble;
     if (candidates.length) renderCandidates();
     goToPage(currentPage);
   }
