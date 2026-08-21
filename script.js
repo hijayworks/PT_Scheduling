@@ -2245,6 +2245,20 @@
     return total;
   }
 
+  // 회원이 등록한 가능 시간 총합(분)을, 회원 스케줄 추가 그리드에 보이는 것과 같은 방식으로
+  // 계산한다 — 각 구간(run)마다 마지막 수업 뒤에 붙는 최소 휴식 시간(BREAK_MIN)까지 포함해서
+  // 더한다. 등록/상담 회원 모두 이 총합이 1시간(60분) 이하면 애초에 같은 날 두 번째 수업을
+  // 넣을 시간이 물리적으로 없으므로(수업+휴식이 최소 40~60분), 1회만 배정되어도 예외적인
+  // 상황이 아니다.
+  function totalAvailableMinutesFor(memberId) {
+    const breakSlots = durationToSlots(BREAK_MIN);
+    const runs = mergeRequestRuns(state.requests.filter(r => r.memberId === memberId));
+    return runs.reduce((sum, run) => {
+      const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);
+      return sum + (displayEndSlot - run.startSlot) * SLOT_MIN;
+    }, 0);
+  }
+
   function buildCandidate(title, desc, sortedReqs, eligibleSet, allMemberIds, options, pinned) {
     const assigned = greedyAssign(sortedReqs.filter(r => eligibleSet.has(r.id)), options, pinned);
     const assignedMemberIds = new Set(assigned.map(r => r.memberId));
@@ -2254,10 +2268,13 @@
       .filter(Boolean);
     const sessionCountByMember = new Map();
     assigned.forEach(r => sessionCountByMember.set(r.memberId, (sessionCountByMember.get(r.memberId) || 0) + 1));
-    // "1회 제한 회원"으로 선택된 회원은 원래부터 1회만 배정되는 게 정상이므로, 예외적으로
-    // 1회만 배정된 회원을 알려주는 이 목록에는 표시하지 않는다.
+    // "1회 제한 회원"으로 선택된 회원이나, 가능 시간을 1시간 이하로만 등록해 애초에 2회를
+    // 받을 수 없었던 회원은 원래부터 1회만 배정되는 게 정상이므로, 예외적으로 1회만 배정된
+    // 회원을 알려주는 이 목록에는 표시하지 않는다.
     const singleAssignedMembers = [...assignedMemberIds]
-      .filter(id => sessionCountByMember.get(id) === 1 && !state.onceLimitedMemberIds.includes(id))
+      .filter(id => sessionCountByMember.get(id) === 1
+        && !state.onceLimitedMemberIds.includes(id)
+        && totalAvailableMinutesFor(id) > 60)
       .map(id => memberById(id))
       .filter(Boolean);
     return { title, desc, assigned, unassignedMembers, singleAssignedMembers, travelMinutes: totalTravelMinutes(assigned) };
@@ -2602,6 +2619,8 @@
 
   const candidatesEl = document.getElementById("candidates");
   const generateHintEl = document.getElementById("generateHint");
+  const minSessionFilterInputEl = document.getElementById("minSessionFilterInput");
+  minSessionFilterInputEl.addEventListener("input", () => renderCandidates());
 
   // 한 번 설정해두고 매번 열어보지 않아도 되도록, 현재 걸려있는 "1회 제한 회원"은 칩으로 항상
   // 보여주고(× 로 제거), "+ 추가" 버튼을 눌렀을 때만 아직 추가되지 않은 회원 목록을 드롭다운으로 띄운다.
@@ -3070,7 +3089,19 @@
   function renderCandidates() {
     candidatesEl.innerHTML = "";
 
-    candidates.forEach((cand) => {
+    // "수업 N건 이상 후보만 보기": 이미 계산된 후보 중 보여줄 것만 고르는 화면 필터일 뿐,
+    // 후보 자체를 다시 계산하지는 않는다. 값이 비었거나 숫자가 아니면 필터를 걸지 않는다(0건 이상).
+    const minSessions = Math.max(0, parseInt(minSessionFilterInputEl.value, 10) || 0);
+    const visibleCandidates = candidates.filter(cand => cand.assigned.length >= minSessions);
+
+    if (candidates.length > 0 && visibleCandidates.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "generate-hint";
+      empty.textContent = "수업 " + minSessions + "건 이상인 후보가 없습니다.";
+      candidatesEl.appendChild(empty);
+    }
+
+    visibleCandidates.forEach((cand) => {
       const card = document.createElement("div");
       card.className = "candidate-card";
 
@@ -3125,7 +3156,6 @@
       const pill1 = document.createElement("span");
       pill1.className = "stat-pill";
       if (cand.unassignedMembers.length > 0) {
-        pill1.classList.add("stat-pill-danger");
         pill1.textContent = "미배정 " + cand.unassignedMembers.length + "명";
       } else {
         pill1.append("미배정 ");

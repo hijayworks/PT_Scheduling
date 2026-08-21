@@ -148,8 +148,14 @@
             <p class="card-desc subsection-desc">체크하면 마포점 회원의 2번째 수업을 다른 지점 회원의 2번째 수업보다 먼저 배정합니다.</p>
           </div>
 
-          <button type="button" class="btn btn-primary btn-lg" id="generateBtn">후보 생성하기</button>
+          <div class="generate-row">
+            <button type="button" class="btn btn-primary btn-lg" id="generateBtn">후보 생성하기</button>
+            <label class="candidate-filter-row" for="minSessionFilterInput">
+              수업 <input type="number" id="minSessionFilterInput" min="0" step="1" value="0" />건 이상 후보만 보기
+            </label>
+          </div>
           <p class="generate-hint" id="generateHint"></p>
+
           <div class="candidates" id="candidates"></div>
         </div>
       </div>
