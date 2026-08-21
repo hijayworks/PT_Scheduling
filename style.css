@@ -306,6 +306,12 @@ body {
   justify-content: space-between;
   gap: 12px;
 }
+.candidate-filter-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
 .candidate-filter-row {
   display: flex;
   align-items: center;
@@ -323,6 +329,12 @@ body {
   font-size: 13.5px;
   font-family: inherit;
   text-align: center;
+}
+.candidate-filter-hidden-count {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-mute);
 }
 
 /* Location list & travel matrix */

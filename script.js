@@ -2402,6 +2402,33 @@
     }
   ];
 
+  // 후보A는 스스로 "인원 최대화 → 동점이면 이동 횟수 최소화"를 기준으로 내세우지만, 그리디
+  // 알고리즘은 요일을 처리하는 순서에 따라 이 기준으로도 최선이 아닌 결과를 낼 수 있다 —
+  // 실제로 특정 요일·지점을 먼저 채우는 후보I/J가 우연히 후보A보다 더 나은(인원은 같고
+  // 이동은 더 적은) 조합을 찾아내는 경우가 있었다. 그래서 후보A는 모든 (요일, 지점) 조합을
+  // "그 요일엔 그 지점부터 최대한 채운다"는 사전 단계로 하나씩 시도해보고, 그중 후보A
+  // 자신의 기준(인원 → 이동 횟수)으로 baseline보다 나은 결과가 있으면 그걸로 교체한다 —
+  // 후보I/J와 같은 메커니즘을 후보A 안에서 전수 조사하는 셈이다. 지점이 1개뿐이면 사전
+  // 단계를 시도할 의미가 없으므로 건너뛴다.
+  function strengthenCandidateA(baseline, sorted, eligibleIds, allMemberIds, options, pinned) {
+    if (state.locations.length < 2) return baseline;
+    let best = baseline;
+    let bestCount = new Set(best.assigned.map(r => r.memberId)).size;
+    let bestTravel = totalTravelCount(best.assigned);
+    DAYS.forEach((d, day) => {
+      state.locations.forEach(loc => {
+        const pinOptions = Object.assign({}, options, { pinnedLocationDay: { day, locationId: loc.id } });
+        const attempt = buildCandidate(baseline.title, baseline.desc, sorted, eligibleIds, allMemberIds, pinOptions, pinned);
+        const attemptCount = new Set(attempt.assigned.map(r => r.memberId)).size;
+        const attemptTravel = totalTravelCount(attempt.assigned);
+        if (attemptCount > bestCount || (attemptCount === bestCount && attemptTravel < bestTravel)) {
+          best = attempt; bestCount = attemptCount; bestTravel = attemptTravel;
+        }
+      });
+    });
+    return best;
+  }
+
   function buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned) {
     const strategy = STRATEGIES[strategyIndex];
     const sorted = strategy.sort(eligible, jitter);
@@ -2411,7 +2438,10 @@
     const options = state.priorityMapoDouble
       ? Object.assign({}, strategyOptions, { priorityDoubleLocationId: locationIdByName("마포점") })
       : strategyOptions;
-    const cand = buildCandidate(strategy.title, strategy.desc, sorted, eligibleIds, allMemberIds, options, pinned);
+    let cand = buildCandidate(strategy.title, strategy.desc, sorted, eligibleIds, allMemberIds, options, pinned);
+    if (strategyIndex === 0) {
+      cand = strengthenCandidateA(cand, sorted, eligibleIds, allMemberIds, options, pinned);
+    }
     cand.strategyIndex = strategyIndex;
     return cand;
   }
@@ -2620,6 +2650,7 @@
   const candidatesEl = document.getElementById("candidates");
   const generateHintEl = document.getElementById("generateHint");
   const minSessionFilterInputEl = document.getElementById("minSessionFilterInput");
+  const candidateFilterHiddenCountEl = document.getElementById("candidateFilterHiddenCount");
   minSessionFilterInputEl.addEventListener("input", () => renderCandidates());
 
   // 한 번 설정해두고 매번 열어보지 않아도 되도록, 현재 걸려있는 "1회 제한 회원"은 칩으로 항상
@@ -3093,6 +3124,10 @@
     // 후보 자체를 다시 계산하지는 않는다. 값이 비었거나 숫자가 아니면 필터를 걸지 않는다(0건 이상).
     const minSessions = Math.max(0, parseInt(minSessionFilterInputEl.value, 10) || 0);
     const visibleCandidates = candidates.filter(cand => cand.assigned.length >= minSessions);
+    const hiddenCount = candidates.length - visibleCandidates.length;
+    // 필터에 걸려 일부만 안 보이는 걸 못 알아채고 "후보가 이것밖에 없나" 오해하지 않도록,
+    // 숨겨진 개수를 필터 바로 아래에 작게 표시한다.
+    candidateFilterHiddenCountEl.textContent = hiddenCount > 0 ? hiddenCount + "개 숨김" : "";
 
     if (candidates.length > 0 && visibleCandidates.length === 0) {
       const empty = document.createElement("p");
