@@ -2406,23 +2406,32 @@
   // 알고리즘은 요일을 처리하는 순서에 따라 이 기준으로도 최선이 아닌 결과를 낼 수 있다 —
   // 실제로 특정 요일·지점을 먼저 채우는 후보I/J가 우연히 후보A보다 더 나은(인원은 같고
   // 이동은 더 적은) 조합을 찾아내는 경우가 있었다. 그래서 후보A는 모든 (요일, 지점) 조합을
-  // "그 요일엔 그 지점부터 최대한 채운다"는 사전 단계로 하나씩 시도해보고, 그중 후보A
-  // 자신의 기준(인원 → 이동 횟수)으로 baseline보다 나은 결과가 있으면 그걸로 교체한다 —
-  // 후보I/J와 같은 메커니즘을 후보A 안에서 전수 조사하는 셈이다. 지점이 1개뿐이면 사전
-  // 단계를 시도할 의미가 없으므로 건너뛴다.
+  // "그 요일엔 그 지점부터 최대한 채운다"는 사전 단계로 하나씩 시도해보고, 그중 baseline보다
+  // 나은 결과가 있으면 그걸로 교체한다 — 후보I/J와 같은 메커니즘을 후보A 안에서 전수
+  // 조사하는 셈이다. 지점이 1개뿐이면 사전 단계를 시도할 의미가 없으므로 건너뛴다.
+  // 비교 기준은 인원 → 총 수업 건수 → 이동 횟수 순이다: 인원과 이동 횟수만 비교하면(총
+  // 수업 건수를 보지 않으면) 인원은 같고 이동만 더 적은 조합이 실제로는 누군가의 2번째
+  // 수업 자리를 희생해 이동을 줄인 것일 수 있어, 후보A 제목이 내세우는 "수업 횟수 최대화"를
+  // 오히려 후퇴시킬 수 있다(실제로 28건 → 27건으로 줄어드는 문제가 있었다). 총 수업 건수를
+  // 이동 횟수보다 먼저 비교해 이런 후퇴를 막는다.
   function strengthenCandidateA(baseline, sorted, eligibleIds, allMemberIds, options, pinned) {
     if (state.locations.length < 2) return baseline;
     let best = baseline;
     let bestCount = new Set(best.assigned.map(r => r.memberId)).size;
+    let bestSessions = best.assigned.length;
     let bestTravel = totalTravelCount(best.assigned);
     DAYS.forEach((d, day) => {
       state.locations.forEach(loc => {
         const pinOptions = Object.assign({}, options, { pinnedLocationDay: { day, locationId: loc.id } });
         const attempt = buildCandidate(baseline.title, baseline.desc, sorted, eligibleIds, allMemberIds, pinOptions, pinned);
         const attemptCount = new Set(attempt.assigned.map(r => r.memberId)).size;
+        const attemptSessions = attempt.assigned.length;
         const attemptTravel = totalTravelCount(attempt.assigned);
-        if (attemptCount > bestCount || (attemptCount === bestCount && attemptTravel < bestTravel)) {
-          best = attempt; bestCount = attemptCount; bestTravel = attemptTravel;
+        const better = attemptCount > bestCount
+          || (attemptCount === bestCount && attemptSessions > bestSessions)
+          || (attemptCount === bestCount && attemptSessions === bestSessions && attemptTravel < bestTravel);
+        if (better) {
+          best = attempt; bestCount = attemptCount; bestSessions = attemptSessions; bestTravel = attemptTravel;
         }
       });
     });

@@ -150,6 +150,10 @@
 
           <div class="generate-row">
             <button type="button" class="btn btn-primary btn-lg" id="generateBtn">후보 생성하기</button>
+          </div>
+          <p class="generate-hint" id="generateHint"></p>
+
+          <div class="candidates-toolbar">
             <div class="candidate-filter-wrap">
               <label class="candidate-filter-row" for="minSessionFilterInput">
                 수업 <input type="number" id="minSessionFilterInput" min="0" step="1" value="0" />건 이상 후보만 보기
@@ -157,7 +161,6 @@
               <p class="candidate-filter-hidden-count" id="candidateFilterHiddenCount"></p>
             </div>
           </div>
-          <p class="generate-hint" id="generateHint"></p>
 
           <div class="candidates" id="candidates"></div>
         </div>
