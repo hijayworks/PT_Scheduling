@@ -33,7 +33,7 @@
   // 후보 조건: 회원당 1일 최대 1회 · 최대 2회까지(상담 회원은 최대 1회까지, maxSessionsFor 참고).
   // (최대한 1회 이상은 greedyAssign 1단계 배정에서 우선순위로 반영)
   const MAX_SESSIONS_PER_MEMBER = 2;
-  const MAX_TRAVELS_PER_DAY = 3; // 하루 지점 간 이동은 최소화하되, 하더라도 최대 3회까지
+  const MAX_TRAVELS_PER_DAY = 2; // 하루 지점 간 이동은 최소화하되, 하더라도 최대 2회까지
   const REQUIRED_MEMBER_WEIGHT = 1e6; // "필수 배정 회원"이 1단계 배정에서 다른 회원들보다 항상 우선하도록 주는 가중치
 
   const STORAGE_KEY = "pt_schedule_state_v3";
@@ -1025,21 +1025,30 @@
   }
 
   // "2~5"(왼쪽·오른쪽 모두 시각이 있는 물결)는 "2345"를 이어 쓴 것과 같은 뜻으로, 두 시각
-  // 사이의 매시 정각을 전부 개별 희망 시작 시각으로 펼친다(오후 기준 1~12시를 순환). 양쪽
-  // 끝의 반시간(30분) 표기는 그 끝에서만 그대로 반영한다.
+  // 사이의 매시 정각을 전부 개별 희망 시작 시각으로 펼친다. 양쪽 끝의 반시간(30분) 표기는
+  // 그 끝에서만 그대로 반영한다. 근무 가능 시간이 12:00(정오)~24:00(자정) 하루 안에서만
+  // 이어지므로(자정을 넘겨 다음 날로 순환하는 범위는 없음), 12시가 가장 이른 시각·11시가
+  // 가장 늦은 시각인 실제 시간 순서(12,1,2,...,11)로 비교해 왼쪽이 오른쪽보다 늦으면
+  // "10~1"처럼 순서가 뒤바뀐(오타 등) 입력으로 보고 실패 처리한다(자정을 넘겨 순환시키지 않음).
   function expandHourRange(leftMark, rightMark) {
-    const marks = [{ hour: leftMark.hour, half: leftMark.half }];
-    if (leftMark.hour === rightMark.hour) {
-      if (rightMark.half && !leftMark.half) marks.push({ hour: rightMark.hour, half: true });
-      return marks;
+    const leftHour24 = (leftMark.hour % 12) + 12;
+    const rightHour24 = (rightMark.hour % 12) + 12;
+    if (rightHour24 < leftHour24) return null;
+    const marks = [];
+    for (let h24 = leftHour24; h24 <= rightHour24; h24++) {
+      const hour = h24 === 12 ? 12 : h24 - 12;
+      if (h24 === leftHour24 && h24 === rightHour24) {
+        marks.push({ hour, half: leftMark.half });
+        if (rightMark.half && !leftMark.half) marks.push({ hour, half: true });
+      } else if (h24 === leftHour24) {
+        marks.push({ hour, half: leftMark.half });
+      } else if (h24 === rightHour24) {
+        marks.push({ hour, half: rightMark.half });
+      } else {
+        marks.push({ hour, half: false });
+      }
     }
-    let h = leftMark.hour;
-    for (let i = 0; i < 12; i++) {
-      h = h === 12 ? 1 : h + 1;
-      if (h === rightMark.hour) { marks.push({ hour: h, half: rightMark.half }); return marks; }
-      marks.push({ hour: h, half: false });
-    }
-    return null; // 12시간을 넘게 순회하면(형식 오류) 안전하게 실패 처리
+    return marks;
   }
 
   // 시간 토큰 하나를 해석한다.
@@ -1222,12 +1231,12 @@
         const opt = document.createElement("option");
         opt.value = m.id;
         const locNames = m.locationIds.map(id => locationById(id)).filter(Boolean).map(l => l.name).join("·");
-        opt.textContent = "기존 회원 등록(" + (locNames || "지점 미지정") + ")" + (matches.length > 1 ? " #" + m.id.slice(-4) : "");
+        opt.textContent = "기존 회원 (" + (locNames || "지점 미지정") + ")" + (matches.length > 1 ? " #" + m.id.slice(-4) : "");
         select.appendChild(opt);
       });
       const newOpt = document.createElement("option");
       newOpt.value = "__new__";
-      newOpt.textContent = "새 회원으로 등록";
+      newOpt.textContent = "신규 회원";
       select.appendChild(newOpt);
       const skipOpt = document.createElement("option");
       skipOpt.value = "__skip__";
@@ -1323,10 +1332,20 @@
       alert("설정 페이지에서 지점을 먼저 등록해주세요.");
       return;
     }
-    let appliedCount = 0, createdCount = 0;
+    let createdCount = 0;
+    const zeroFitNames = []; // 파싱은 됐지만 마감 시간 등으로 실제 등록된 시간이 하나도 없는 회원
+    const emptyRowNames = []; // 등록할 시간이 아예 없어 건너뛴 줄
+
+    // 같은 회원을 가리키는 여러 줄(이름을 여러 줄로 나눠 붙여넣은 경우 등)이 서로의 스케줄을
+    // 덮어쓰지 않도록, 적용 대상 회원별로 파싱된 스케줄을 먼저 합친 뒤 회원당 한 번만 교체한다.
+    const entriesByMemberKey = new Map(); // memberId -> { member, isNew, days: Map<day, specs[]> }
     bulkImportRows.forEach(row => {
       if (row.choice === "__skip__") return;
-      let member;
+      if (row.parsed.days.length === 0) {
+        emptyRowNames.push(row.parsed.name);
+        return;
+      }
+      let member, isNew = false;
       if (row.choice === "__new__") {
         if (!row.newLocationId) return;
         member = {
@@ -1336,28 +1355,45 @@
           category: row.newCategory,
           memo: ""
         };
-        state.members.unshift(member);
-        createdCount++;
+        isNew = true;
       } else {
         member = memberById(row.choice);
         if (!member) return;
       }
-      state.requests = state.requests.filter(r => r.memberId !== member.id);
+      if (!entriesByMemberKey.has(member.id)) {
+        entriesByMemberKey.set(member.id, { member, isNew, days: new Map() });
+      }
+      const entry = entriesByMemberKey.get(member.id);
       row.parsed.days.forEach(dayEntry => {
-        dayEntry.specs.forEach(spec => {
+        if (!entry.days.has(dayEntry.day)) entry.days.set(dayEntry.day, []);
+        entry.days.get(dayEntry.day).push(...dayEntry.specs);
+      });
+    });
+
+    let appliedCount = 0;
+    entriesByMemberKey.forEach(entry => {
+      const member = entry.member;
+      if (entry.isNew) {
+        state.members.unshift(member);
+        createdCount++;
+      }
+      state.requests = state.requests.filter(r => r.memberId !== member.id);
+      let addedForMember = 0;
+      entry.days.forEach((specs, day) => {
+        specs.forEach(spec => {
           if (spec.type === "point") {
             spec.marks.forEach(mark => {
-              const slot = hourMarkToStartSlot(mark);
-              addDesiredRange(member, dayEntry.day, slot, slot);
+              addedForMember += addDesiredRange(member, day, hourMarkToStartSlot(mark), hourMarkToStartSlot(mark));
             });
           } else if (spec.type === "openStart") {
-            addDesiredRange(member, dayEntry.day, hourMarkToStartSlot(spec.mark), SLOT_COUNT);
+            addedForMember += addDesiredRange(member, day, hourMarkToStartSlot(spec.mark), SLOT_COUNT);
           } else if (spec.type === "openEnd") {
-            addDesiredRange(member, dayEntry.day, 0, hourMarkToStartSlot(spec.mark));
+            addedForMember += addDesiredRange(member, day, 0, hourMarkToStartSlot(spec.mark));
           }
         });
       });
       appliedCount++;
+      if (addedForMember === 0) zeroFitNames.push(member.name);
     });
 
     requestsChangedSinceGenerate = true;
@@ -1365,7 +1401,13 @@
     renderMemberTable();
     renderRequestList();
     closeBulkImportModal();
-    showToast(appliedCount + "명 스케줄 등록 완료" + (createdCount ? " (신규 " + createdCount + "명)" : ""), "success");
+
+    const notes = [];
+    if (createdCount) notes.push("신규 " + createdCount + "명");
+    if (zeroFitNames.length) notes.push(zeroFitNames.join(", ") + "은(는) 마감 시간 등으로 등록된 시간이 없습니다");
+    if (emptyRowNames.length) notes.push(emptyRowNames.join(", ") + "은(는) 등록할 시간이 없어 건너뛰었습니다");
+    const suffix = notes.length ? " (" + notes.join(" · ") + ")" : "";
+    showToast(appliedCount + "명 스케줄 등록 완료" + suffix, (zeroFitNames.length || emptyRowNames.length) ? "info" : "success");
   });
 
   // Notion 스타일 지점 다중 선택 위젯: 드롭다운에서 클릭 한 번으로 지점을 추가/제거한다.
@@ -2081,7 +2123,7 @@
   }
 
   // 후보 조건을 지키며 배정한다: 회원당 1일 최대 1회, 최대 2회까지(상담 회원은 최대 1회까지), 하루 지점 간 이동은
-  // 최소화하되 기본 최대 3회까지(options.maxTravelsPerDay로 후보마다 강화 가능, 예: 후보F는 2회) 하며, 스케줄과 이동시간은
+  // 최소화하되 기본 최대 2회까지(options.maxTravelsPerDay로 후보마다 강화 가능) 하며, 스케줄과 이동시간은
   // 겹치지 않게, 그리고 "이동시간·휴식시간을 제외한 빈 시간은 없도록" 한다. 다만 빈 시간을
   // 최대 ALLOWED_GAP_MIN분까지 허용했을 때 실제로 배정되는 수업(세션) 개수가 늘어난다면,
   // 그만큼만 예외로 허용한다(맨 아래 runWithGapPolicy 참고).
@@ -2108,7 +2150,7 @@
   //   여지(뒤에 이어붙일 다른 회원)가 늘어나 결과적으로 이동을 줄이는 데 도움이 된다는 전제.
   //   groupByLocation: 그 다음으로(또는 preferDaytime 없이 바로) 같은 지점이 연달아
   //   이어지는(지점을 덜 옮겨다니는) 체인을 우선한다.
-  //   minimizeUnassigned("후보H"): 기본 순서로 한 번 배정해보고, 1단계(아직 아무 것도 못
+  //   minimizeUnassigned("후보A"): 기본 순서로 한 번 배정해보고, 1단계(아직 아무 것도 못
   //   받은 회원 채우기)에서 신청 가능한 회원이 적은(대안이 좁은) 요일부터 먼저 채우는
   //   순서로 한 번 더 배정해본 뒤, 실제로 배정된 인원이 더 많은 쪽을 택한다 — 요일 순서를
   //   바꾸는 것만으로는 항상 더 나아진다는 보장이 없으므로(체인끼리 얽혀 있으면 오히려
@@ -2130,7 +2172,7 @@
     // "2회 배정 회원": 지정된 회원의 2번째 세션을 다른 회원들의 2번째 세션보다 먼저 채운다.
     const doubleAssignMemberIds = (options.doubleAssignMemberIds && options.doubleAssignMemberIds.length)
       ? new Set(options.doubleAssignMemberIds) : null;
-    const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY; // 후보F는 2회로 강화
+    const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY;
     const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보C·D·E)
     // 후보A·B: 인원(또는 세션 수) → 이동 횟수까지만 비교하고 멈춘다 — 이동 시간, 이동시간+빈시간 합, 정렬,
     // 슬랙 같은 세부 기준은 쓰지 않는다("인원을 최대화하도록 배정합니다. 동점이면 이동
@@ -2166,7 +2208,7 @@
     }
 
     // 하루치 배정을 처음부터 끝까지 한 번 실행한다(1~3단계 전체). stage1Order로 1단계에서
-    // 요일을 처리하는 순서만 바꿀 수 있다 — minimizeUnassigned 옵션("후보H")이 이 순서를
+    // 요일을 처리하는 순서만 바꿀 수 있다 — minimizeUnassigned 옵션("후보A")이 이 순서를
     // 두 가지로 각각 시도해보고 더 나은 쪽을 고르는 데 쓴다. allowGapMin은 이번 실행에서
     // 세션 사이에 추가로 허용할 공강(분) 한도다 — 아래 runWithGapPolicy가 0(엄격)과
     // ALLOWED_GAP_MIN(완화)을 각각 시도해보고 실제로 세션 수가 늘어날 때만 완화 쪽을 쓴다.
@@ -2511,13 +2553,19 @@
     // 조건보다 낮은 가중치여야 한다"는 결정에 따라 제거했다). 다만 "필수 배정 회원"으로 지정된
     // 회원은 이 1단계에서 압도적으로 큰 가중치를 줘서, 다른 회원 여러 명을 태우는 조합보다
     // 항상 우선 선택되게 한다 — 이렇게 하면 가능한 자리가 있는 한 사실상 무조건 배정된다.
-    // "2회 배정 회원"도 같은 크기의 가중치를 준다 — sessionCountFirst(후보B)처럼 1단계에서부터
-    // 한 회원이 2회까지 채워질 수 있는 전략에서는, 1.4단계(1회 배정된 뒤 끼워 넣기)가 실행될
-    // 때 이미 그 날짜들이 다른 회원들로 빈틈없이 채워져 있어 끼워 넣을 자리가 없는 경우가
-    // 흔하기 때문 — 1단계 자체에서부터 이 회원의 두 세션 모두를 우선 선택하게 해야 한다.
+    // "2회 배정 회원"은 이미 1회 배정을 받은 뒤에만 같은 크기의 가중치를 준다 — sessionCountFirst
+    // (후보B)처럼 1단계에서부터 한 회원이 2회까지 채워질 수 있는 전략에서는, 1.4단계(1회
+    // 배정된 뒤 끼워 넣기)가 실행될 때 이미 그 날짜들이 다른 회원들로 빈틈없이 채워져 있어
+    // 끼워 넣을 자리가 없는 경우가 흔하기 때문 — 이미 1회 받은 뒤의 두 번째 세션은 1단계
+    // 자체에서부터 우선 선택되게 해야 한다. 다만 아직 한 번도 못 받은 첫 세션에까지 이
+    // 가중치를 주면, 아직 아무 것도 못 받은 다른 회원의 자리를 빼앗아 오히려 전체 배정
+    // 인원(후보A의 최우선 기준)이 줄어드는 문제가 있어, 첫 세션에는 가중치를 주지 않는다.
     function fairnessWeight(memberId) {
       if (state.requiredMemberIds.includes(memberId)) return REQUIRED_MEMBER_WEIGHT;
-      if (doubleAssignMemberIds && doubleAssignMemberIds.has(memberId)) return REQUIRED_MEMBER_WEIGHT;
+      if (doubleAssignMemberIds && doubleAssignMemberIds.has(memberId)) {
+        const usedDays = memberDays.get(memberId);
+        if (usedDays && usedDays.size >= 1) return REQUIRED_MEMBER_WEIGHT;
+      }
       return 1;
     }
 
@@ -2556,13 +2604,15 @@
     // 1단계: 아직 아무 것도 못 받은 회원들만으로 요일별 체인을 새로 짠다. stage1Order가 그 순서를 정한다.
     // sessionCountFirst(후보B)이면 "아직 못 받은 회원만"이라는 제약을 두지 않는다 —
     // 인원(서로 다른 회원 수) 우선이 아니라 세션 총 개수 자체를 곧바로 최대화하기 위함이다.
-    // "2회 배정 회원"도 같은 이유로 이 제약에서 예외를 둔다 — sessionCountFirst가 아닌
-    // 전략에서도, 1회 배정된 뒤에는 stage1에서 배제돼버려 이후 이미 빈틈없이 채워진 요일에
-    // 끼워 넣지 못하는(1.4단계 한계) 문제가 생기므로, fairnessWeight의 큰 가중치를 받으며
-    // stage1 안에서 곧바로 2번째 세션까지 경쟁하게 한다.
+    // 주의: "2회 배정 회원"이라도 이 제약(아직 못 받은 회원만)에는 예외를 두지 않는다 —
+    // 한때 예외를 뒀었지만, 그러면 이미 1회 받은 2회 배정 회원이 큰 가중치로 "아직 한 번도
+    // 못 받은 다른 회원"의 자리를 빼앗아 전체 배정 인원(후보A의 최우선 기준)이 오히려
+    // 줄어드는 문제가 있었다. 2회 배정 회원의 2번째 세션은 이 1단계가 끝난 뒤(1.4단계)
+    // 이미 배정된 회원들끼리만 경쟁하는 자리에서 채운다 — 그래야 새 회원의 첫 배정 기회를
+    // 침해하지 않는다.
     stage1Order.forEach(day => {
       const elig = new Set([...allMemberIdsForDay(day)].filter(id => {
-        if (!sessionCountFirst && !(doubleAssignMemberIds && doubleAssignMemberIds.has(id))) {
+        if (!sessionCountFirst) {
           const usedDays = memberDays.get(id);
           if (usedDays && usedDays.size >= 1) return false;
         }
@@ -2621,7 +2671,7 @@
     }
 
     // 주어진 공강 허용 한도(allowGapMin)로 배정을 한 번 완결한다. 기본은 요일 순서
-    // 그대로 한 번 실행한다. minimizeUnassigned 옵션("후보H")이 켜지면, "신청 가능한
+    // 그대로 한 번 실행한다. minimizeUnassigned 옵션("후보A")이 켜지면, "신청 가능한
     // 회원이 적은(대안이 좁은) 요일부터 먼저 채우면 미배정이 줄어들 것"이라는 가설로
     // 1단계 처리 순서를 바꿔 한 번 더 실행해보고, 두 결과 중 실제로 배정된 회원 수가
     // 더 많은 쪽을 택한다(동점이면 총 세션 수가 많은 쪽, 그래도 동점이면 기본 순서를 우선한다).
@@ -2746,9 +2796,8 @@
   // 단계에서만, 이미 완성된 동점 체인들 사이에서 고르게 한다 — 정렬 자체를 건드리지 않는다.)
   // 후보B는 sessionCountFirst 옵션으로, 인원(서로 다른 회원 수)이 아니라 총 수업 건수 자체를
   // 먼저 최대화한다. 후보C·D·E는 maxTravelsPerWeek 옵션으로 일주일 총 이동 횟수 한도를 각각
-  // 5회·4회·3회로 제한한다. 후보F는 maxTravelsPerDay 옵션으로 하루 이동 횟수 한도를 2회로
-  // 강화한다. 후보G는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
-  // 이전 시작) 우선"을 추가한다. 후보H는 minimizeUnassigned 옵션으로, 기본 순서와 "대안이
+  // 5회·4회·3회로 제한한다. 후보G는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
+  // 이전 시작) 우선"을 추가한다. 후보A는 minimizeUnassigned 옵션으로, 기본 순서와 "대안이
   // 좁은 요일부터 먼저 채우는" 순서를 둘 다 시도해보고 실제로 미배정 회원이 더 적은 쪽을 택한다.
   function defaultSort(eligible, jitter) {
     return [...eligible].sort((a, b) =>
@@ -2773,18 +2822,24 @@
     return loc ? loc.id : null;
   }
 
-  // 표시 순서는 사용자가 지정한 순서를 그대로 따른다: A(기본, 인원 → 총 수업 건수 → 이동
-  // 횟수 순으로 비교) → B(A와 같은 세 값을 비교하되 인원 대신 총 수업 건수를 먼저 최대화 →
-  // 인원 → 이동 횟수) → C(A와 기준은 같고 일주일 총 이동 횟수를 5회로 제한) → D(A와 기준은
-  // 같고 일주일 총 이동 횟수를 4회로 제한) → E(A와 기준은 같고 일주일 총 이동 횟수를 3회로
-  // 제한) → F(A와 기준은 같고 하루 이동 횟수를 2회로 강화) → G(A의 동점 기준에 낮 시간대
-  // 우선을 한 단계 더 추가한 대안) → H(A와 기준은 같고 요일 처리 순서를 바꿔보는 대안) →
+  // 표시 순서는 사용자가 지정한 순서를 그대로 따른다: A(기본, 미배정 없음 → 총 수업 건수 →
+  // 이동 횟수 순으로 비교하되, 신청 가능한 회원이 적은 요일부터 먼저 채우는 대안 순서도 함께
+  // 시도해보고 미배정이 더 적은 쪽을 택한다) → B(A와 같은 세 값을 비교하되 인원 대신 총 수업
+  // 건수를 먼저 최대화 → 인원 → 이동 횟수) → C(A와 기준은 같고 일주일 총 이동 횟수를 5회로
+  // 제한) → D(A와 기준은 같고 일주일 총 이동 횟수를 4회로 제한) → E(A와 기준은 같고 일주일
+  // 총 이동 횟수를 3회로 제한) → G(A의 동점 기준에 낮 시간대 우선을 한 단계 더 추가한 대안) →
   // I/J(특정 요일에 특정 지점을 최대한 먼저 배정하는 대안).
   const STRATEGIES = [
     {
       title: "후보A - 인원·수업 최대화",
-      desc: "인원 최대화 → 총 수업 건수 → 이동 횟수 순으로 배정합니다.",
-      options: { travelCountOnly: true, strengthenSearch: "count" },
+      desc: "미배정 없음 → 총 수업 건수 → 이동 횟수 순으로 배정합니다.",
+      // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
+      // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
+      // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
+      // 분리해뒀지만, 대안이 기본 순서보다 나쁠 수는 없는 구조라(runWithGapPolicy 참고) 후보A
+      // 자체에 통합했다. 분리해뒀을 때는 후보A와 후보H가 대부분 똑같거나, 다르면 항상 후보H가
+      // 후보A보다 낫거나 같아서 후보A를 고를 이유가 없는 중복이었다.
+      options: { travelCountOnly: true, strengthenSearch: "count", minimizeUnassigned: true },
       sort: defaultSort
     },
     {
@@ -2796,37 +2851,25 @@
     {
       title: "후보C - 일주일 총 이동 횟수 5회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 5회까지로 제한합니다.",
-      options: { maxTravelsPerWeek: 5 },
+      options: { travelCountOnly: true, strengthenSearch: "count", maxTravelsPerWeek: 5 },
       sort: defaultSort
     },
     {
       title: "후보D - 일주일 총 이동 횟수 4회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 4회까지로 제한합니다.",
-      options: { maxTravelsPerWeek: 4 },
+      options: { travelCountOnly: true, strengthenSearch: "count", maxTravelsPerWeek: 4 },
       sort: defaultSort
     },
     {
       title: "후보E - 일주일 총 이동 횟수 3회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 3회까지로 제한합니다.",
-      options: { maxTravelsPerWeek: 3 },
-      sort: defaultSort
-    },
-    {
-      title: "후보F - 하루 이동 횟수 2회",
-      desc: "후보A와 같은 기준이지만, 하루 이동 횟수를 최대 2회까지로 제한합니다.",
-      options: { maxTravelsPerDay: 2 },
+      options: { travelCountOnly: true, strengthenSearch: "count", maxTravelsPerWeek: 3 },
       sort: defaultSort
     },
     {
       title: "후보G - 낮 시간대 우선",
       desc: "후보A와 같은 기준이지만, 그마저 동점이면 18시 이전에 시작하는 수업이 많은 배치를 우선합니다.",
-      options: { preferDaytime: true },
-      sort: defaultSort
-    },
-    {
-      title: "후보H - 미배정 최소화",
-      desc: "후보A와 같은 기준이지만, 신청 가능한 회원이 적은 요일부터 먼저 채우는 방식도 함께 시도해보고 미배정 회원이 더 적은 쪽을 택합니다.",
-      options: { minimizeUnassigned: true },
+      options: { travelCountOnly: true, strengthenSearch: "count", preferDaytime: true },
       sort: defaultSort
     },
     {
@@ -3107,9 +3150,15 @@
 
   const candidatesEl = document.getElementById("candidates");
   const generateHintEl = document.getElementById("generateHint");
-  const minSessionFilterInputEl = document.getElementById("minSessionFilterInput");
-  const candidateFilterHiddenCountEl = document.getElementById("candidateFilterHiddenCount");
-  minSessionFilterInputEl.addEventListener("input", () => renderCandidates());
+  // "수업 N건 이상 후보만 보기" 필터: 기능 자체를 잠시 끈다 (index.html의 candidates-toolbar도 함께 주석 처리됨)
+  // const minSessionFilterInputEl = document.getElementById("minSessionFilterInput");
+  // const candidateFilterHiddenCountEl = document.getElementById("candidateFilterHiddenCount");
+  // minSessionFilterInputEl.addEventListener("input", () => {
+  //   if (minSessionFilterInputEl.value === "" || parseInt(minSessionFilterInputEl.value, 10) < 1) {
+  //     minSessionFilterInputEl.value = "1";
+  //   }
+  //   renderCandidates();
+  // });
 
   // 한 번 설정해두고 매번 열어보지 않아도 되도록, 현재 걸려있는 "1회 제한 회원"은 칩으로 항상
   // 보여주고(× 로 제거), "+ 추가" 버튼을 눌렀을 때만 아직 추가되지 않은 회원 목록을 드롭다운으로 띄운다.
@@ -3435,6 +3484,10 @@
       alert("미배정 회원에 추가되어 있는 회원입니다.\n미배정 회원에서 삭제 후 다시 추가해 주세요.");
       return;
     }
+    if (state.doubleAssignMemberIds.includes(memberId)) {
+      alert("2회 배정 회원에 추가되어 있는 회원입니다.\n2회 배정 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
     if (!state.requests.some(r => r.memberId === memberId)) {
       alert("회원 스케줄이 없습니다. 회원 스케줄을 추가해 주세요.");
       return;
@@ -3571,6 +3624,10 @@
     }
     if (state.onceLimitedMemberIds.includes(memberId)) {
       alert("1회 제한 회원에 추가되어 있는 회원입니다.\n1회 제한 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
+    if (state.requiredMemberIds.includes(memberId)) {
+      alert("필수 배정 회원에 추가되어 있는 회원입니다.\n필수 배정 회원에서 삭제 후 다시 추가해 주세요.");
       return;
     }
     if (!state.requests.some(r => r.memberId === memberId)) {
@@ -3725,21 +3782,18 @@
   function renderCandidates() {
     candidatesEl.innerHTML = "";
 
-    // "수업 N건 이상 후보만 보기": 이미 계산된 후보 중 보여줄 것만 고르는 화면 필터일 뿐,
-    // 후보 자체를 다시 계산하지는 않는다. 값이 비었거나 숫자가 아니면 필터를 걸지 않는다(0건 이상).
-    const minSessions = Math.max(0, parseInt(minSessionFilterInputEl.value, 10) || 0);
-    const visibleCandidates = candidates.filter(cand => cand.assigned.length >= minSessions);
-    const hiddenCount = candidates.length - visibleCandidates.length;
-    // 필터에 걸려 일부만 안 보이는 걸 못 알아채고 "후보가 이것밖에 없나" 오해하지 않도록,
-    // 숨겨진 개수를 필터 바로 아래에 작게 표시한다.
-    candidateFilterHiddenCountEl.textContent = hiddenCount > 0 ? hiddenCount + "개 숨김" : "";
-
-    if (candidates.length > 0 && visibleCandidates.length === 0) {
-      const empty = document.createElement("p");
-      empty.className = "generate-hint";
-      empty.textContent = "수업 " + minSessions + "건 이상인 후보가 없습니다.";
-      candidatesEl.appendChild(empty);
-    }
+    // "수업 N건 이상 후보만 보기" 필터: 기능 자체를 잠시 끈다 (관련 DOM·이벤트 리스너도 함께 주석 처리됨).
+    // const minSessions = Math.max(1, parseInt(minSessionFilterInputEl.value, 10) || 1);
+    // const visibleCandidates = candidates.filter(cand => cand.assigned.length >= minSessions);
+    // const hiddenCount = candidates.length - visibleCandidates.length;
+    // candidateFilterHiddenCountEl.textContent = hiddenCount > 0 ? hiddenCount + "개 숨김" : "";
+    // if (candidates.length > 0 && visibleCandidates.length === 0) {
+    //   const empty = document.createElement("p");
+    //   empty.className = "generate-hint";
+    //   empty.textContent = "수업 " + minSessions + "건 이상인 후보가 없습니다.";
+    //   candidatesEl.appendChild(empty);
+    // }
+    const visibleCandidates = candidates;
 
     visibleCandidates.forEach((cand) => {
       const card = document.createElement("div");

@@ -93,7 +93,7 @@
               <li>필수 배정 회원에 선택된 회원은 다른 회원보다 우선적으로 배정해, 최대한 1회 이상 배정되도록 합니다.</li>
               <li>2회 배정 회원에 선택된 회원은 1회 배정된 뒤, 다른 회원의 2번째 수업보다 그 회원의 2번째 수업을 먼저 배정합니다. (상담 회원·1회 제한 회원은 대상에서 제외됩니다)</li>
               <li>마포점 우선 2회 배정을 체크하면, 마포점 회원의 2번째 수업을 다른 지점 회원의 2번째 수업보다 먼저 배정합니다.</li>
-              <li>하루 이동은 최소화하며, 이동할 경우 최대 3회까지 합니다.</li>
+              <li>하루 이동은 최소화하며, 이동할 경우 최대 2회까지로 제한합니다.</li>
               <li>이동시간, 휴식시간을 제외한 빈 시간은 없도록 합니다. (단, 빈 시간을 허용해서 수업의 횟수가 늘어난다면 10분까지 허용합니다.)</li>
               <li>각 회원은 최대한 1회 이상의 스케줄을 가질 수 있도록 합니다.</li>
               <li>인원을 최대화하도록 배정합니다.
@@ -173,14 +173,16 @@
           </div>
           <p class="generate-hint" id="generateHint"></p>
 
+          <!-- "수업 N건 이상 후보만 보기" 필터: 기능 자체를 잠시 끈다 (script.js의 관련 로직도 함께 주석 처리됨)
           <div class="candidates-toolbar">
             <div class="candidate-filter-wrap">
               <label class="candidate-filter-row" for="minSessionFilterInput">
-                수업 <input type="number" id="minSessionFilterInput" min="0" step="1" value="0" />건 이상 후보만 보기
+                수업 <input type="number" id="minSessionFilterInput" min="1" step="1" value="1" />건 이상 후보만 보기
               </label>
               <p class="candidate-filter-hidden-count" id="candidateFilterHiddenCount"></p>
             </div>
           </div>
+          -->
 
           <div class="candidates" id="candidates"></div>
         </div>
