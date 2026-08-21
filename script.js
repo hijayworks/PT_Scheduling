@@ -1651,7 +1651,7 @@
     return Math.ceil(raw / SLOT_MIN) * SLOT_MIN;
   }
 
-  // "후보F" 전용 tie-break(preferDaytime 옵션)의 "낮 시간대 우선"에 쓴다 — 18시 이전에
+  // "후보G" 전용 tie-break(preferDaytime 옵션)의 "낮 시간대 우선"에 쓴다 — 18시 이전에
   // 시작하는 신청인지만 보면 된다.
   const DAYTIME_END_MIN = 18 * 60;
   function isDaytimeStart(cand) {
@@ -1676,7 +1676,7 @@
   }
 
   // 후보 조건을 지키며 배정한다: 회원당 1일 최대 1회, 최대 2회까지(상담 회원은 최대 1회까지), 하루 지점 간 이동은
-  // 최소화하되 기본 최대 3회까지(options.maxTravelsPerDay로 후보마다 강화 가능, 예: 후보E는 2회) 하며, 스케줄과 이동시간은
+  // 최소화하되 기본 최대 3회까지(options.maxTravelsPerDay로 후보마다 강화 가능, 예: 후보F는 2회) 하며, 스케줄과 이동시간은
   // 겹치지 않게, 그리고 "이동시간·휴식시간을 제외한 빈 시간은 없도록" 한다. 다만 빈 시간을
   // 최대 ALLOWED_GAP_MIN분까지 허용했을 때 실제로 배정되는 수업(세션) 개수가 늘어난다면,
   // 그만큼만 예외로 허용한다(맨 아래 runWithGapPolicy 참고).
@@ -1698,12 +1698,12 @@
   //   인원을 줄이면서까지 강제하지는 않는, 동점 상황에서만 작동하는 선호다.)
   // options: { travelFirst: 인원(가중치 합)보다 이동 시간 최소화를 먼저 비교한다 —
   //   그래도 "빈 시간 없음"은 체인 구조 자체가 보장하므로 항상 유지된다.
-  //   preferDaytime: 인원·이동까지 같으면("후보F") 낮 시간대(18시 이전 시작) 세션이 많이
+  //   preferDaytime: 인원·이동까지 같으면("후보G") 낮 시간대(18시 이전 시작) 세션이 많이
   //   들어간 체인을 우선한다 — 저녁보다 낮에 몰아 배정하면 그만큼 그날 안에서 이동할 수 있는
   //   여지(뒤에 이어붙일 다른 회원)가 늘어나 결과적으로 이동을 줄이는 데 도움이 된다는 전제.
   //   groupByLocation: 그 다음으로(또는 preferDaytime 없이 바로) 같은 지점이 연달아
   //   이어지는(지점을 덜 옮겨다니는) 체인을 우선한다.
-  //   minimizeUnassigned("후보G"): 기본 순서로 한 번 배정해보고, 1단계(아직 아무 것도 못
+  //   minimizeUnassigned("후보H"): 기본 순서로 한 번 배정해보고, 1단계(아직 아무 것도 못
   //   받은 회원 채우기)에서 신청 가능한 회원이 적은(대안이 좁은) 요일부터 먼저 채우는
   //   순서로 한 번 더 배정해본 뒤, 실제로 배정된 인원이 더 많은 쪽을 택한다 — 요일 순서를
   //   바꾸는 것만으로는 항상 더 나아진다는 보장이 없으므로(체인끼리 얽혀 있으면 오히려
@@ -1716,11 +1716,15 @@
     const preferDaytime = !!options.preferDaytime;
     const groupByLocation = !!options.groupByLocation;
     const minimizeUnassigned = !!options.minimizeUnassigned;
-    const pinnedLocationDay = options.pinnedLocationDay || null; // { day, locationId } — 후보H/I
+    // "총 수업 건수 → 이동 횟수" 순으로 배정하는 후보B용: 1단계를 "아직 아무 것도 못 받은
+    // 회원만" 채우는 방식이 아니라, 처음부터 모든 회원(정원 안에서)을 대상으로 요일별 최선
+    // 체인을 짜게 한다 — 인원(서로 다른 회원 수)이 아니라 세션 총 개수를 곧바로 최대화한다.
+    const sessionCountFirst = !!options.sessionCountFirst;
+    const pinnedLocationDay = options.pinnedLocationDay || null; // { day, locationId } — 후보I/J
     const priorityDoubleLocationId = options.priorityDoubleLocationId || null; // "마포점 우선 2회 배정" 체크박스
-    const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY; // 후보E는 2회로 강화
-    const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보B·C·D)
-    // 후보A: 인원 → 이동 횟수까지만 비교하고 멈춘다 — 이동 시간, 이동시간+빈시간 합, 정렬,
+    const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY; // 후보F는 2회로 강화
+    const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보C·D·E)
+    // 후보A·B: 인원(또는 세션 수) → 이동 횟수까지만 비교하고 멈춘다 — 이동 시간, 이동시간+빈시간 합, 정렬,
     // 슬랙 같은 세부 기준은 쓰지 않는다("인원을 최대화하도록 배정합니다. 동점이면 이동
     // 횟수가 적은 쪽을 우선합니다."에 정확히 대응시키기 위함).
     const travelCountOnly = !!options.travelCountOnly;
@@ -1754,7 +1758,7 @@
     }
 
     // 하루치 배정을 처음부터 끝까지 한 번 실행한다(1~3단계 전체). stage1Order로 1단계에서
-    // 요일을 처리하는 순서만 바꿀 수 있다 — minimizeUnassigned 옵션("후보G")이 이 순서를
+    // 요일을 처리하는 순서만 바꿀 수 있다 — minimizeUnassigned 옵션("후보H")이 이 순서를
     // 두 가지로 각각 시도해보고 더 나은 쪽을 고르는 데 쓴다. allowGapMin은 이번 실행에서
     // 세션 사이에 추가로 허용할 공강(분) 한도다 — 아래 runWithGapPolicy가 0(엄격)과
     // ALLOWED_GAP_MIN(완화)을 각각 시도해보고 실제로 세션 수가 늘어날 때만 완화 쪽을 쓴다.
@@ -1801,7 +1805,7 @@
     // 끝나는 이전 세션"을 매번 전체를 훑지 않고 바로 찾을 수 있다.
     // endBefore가 있으면({slot, locationId}), 하루 전체가 아니라 그 시각·지점 앞에 정확히
     // 맞물려 끝나는 체인만 찾는다 — 확정(고정)된 세션 앞의 빈 시간을 채울 때 쓴다.
-    // onlyLocationId가 있으면(후보H/I의 "지점 우선 배정" 사전 단계), 그 지점을 등록해둔
+    // onlyLocationId가 있으면(후보I/J의 "지점 우선 배정" 사전 단계), 그 지점을 등록해둔
     // 회원의 그 지점 후보만으로 체인을 짠다 — 같은 지점끼리는 이동 시간이 0이므로, 이 체인은
     // 곧 "그 요일에 그 지점으로 최대한 많이 배정하는" 결과가 된다.
     function buildBestChain(day, eligibleMemberIds, weightFn, endBefore, onlyLocationId) {
@@ -1823,12 +1827,12 @@
 
       // "하루 이동은 최소화"를 실제로 반영하려면, 인원(가중치 합)이 같은 체인들 사이에서는
       // 이동 횟수가 더 적은 쪽을 골라야 한다(travelFirst 옵션이 켜지면 이 둘의 우선순위를
-      // 아예 뒤집어, 이동 횟수를 인원보다 먼저 비교한다). travelCountOnly 옵션("후보A")이
+      // 아예 뒤집어, 이동 횟수를 인원보다 먼저 비교한다). travelCountOnly 옵션("후보A·B")이
       // 켜지면 여기서 비교를 멈춘다. 아니면 그마저 동점일 때 이동 시간 합이 더 적은 쪽을,
       // 그마저 동점이면 이동 시간 합 + 빈 시간(슬랙) 합이 더 적은 쪽을(=이동 시간이 같다면
       // 결국 빈 시간이 적은 쪽을) 고르고, 그다음으로 하루의 첫 수업이 30분 단위 시각(예:
       // 13:00, 13:30)에 시작하는 체인을 우선한다 — 인원을 줄이면서까지 정렬을 강제하지는
-      // 않고, 이미 동점인 대안들 사이에서만 고른다. preferDaytime 옵션("후보F")이
+      // 않고, 이미 동점인 대안들 사이에서만 고른다. preferDaytime 옵션("후보G")이
       // 켜지면 그다음으로 낮 시간대(18시 이전 시작) 세션이 많이 들어간 체인을 우선하고,
       // groupByLocation 옵션이 켜지면 그다음으로 같은 지점이 연달아 이어지는(지점을 덜
       // 옮겨다니는) 체인을 우선한다. 그래서 색인은 이 값들을 옵션에 맞는 순서로 정렬해둔다 —
@@ -2127,7 +2131,7 @@
     }
 
     // 지정한 요일에는, 지정한 지점만으로 만들 수 있는 최대(가장 많이 배정되는) 체인을 1단계보다
-    // 먼저 확정한다("후보H": 수요일 상암점, "후보I": 금요일 마포점). 그 요일에 이미 확정(고정)된
+    // 먼저 확정한다("후보I": 수요일 상암점, "후보J": 금요일 마포점). 그 요일에 이미 확정(고정)된
     // 세션이 있으면 충돌을 피해 건드리지 않는다. 이후 1~3단계는 이 체인 뒤(extendExistingChain)와
     // 나머지 요일에서 평소처럼 진행되므로 "그 지점을 최대한 먼저 배정하고 나머지를 배정"이 된다.
     if (pinnedLocationDay && !(pinned.some(p => p.day === pinnedLocationDay.day)) && (byDay.get(pinnedLocationDay.day) || []).length > 0) {
@@ -2136,10 +2140,14 @@
     }
 
     // 1단계: 아직 아무 것도 못 받은 회원들만으로 요일별 체인을 새로 짠다. stage1Order가 그 순서를 정한다.
+    // sessionCountFirst(후보B)이면 "아직 못 받은 회원만"이라는 제약을 두지 않는다 —
+    // 인원(서로 다른 회원 수) 우선이 아니라 세션 총 개수 자체를 곧바로 최대화하기 위함이다.
     stage1Order.forEach(day => {
       const elig = new Set([...allMemberIdsForDay(day)].filter(id => {
-        const usedDays = memberDays.get(id);
-        if (usedDays && usedDays.size >= 1) return false;
+        if (!sessionCountFirst) {
+          const usedDays = memberDays.get(id);
+          if (usedDays && usedDays.size >= 1) return false;
+        }
         return withinCaps(id, day);
       }));
       fillDay(day, elig, fairnessWeight);
@@ -2181,7 +2189,7 @@
     }
 
     // 주어진 공강 허용 한도(allowGapMin)로 배정을 한 번 완결한다. 기본은 요일 순서
-    // 그대로 한 번 실행한다. minimizeUnassigned 옵션("후보G")이 켜지면, "신청 가능한
+    // 그대로 한 번 실행한다. minimizeUnassigned 옵션("후보H")이 켜지면, "신청 가능한
     // 회원이 적은(대안이 좁은) 요일부터 먼저 채우면 미배정이 줄어들 것"이라는 가설로
     // 1단계 처리 순서를 바꿔 한 번 더 실행해보고, 두 결과 중 실제로 배정된 회원 수가
     // 더 많은 쪽을 택한다(동점이면 총 세션 수가 많은 쪽, 그래도 동점이면 기본 순서를 우선한다).
@@ -2304,10 +2312,11 @@
   // 바로 위 경고대로 실제 시간 순서와 어긋나는 신청이 먼저 채워져 빈 시간이 남을 수 있다.
   // (그런 "지점별로 묶기"가 필요하면 groupByLocation 옵션으로 buildBestChain의 체인 선택
   // 단계에서만, 이미 완성된 동점 체인들 사이에서 고르게 한다 — 정렬 자체를 건드리지 않는다.)
-  // 후보B·C·D는 maxTravelsPerWeek 옵션으로 일주일 총 이동 횟수 한도를 각각 5회·4회·3회로
-  // 제한한다. 후보E는 maxTravelsPerDay 옵션으로 하루 이동 횟수 한도를 2회로 강화한다.
-  // 후보F는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
-  // 이전 시작) 우선"을 추가한다. 후보G는 minimizeUnassigned 옵션으로, 기본 순서와 "대안이
+  // 후보B는 sessionCountFirst 옵션으로, 인원(서로 다른 회원 수)이 아니라 총 수업 건수 자체를
+  // 먼저 최대화한다. 후보C·D·E는 maxTravelsPerWeek 옵션으로 일주일 총 이동 횟수 한도를 각각
+  // 5회·4회·3회로 제한한다. 후보F는 maxTravelsPerDay 옵션으로 하루 이동 횟수 한도를 2회로
+  // 강화한다. 후보G는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
+  // 이전 시작) 우선"을 추가한다. 후보H는 minimizeUnassigned 옵션으로, 기본 순서와 "대안이
   // 좁은 요일부터 먼저 채우는" 순서를 둘 다 시도해보고 실제로 미배정 회원이 더 적은 쪽을 택한다.
   function defaultSort(eligible, jitter) {
     return [...eligible].sort((a, b) =>
@@ -2317,7 +2326,7 @@
       || reqEnd(a) - reqEnd(b));
   }
 
-  // 후보H/I("지점 우선 배정")용: 이름으로 지점을 찾아 { day, locationId } 형태로 돌려준다.
+  // 후보I/J("지점 우선 배정")용: 이름으로 지점을 찾아 { day, locationId } 형태로 돌려준다.
   // 지점 이름이 바뀌었거나 삭제됐으면 null을 돌려주고, 이때 greedyAssign은 이 사전 단계를
   // 그냥 건너뛴다(다른 조건은 정상 적용, 에러 없이 후보A와 같은 배치가 된다).
   function pinnedLocationDayFor(day, locationName) {
@@ -2332,99 +2341,111 @@
     return loc ? loc.id : null;
   }
 
-  // 표시 순서는 사용자가 지정한 순서를 그대로 따른다: A(기본, 인원 → 이동 횟수까지만
-  // 비교하고 멈춘다) → B(A와 기준은 같고 일주일 총 이동 횟수를 5회로 제한) → C(A와 기준은
-  // 같고 일주일 총 이동 횟수를 4회로 제한) → D(A와 기준은 같고 일주일 총 이동 횟수를 3회로
-  // 제한) → E(A와 기준은 같고 하루 이동 횟수를 2회로 강화) → F(A의 동점 기준에 낮 시간대
-  // 우선을 한 단계 더 추가한 대안) → G(A와 기준은 같고 요일 처리 순서를 바꿔보는 대안) →
-  // H/I(특정 요일에 특정 지점을 최대한 먼저 배정하는 대안).
+  // 표시 순서는 사용자가 지정한 순서를 그대로 따른다: A(기본, 인원 → 총 수업 건수 → 이동
+  // 횟수 순으로 비교) → B(A와 같은 세 값을 비교하되 인원 대신 총 수업 건수를 먼저 최대화 →
+  // 인원 → 이동 횟수) → C(A와 기준은 같고 일주일 총 이동 횟수를 5회로 제한) → D(A와 기준은
+  // 같고 일주일 총 이동 횟수를 4회로 제한) → E(A와 기준은 같고 일주일 총 이동 횟수를 3회로
+  // 제한) → F(A와 기준은 같고 하루 이동 횟수를 2회로 강화) → G(A의 동점 기준에 낮 시간대
+  // 우선을 한 단계 더 추가한 대안) → H(A와 기준은 같고 요일 처리 순서를 바꿔보는 대안) →
+  // I/J(특정 요일에 특정 지점을 최대한 먼저 배정하는 대안).
   const STRATEGIES = [
     {
-      title: "후보A - 수업 횟수 최대화",
-      desc: "인원을 최대화하도록 배정합니다. 동점이면 이동 횟수가 적은 쪽을 우선합니다.",
-      options: { travelCountOnly: true },
+      title: "후보A - 인원·수업 최대화",
+      desc: "인원 최대화 → 총 수업 건수 → 이동 횟수 순으로 배정합니다.",
+      options: { travelCountOnly: true, strengthenSearch: "count" },
       sort: defaultSort
     },
     {
-      title: "후보B - 일주일 총 이동 횟수 5회",
+      title: "후보B - 수업 횟수 최대화",
+      desc: "총 수업 건수 → 인원 최대화 → 이동 횟수 순으로 배정합니다.",
+      options: { sessionCountFirst: true, travelCountOnly: true, strengthenSearch: "sessions" },
+      sort: defaultSort
+    },
+    {
+      title: "후보C - 일주일 총 이동 횟수 5회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 5회까지로 제한합니다.",
       options: { maxTravelsPerWeek: 5 },
       sort: defaultSort
     },
     {
-      title: "후보C - 일주일 총 이동 횟수 4회",
+      title: "후보D - 일주일 총 이동 횟수 4회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 4회까지로 제한합니다.",
       options: { maxTravelsPerWeek: 4 },
       sort: defaultSort
     },
     {
-      title: "후보D - 일주일 총 이동 횟수 3회",
+      title: "후보E - 일주일 총 이동 횟수 3회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 3회까지로 제한합니다.",
       options: { maxTravelsPerWeek: 3 },
       sort: defaultSort
     },
     {
-      title: "후보E - 하루 이동 횟수 2회",
+      title: "후보F - 하루 이동 횟수 2회",
       desc: "후보A와 같은 기준이지만, 하루 이동 횟수를 최대 2회까지로 제한합니다.",
       options: { maxTravelsPerDay: 2 },
       sort: defaultSort
     },
     {
-      title: "후보F - 낮 시간대 우선",
+      title: "후보G - 낮 시간대 우선",
       desc: "후보A와 같은 기준이지만, 그마저 동점이면 18시 이전에 시작하는 수업이 많은 배치를 우선합니다.",
       options: { preferDaytime: true },
       sort: defaultSort
     },
     {
-      title: "후보G - 미배정 최소화",
+      title: "후보H - 미배정 최소화",
       desc: "후보A와 같은 기준이지만, 신청 가능한 회원이 적은 요일부터 먼저 채우는 방식도 함께 시도해보고 미배정 회원이 더 적은 쪽을 택합니다.",
       options: { minimizeUnassigned: true },
       sort: defaultSort
     },
     {
-      title: "후보H - 수요일 상암점 우선",
+      title: "후보I - 수요일 상암점 우선",
       desc: "후보A와 같은 기준이지만, 수요일에는 상암점 수업을 최대한 먼저 배정한 뒤 나머지를 배정합니다.",
       options: () => ({ pinnedLocationDay: pinnedLocationDayFor(2, "상암점") }), // 수 = index 2
       sort: defaultSort
     },
     {
-      title: "후보I - 금요일 마포점 우선",
+      title: "후보J - 금요일 마포점 우선",
       desc: "후보A와 같은 기준이지만, 금요일에는 마포점 수업을 최대한 먼저 배정한 뒤 나머지를 배정합니다.",
       options: () => ({ pinnedLocationDay: pinnedLocationDayFor(4, "마포점") }), // 금 = index 4
       sort: defaultSort
     }
   ];
 
-  // 후보A는 스스로 "인원 최대화 → 동점이면 이동 횟수 최소화"를 기준으로 내세우지만, 그리디
-  // 알고리즘은 요일을 처리하는 순서에 따라 이 기준으로도 최선이 아닌 결과를 낼 수 있다 —
-  // 실제로 특정 요일·지점을 먼저 채우는 후보H/I가 우연히 후보A보다 더 나은(인원은 같고
-  // 이동은 더 적은) 조합을 찾아내는 경우가 있었다. 그래서 후보A는 모든 (요일, 지점) 조합을
-  // "그 요일엔 그 지점부터 최대한 채운다"는 사전 단계로 하나씩 시도해보고, 그중 baseline보다
-  // 나은 결과가 있으면 그걸로 교체한다 — 후보H/I와 같은 메커니즘을 후보A 안에서 전수
-  // 조사하는 셈이다. 지점이 1개뿐이면 사전 단계를 시도할 의미가 없으므로 건너뛴다.
-  // 비교 기준은 인원 → 총 수업 건수 → 이동 횟수 순이다: 인원과 이동 횟수만 비교하면(총
-  // 수업 건수를 보지 않으면) 인원은 같고 이동만 더 적은 조합이 실제로는 누군가의 2번째
-  // 수업 자리를 희생해 이동을 줄인 것일 수 있어, 후보A 제목이 내세우는 "수업 횟수 최대화"를
-  // 오히려 후퇴시킬 수 있다(실제로 28건 → 27건으로 줄어드는 문제가 있었다). 총 수업 건수를
-  // 이동 횟수보다 먼저 비교해 이런 후퇴를 막는다.
-  function strengthenCandidateA(baseline, sorted, eligibleIds, allMemberIds, options, pinned) {
+  // 후보A/B는 스스로 정해둔 3단계 비교 순서(후보A: 인원 → 총 수업 건수 → 이동 횟수, 후보B:
+  // 총 수업 건수 → 인원 → 이동 횟수)를 내세우지만, 그리디 알고리즘은 요일을 처리하는 순서에
+  // 따라 이 기준으로도 최선이 아닌 결과를 낼 수 있다 — 실제로 특정 요일·지점을 먼저 채우는
+  // 후보I/J가 우연히 더 나은 조합을 찾아내는 경우가 있었다. 그래서 이 두 후보는 모든 (요일,
+  // 지점) 조합을 "그 요일엔 그 지점부터 최대한 채운다"는 사전 단계로 하나씩 시도해보고, 그중
+  // baseline보다 나은 결과가 있으면 그걸로 교체한다 — 후보I/J와 같은 메커니즘을 전수 조사하는
+  // 셈이다. 지점이 1개뿐이면 사전 단계를 시도할 의미가 없으므로 건너뛴다.
+  // primary가 "count"면 인원을 먼저 비교하고 그다음 총 수업 건수를(후보A), "sessions"면 총
+  // 수업 건수를 먼저 비교하고 그다음 인원을(후보B) 비교한다 — 어느 쪽이든 마지막은 이동 횟수다.
+  // 두 값 중 하나만 비교하면(예: 인원과 이동 횟수만) 그 사이에 있는 값(총 수업 건수 또는 인원)이
+  // 실제로는 누군가의 2번째 수업 자리를 희생해 이동을 줄인 것일 수 있어, 후보 제목이 내세우는
+  // 기준을 오히려 후퇴시킬 수 있다(실제로 28건 → 27건으로 줄어드는 문제가 있었다). 세 값을
+  // 모두, 선언한 순서 그대로 비교해 이런 후퇴를 막는다.
+  function strengthenCandidate(baseline, sorted, eligibleIds, allMemberIds, options, pinned, primary) {
     if (state.locations.length < 2) return baseline;
+    function score(cand) {
+      const count = new Set(cand.assigned.map(r => r.memberId)).size;
+      const sessions = cand.assigned.length;
+      const travel = totalTravelCount(cand.assigned);
+      return primary === "sessions" ? [sessions, count, travel] : [count, sessions, travel];
+    }
+    function isBetter(a, b) {
+      if (a[0] !== b[0]) return a[0] > b[0];
+      if (a[1] !== b[1]) return a[1] > b[1];
+      return a[2] < b[2];
+    }
     let best = baseline;
-    let bestCount = new Set(best.assigned.map(r => r.memberId)).size;
-    let bestSessions = best.assigned.length;
-    let bestTravel = totalTravelCount(best.assigned);
+    let bestScore = score(best);
     DAYS.forEach((d, day) => {
       state.locations.forEach(loc => {
         const pinOptions = Object.assign({}, options, { pinnedLocationDay: { day, locationId: loc.id } });
         const attempt = buildCandidate(baseline.title, baseline.desc, sorted, eligibleIds, allMemberIds, pinOptions, pinned);
-        const attemptCount = new Set(attempt.assigned.map(r => r.memberId)).size;
-        const attemptSessions = attempt.assigned.length;
-        const attemptTravel = totalTravelCount(attempt.assigned);
-        const better = attemptCount > bestCount
-          || (attemptCount === bestCount && attemptSessions > bestSessions)
-          || (attemptCount === bestCount && attemptSessions === bestSessions && attemptTravel < bestTravel);
-        if (better) {
-          best = attempt; bestCount = attemptCount; bestSessions = attemptSessions; bestTravel = attemptTravel;
+        const attemptScore = score(attempt);
+        if (isBetter(attemptScore, bestScore)) {
+          best = attempt; bestScore = attemptScore;
         }
       });
     });
@@ -2441,8 +2462,10 @@
       ? Object.assign({}, strategyOptions, { priorityDoubleLocationId: locationIdByName("마포점") })
       : strategyOptions;
     let cand = buildCandidate(strategy.title, strategy.desc, sorted, eligibleIds, allMemberIds, options, pinned);
-    if (strategyIndex === 0) {
-      cand = strengthenCandidateA(cand, sorted, eligibleIds, allMemberIds, options, pinned);
+    // strengthenSearch는 전략의 "이름"(배열 위치가 아니라)에 매인 명시적 플래그다 — 배열 순서가
+    // 또 바뀌어도 엉뚱한 후보에 이 사전 탐색이 붙거나 빠지지 않도록.
+    if (strategyOptions.strengthenSearch) {
+      cand = strengthenCandidate(cand, sorted, eligibleIds, allMemberIds, options, pinned, strategyOptions.strengthenSearch);
     }
     cand.strategyIndex = strategyIndex;
     return cand;
