@@ -158,6 +158,21 @@ body {
 .btn-small { padding: 5px 10px; font-size: 12px; border-radius: 8px; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
+/* "후보 생성하기" 로딩 스피너: 기본은 숨겨두고, 버튼에 .loading이 붙었을 때만 보여준다. */
+.btn-spinner {
+  display: none;
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  border: 2px solid rgba(255, 255, 255, 0.4);
+  border-top-color: #fff;
+  border-radius: 50%;
+  vertical-align: -2px;
+  animation: btn-spin 0.7s linear infinite;
+}
+#generateBtn.loading .btn-spinner { display: inline-block; }
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+
 /* Availability day list (time picker) */
 .avail-day-list {
   display: flex;
@@ -302,26 +317,10 @@ body {
 }
 .checkbox-row input { width: 17px; height: 17px; accent-color: var(--primary); cursor: pointer; }
 
-.checkbox-row-line { display: flex; align-items: center; gap: 6px; }
-.checkbox-row-line .checkbox-row { margin-bottom: 0; }
+#priorityMapoDoubleBlock .checkbox-row { margin-bottom: 18px; }
 
 /* Hover/focus tooltip for a short inline explanation (e.g. next to a checkbox label) */
-.info-tip { position: relative; display: inline-flex; }
-.info-tip-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  background: var(--primary-soft);
-  color: var(--text-mute);
-  font-size: 10px;
-  font-weight: 800;
-  font-style: italic;
-  font-family: Georgia, "Times New Roman", serif;
-  cursor: help;
-}
+.info-tip { position: relative; display: inline-flex; cursor: help; }
 .info-tip-bubble {
   display: none;
   position: absolute;
@@ -1208,7 +1207,7 @@ body {
 }
 .bulk-preview-row-head select:focus,
 .bulk-preview-new-fields select:focus { outline: 2px solid var(--primary-soft); border-color: var(--primary); }
-.bulk-preview-new-fields { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.bulk-preview-new-fields { display: flex; flex-wrap: wrap; gap: 8px; }
 .bulk-preview-schedule { display: flex; flex-wrap: wrap; gap: 6px; }
 .bulk-preview-day-chip {
   display: inline-flex; align-items: center; gap: 5px;

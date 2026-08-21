@@ -1079,13 +1079,19 @@
         return { type: "point", marks, warning };
       }
       if (rightStr === "") {
+        // "6630~"처럼 물결 앞에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 마지막 시각(6시30분)을
+        // "그 시각부터 마감까지" 열린 시작점으로 삼고, 그 앞의 시각들(6시)은 각각 개별 희망
+        // 시작 시각으로 남긴다.
         const marks = tokenizeHourDigits(leftStr);
-        if (!marks || marks.length !== 1) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
-        return { type: "openStart", mark: marks[0], warning };
+        if (!marks || marks.length === 0) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+        return { type: "openStart", mark: marks[marks.length - 1], extraPoints: marks.slice(0, -1), warning };
       }
+      // "~458"처럼 물결 뒤에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 첫 시각(4시)을
+      // "마감 이전부터 그 시각까지" 열린 끝점으로 삼고, 그 뒤의 시각들(5시, 8시)은 각각
+      // 개별 희망 시작 시각으로 남긴다.
       const marks = tokenizeHourDigits(rightStr);
-      if (!marks || marks.length !== 1) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
-      return { type: "openEnd", mark: marks[0], warning };
+      if (!marks || marks.length === 0) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+      return { type: "openEnd", mark: marks[0], extraPoints: marks.slice(1), warning };
     }
     const marks = tokenizeHourDigits(clean);
     if (!marks) return { error: "시간 해석 실패: \"" + token + "\"", warning };
@@ -1140,9 +1146,11 @@
       if (spec.type === "point") {
         spec.marks.forEach(m => parts.push(hourMarkLabel(m)));
       } else if (spec.type === "openStart") {
+        (spec.extraPoints || []).forEach(m => parts.push(hourMarkLabel(m)));
         parts.push(hourMarkLabel(spec.mark) + "~마감");
       } else if (spec.type === "openEnd") {
         parts.push("시작~" + hourMarkLabel(spec.mark));
+        (spec.extraPoints || []).forEach(m => parts.push(hourMarkLabel(m)));
       }
     });
     return parts.join(", ");
@@ -1247,9 +1255,6 @@
         row.choice = select.value;
         renderRowState();
       });
-      head.appendChild(select);
-      rowEl.appendChild(head);
-
       const newFields = document.createElement("div");
       newFields.className = "bulk-preview-new-fields";
       const locSelect = document.createElement("select");
@@ -1272,7 +1277,9 @@
       catSelect.addEventListener("change", () => { row.newCategory = catSelect.value; });
       newFields.appendChild(locSelect);
       newFields.appendChild(catSelect);
-      rowEl.appendChild(newFields);
+      head.appendChild(select);
+      head.appendChild(newFields);
+      rowEl.appendChild(head);
 
       const scheduleEl = document.createElement("div");
       scheduleEl.className = "bulk-preview-schedule";
@@ -1317,9 +1324,9 @@
       else willApply++;
     });
 
-    bulkImportPreviewSummaryEl.textContent =
-      "총 " + bulkImportRows.length + "줄 · 기존 회원 적용 " + willApply + "명 · 신규 등록 " + willCreate +
-      "명 · 건너뛰기 " + willSkip + "명. 적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다.";
+    bulkImportPreviewSummaryEl.innerHTML =
+      "기존 회원 적용 " + willApply + "명 · 신규 등록 " + willCreate + "명 · 건너뛰기 " + willSkip + "명" +
+      "<br>적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다.";
 
     bulkImportStepInputEl.style.display = "none";
     bulkImportStepPreviewEl.style.display = "";
@@ -1386,9 +1393,15 @@
               addedForMember += addDesiredRange(member, day, hourMarkToStartSlot(mark), hourMarkToStartSlot(mark));
             });
           } else if (spec.type === "openStart") {
+            (spec.extraPoints || []).forEach(mark => {
+              addedForMember += addDesiredRange(member, day, hourMarkToStartSlot(mark), hourMarkToStartSlot(mark));
+            });
             addedForMember += addDesiredRange(member, day, hourMarkToStartSlot(spec.mark), SLOT_COUNT);
           } else if (spec.type === "openEnd") {
             addedForMember += addDesiredRange(member, day, 0, hourMarkToStartSlot(spec.mark));
+            (spec.extraPoints || []).forEach(mark => {
+              addedForMember += addDesiredRange(member, day, hourMarkToStartSlot(mark), hourMarkToStartSlot(mark));
+            });
           }
         });
       });
@@ -2028,6 +2041,16 @@
     const breakSlots = durationToSlots(BREAK_MIN);
 
     const scheduleGridRange = businessHoursGridRange();
+    let rangeStartSlot = scheduleGridRange.rangeStartSlot;
+    let rangeEndSlot = scheduleGridRange.rangeEndSlot;
+    // 근무 가능 시간 밖으로 등록된 희망 시간(예: 붙여넣기로 일괄 등록할 때 실수로 근무 시간
+    // 밖 시각을 넣은 경우)이 있으면, 그리드 범위를 넓혀서라도 항상 보이게 한다 — 그렇지
+    // 않으면 블록 자체가 그려지지 않아(renderGrid의 클리핑) 삭제할 방법이 없는데도 회원 탭은
+    // 신청이 있는 것으로(초록색) 계속 표시되는 모순이 생긴다.
+    myReqs.forEach(r => {
+      rangeStartSlot = Math.min(rangeStartSlot, r.startSlot);
+      rangeEndSlot = Math.max(rangeEndSlot, r.startSlot + durationToSlots(r.duration));
+    });
     renderGrid(scheduleGridEl, availableCells, {
       blocks: runs.map(run => {
         const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);
@@ -2042,8 +2065,8 @@
           onDelete: () => removeRequests(run.reqs.map(r => r.id))
         };
       }),
-      rangeStartSlot: scheduleGridRange.rangeStartSlot,
-      rangeEndSlot: scheduleGridRange.rangeEndSlot
+      rangeStartSlot,
+      rangeEndSlot
     });
 
     if (myReqs.length === 0) {
@@ -2837,7 +2860,7 @@
   const STRATEGIES = [
     {
       title: "후보A - 인원·수업 최대화",
-      desc: "미배정 없음 → 총 수업 건수 → 이동 횟수 순으로 배정합니다.",
+      desc: "미배정 없음 → 총 수업 횟수 → 이동 횟수 순으로 배정합니다.",
       // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
       // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
       // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
@@ -2849,7 +2872,7 @@
     },
     {
       title: "후보B - 수업 횟수 최대화",
-      desc: "총 수업 건수 → 인원 최대화 → 이동 횟수 순으로 배정합니다.",
+      desc: "총 수업 횟수 → 인원 최대화 → 이동 횟수 순으로 배정합니다.",
       options: { sessionCountFirst: true, strengthenSearch: "sessions" },
       sort: defaultSort
     },
@@ -2966,6 +2989,49 @@
     return cand;
   }
 
+  // 후보 비교 우선순위: 인원(미배정 최소화) → 총 수업 건수 → 이동 횟수 — "후보 조건"이 내세우는
+  // 순서 그대로다. 처음 생성할 때 더 나은 조합을 찾을 때(generateCandidates)와, 재생성 시 지금
+  // 보다 못한 결과로 후퇴하지 않게 막을 때(regenerateCandidate) 공통으로 쓴다.
+  function candidateSearchScore(cand) {
+    const count = new Set(cand.assigned.map(r => r.memberId)).size;
+    return [count, cand.assigned.length, totalTravelCount(cand.assigned)];
+  }
+  function isCandidateWorse(a, b) {
+    if (a[0] !== b[0]) return a[0] < b[0];
+    if (a[1] !== b[1]) return a[1] < b[1];
+    return a[2] > b[2];
+  }
+
+  // 시드 기반 의사난수: 초기 생성 시에도 여러 조합을 탐색해 그중 최선을 보여주되, 같은
+  // 데이터라면 "후보 생성하기"를 몇 번을 눌러도 항상 같은 결과가 나오도록(재현 가능하도록)
+  // Math.random() 대신 고정 시드로 만든 난수열을 쓴다.
+  function makeSeededRandom(seed) {
+    let s = seed >>> 0;
+    return function() {
+      s |= 0; s = (s + 0x6D2B79F5) | 0;
+      let t = Math.imul(s ^ (s >>> 15), 1 | s);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  // 전략 하나를 zeroJitter 포함 (attempts + 1)가지 조합으로 시도해 그중 candidateSearchScore
+  // 기준 최선을 돌려준다. randomFn으로 재현 가능한 시드 난수(makeSeededRandom)를 넘기면 항상
+  // 같은 결과가, Math.random을 넘기면 매번 다를 수 있는 결과가 나온다.
+  function searchBestCandidateForStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, pinned, attempts, randomFn) {
+    const zeroJitter = new Map(eligible.map(r => [r.id, 0]));
+    let best = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, zeroJitter, pinned);
+    let bestScore = candidateSearchScore(best);
+    for (let i = 0; i < attempts; i++) {
+      const jitter = new Map(eligible.map(r => [r.id, randomFn()]));
+      const attempt = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned);
+      const score = candidateSearchScore(attempt);
+      if (isCandidateWorse(bestScore, score)) { best = attempt; bestScore = score; }
+    }
+    return best;
+  }
+  const INITIAL_SEARCH_ATTEMPTS = 20; // "후보 생성하기" 시 전략당 추가로 시도해볼 조합 수
+
   // strategyIndex별로 "이미 보여준 배정 결과"를 기록해, 재생성 시 똑같은 조합이 다시 나오는지
   // 판별한다. 배정 결과(assigned)를 이루는 신청 id 집합을 그대로 서명으로 쓴다 — 같은
   // 신청 조합이면 같은 서명이 나온다. (페이지를 새로고침하면 초기화되는 세션 한정 기록.)
@@ -2988,14 +3054,43 @@
     );
     const eligible = state.requests.filter(isEligibleRequest);
     const eligibleIds = new Set(eligible.map(r => r.id));
-    // 모든 후보는 처음 생성할 때 재현 가능하도록 jitter를 0으로 시작한다(후보마다 계산
-    // 기준 자체가 달라 굳이 무작위로 섞지 않아도 서로 다른 배치가 나온다).
-    const zeroJitter = new Map(eligible.map(r => [r.id, 0]));
 
+    // 그리디 배정은 동점 신청들을 처리하는 순서(jitter)에 따라 결과가 달라질 수 있어, jitter를
+    // 0으로 고정한 단 한 번의 시도가 항상 최선(특히 "미배정 없음")은 아니다. "다음 후보"를
+    // 눌러야만 더 나은 조합이 나오는 게 아니라 처음부터 도달 가능한 최선을 보여주기 위해,
+    // 전략마다 시드 기반 난수로 여러 조합을 더 시도해보고 그중 candidateSearchScore 기준
+    // 최선(인원 최대화 → 수업 건수 → 이동 횟수)을 택한다. 시드가 고정돼 있어 같은 데이터라면
+    // "후보 생성하기"를 몇 번 눌러도 항상 같은 결과가 나온다(재현 가능).
     const built = STRATEGIES.map((strategy, idx) =>
-      buildCandidateFromStrategy(idx, eligible, eligibleIds, allMemberIds, zeroJitter));
-    built.forEach((cand, idx) => { candidateHistory[idx] = new Set([candidateSignature(cand)]); });
-    return built;
+      searchBestCandidateForStrategy(
+        idx, eligible, eligibleIds, allMemberIds, [], INITIAL_SEARCH_ATTEMPTS, makeSeededRandom(idx + 1)));
+
+    // 전략마다 그리디가 채워나가는 순서 자체가 달라서(예: 후보B의 sessionCountFirst), 같은
+    // jitter 횟수를 시도해도 어떤 전략은 찾아내는 조합을 다른 전략은 구조적으로 못 찾을 수
+    // 있다(실제로 후보B가 찾은 "미배정 없음" 조합을 후보A는 자기 탐색만으로는 못 찾는 경우가
+    // 있었다). "후보 조건"이 내세우는 평가 기준(인원 최대화 → 수업 건수 → 이동 횟수)은 모든
+    // 후보에 공통이므로, 서로 다른 전략끼리도 그 기준으로 비교해 더 나은 결과가 있으면 그
+    // 전략의 이름표(title/desc)를 단 채로 가져와 보여준다. 단, 후보C·D·E처럼 일주일 총 이동
+    // 횟수 상한이 있는 전략에는 그 상한을 지키는 조합만 빌려줄 수 있다(A·B처럼 상한이 없는
+    // 전략의 결과를 그대로 가져오면 그 전략의 조건을 어길 수 있으므로).
+    const strengthened = built.map((cand, idx) => {
+      const strategyOptions = STRATEGIES[idx].options;
+      const myWeeklyCap = (strategyOptions && typeof strategyOptions !== "function")
+        ? (strategyOptions.maxTravelsPerWeek || null) : null;
+      let best = cand;
+      let bestScore = candidateSearchScore(best);
+      built.forEach((other, otherIdx) => {
+        if (otherIdx === idx) return;
+        if (myWeeklyCap != null && totalTravelCount(other.assigned) > myWeeklyCap) return;
+        const otherScore = candidateSearchScore(other);
+        if (isCandidateWorse(bestScore, otherScore)) { best = other; bestScore = otherScore; }
+      });
+      if (best === cand) return cand;
+      return Object.assign({}, best, { title: cand.title, desc: cand.desc, strategyIndex: idx });
+    });
+
+    strengthened.forEach((cand, idx) => { candidateHistory[idx] = new Set([candidateSignature(cand)]); });
+    return strengthened;
   }
 
   // 후보 카드 하나만 같은 전략 안에서 다시 계산한다 (동점인 신청들의 순서를 랜덤으로 바꿔 다른 배정을 시도).
@@ -3037,27 +3132,24 @@
     // 수 있는데, 기준만 최소 허용선으로 삼으면 "지금 보고 있는 것보다 못한" 결과도 통과해
     // 버린다(실제로 미배정 인원은 그대로인데 수업 건수만 줄어든 후보가 표시되는 문제가 있었다).
     // 그래서 둘 중 더 나은 쪽을 최소 허용선으로 삼고, 인원 → 수업 건수 → 이동 횟수 순으로,
-    // 그보다 못한 시도는 아무리 새로운 조합이어도 버린다.
-    function regenScore(cand) {
-      const count = new Set(cand.assigned.map(r => r.memberId)).size;
-      return [count, cand.assigned.length, totalTravelCount(cand.assigned)];
-    }
-    function isWorseThan(a, b) {
-      if (a[0] !== b[0]) return a[0] < b[0];
-      if (a[1] !== b[1]) return a[1] < b[1];
-      return a[2] > b[2];
-    }
-    const zeroJitter = new Map(eligible.map(r => [r.id, 0]));
-    const baseline = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, zeroJitter, pinned);
-    const baselineScore = regenScore(baseline);
-    const floorScore = (prevCand && isWorseThan(baselineScore, regenScore(prevCand)))
-      ? regenScore(prevCand) : baselineScore;
+    // 그보다 못한 시도는 아무리 새로운 조합이어도 버린다. baseline 자체도 (초기 생성과 같은
+    // 방식으로) 시드 없이 여러 조합을 미리 시도해 최선을 찾아둔다 — 그래야 floor가 지나치게
+    // 낮게 잡혀 있다가 낮은 결과를 새 것으로 오인해 받아들이는 일이 없다.
+    const baseline = searchBestCandidateForStrategy(
+      strategyIndex, eligible, eligibleIds, allMemberIds, pinned, INITIAL_SEARCH_ATTEMPTS, Math.random);
+    // floorCand: baseline과 prevCand 중 더 나은 쪽. "새로운 조합을 못 찾았을 때"도 이 값으로
+    // 돌아가야지, baseline으로 그냥 되돌리면 prevCand보다 못한 결과가 화면에 나타날 수 있다
+    // (아래 !newCand 분기 참고) — "다음 후보"를 반복 클릭했을 때 수업 건수가 오르내리며
+    // 들쭉날쭉해 보이는 문제가 바로 이 지점에서 나고 있었다.
+    const floorCand = (prevCand && isCandidateWorse(candidateSearchScore(baseline), candidateSearchScore(prevCand)))
+      ? prevCand : baseline;
+    const floorScore = candidateSearchScore(floorCand);
 
     let newCand = null;
     for (let i = 0; i < REGEN_MAX_ATTEMPTS; i++) {
       const jitter = new Map(eligible.map(r => [r.id, Math.random()]));
       const attempt = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned);
-      if (isWorseThan(regenScore(attempt), floorScore)) continue; // 최소 허용선보다 못하면 버린다
+      if (isCandidateWorse(candidateSearchScore(attempt), floorScore)) continue; // 최소 허용선보다 못하면 버린다
       const sig = candidateSignature(attempt);
       if (!seen.has(sig)) {
         newCand = attempt;
@@ -3067,18 +3159,18 @@
     }
 
     if (!newCand) {
-      if (!confirm("새로운 후보지가 없습니다. 처음 후보지부터 다시 표시하시겠습니까?")) return;
-      newCand = baseline;
+      if (!confirm("더 나은 새로운 후보지를 찾지 못했습니다. 지금까지 본 조합 기록을 지우고 다시 찾아보시겠습니까?")) return;
+      newCand = floorCand; // baseline이 아니라 floorCand — 지금 보다 못한 결과로 되돌리지 않는다.
       candidateHistory[strategyIndex] = new Set([candidateSignature(newCand)]);
       newCand.confirmedIds = [...confirmedIds];
-      if (prevCand) {
+      if (prevCand && prevCand !== newCand) {
         if (!candidateUndoStack[strategyIndex]) candidateUndoStack[strategyIndex] = [];
         candidateUndoStack[strategyIndex].push(prevCand);
       }
       candidates[strategyIndex] = newCand;
       saveState();
       renderCandidates();
-      showToast("처음 후보로 다시 표시되었습니다", "info");
+      showToast("더 나은 조합을 찾지 못해 다시 탐색합니다", "info");
       return;
     }
 
@@ -3798,12 +3890,29 @@
       return;
     }
     generateHintEl.textContent = "";
-    candidates = generateCandidates();
-    Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]); // 새로 생성하면 이전 후보 이력도 초기화
-    requestsChangedSinceGenerate = false;
-    renderCandidates();
-    saveState();
-    showToast("후보가 생성되었습니다", "success");
+
+    const generateBtnEl = document.getElementById("generateBtn");
+    const generateBtnLabelEl = document.getElementById("generateBtnLabel");
+    generateBtnEl.disabled = true;
+    generateBtnEl.classList.add("loading");
+    generateBtnLabelEl.textContent = "후보 생성 중...";
+
+    // 전략마다 여러 조합을 탐색하느라 계산이 무거워져서, 그냥 바로 실행하면 로딩 스피너가
+    // 그려지기도 전에 메인 스레드가 막혀버린다. requestAnimationFrame + setTimeout으로 한 프레임
+    // 넘겨 로딩 UI가 먼저 화면에 그려지게 한 뒤에 실제 계산을 시작한다.
+    requestAnimationFrame(() => {
+      setTimeout(() => {
+        candidates = generateCandidates();
+        Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]); // 새로 생성하면 이전 후보 이력도 초기화
+        requestsChangedSinceGenerate = false;
+        renderCandidates();
+        saveState();
+        generateBtnEl.disabled = false;
+        generateBtnEl.classList.remove("loading");
+        generateBtnLabelEl.textContent = "후보 생성하기";
+        showToast("후보가 생성되었습니다", "success");
+      }, 0);
+    });
   });
 
   function renderCandidates() {
