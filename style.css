@@ -173,6 +173,37 @@ body {
 #generateBtn.loading .btn-spinner { display: inline-block; }
 @keyframes btn-spin { to { transform: rotate(360deg); } }
 
+/* "후보 생성하기" 진행률 표시줄: 실제로 만든 조합 수 기준 진행률(0~100%)을 보여준다. */
+.generate-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.generate-progress-track {
+  flex: 1;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  overflow: hidden;
+}
+.generate-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: var(--primary);
+  transition: width 0.15s ease-out;
+}
+.generate-progress-text {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-mute);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+
 /* Availability day list (time picker) */
 .avail-day-list {
   display: flex;
@@ -317,10 +348,11 @@ body {
 }
 .checkbox-row input { width: 17px; height: 17px; accent-color: var(--primary); cursor: pointer; }
 
-#priorityMapoDoubleBlock .checkbox-row { margin-bottom: 18px; }
+#priorityMapoDoubleBlock { display: flex; align-items: center; gap: 6px; margin-bottom: 18px; }
+#priorityMapoDoubleBlock .checkbox-row { margin-bottom: 0; }
 
 /* Hover/focus tooltip for a short inline explanation (e.g. next to a checkbox label) */
-.info-tip { position: relative; display: inline-flex; cursor: help; }
+.info-tip { position: relative; display: inline-flex; cursor: help; color: var(--text-mute); font-size: 13px; }
 .info-tip-bubble {
   display: none;
   position: absolute;
@@ -1029,6 +1061,7 @@ body {
   background: var(--primary-soft); color: var(--primary);
   padding: 4px 10px; border-radius: 999px; font-weight: 700;
 }
+.stat-pill-danger { background: var(--danger-soft); color: var(--danger); }
 .stat-pill-muted { color: var(--text-mute); font-weight: 500; font-size: 11px; }
 .unassigned-box {
   margin-top: 10px; font-size: 12px; color: var(--text-mute);

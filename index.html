@@ -158,11 +158,11 @@
           <div id="priorityMapoDoubleBlock">
             <label class="checkbox-row" for="priorityMapoDoubleCheckbox">
               <input type="checkbox" id="priorityMapoDoubleCheckbox" />
-              <span class="info-tip" tabindex="0">
-                마포점 우선 2회 배정
-                <span class="info-tip-bubble" role="tooltip">체크하면 마포점 회원의 2번째 수업을 다른 지점 회원의 2번째 수업보다 먼저 배정합니다.</span>
-              </span>
+              마포점 우선 2회 배정
             </label>
+            <span class="info-tip" tabindex="0" aria-label="마포점 우선 2회 배정 설명">ⓘ
+              <span class="info-tip-bubble" role="tooltip">체크하면 마포점 회원의 2번째 수업을 다른 지점 회원의 2번째 수업보다 먼저 배정합니다.</span>
+            </span>
           </div>
 
           <div class="generate-row">
@@ -170,6 +170,12 @@
               <span class="btn-spinner" id="generateBtnSpinner" aria-hidden="true"></span>
               <span id="generateBtnLabel">후보 생성하기</span>
             </button>
+          </div>
+          <div class="generate-progress" id="generateProgressWrap" style="display:none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnLabel">
+            <div class="generate-progress-track">
+              <div class="generate-progress-fill" id="generateProgressFill"></div>
+            </div>
+            <span class="generate-progress-text" id="generateProgressText">0%</span>
           </div>
           <p class="generate-hint" id="generateHint"></p>
 
