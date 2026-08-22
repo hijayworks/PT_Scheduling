@@ -19,8 +19,13 @@
   // 검증된 색상은 8개뿐이라 회원이 9명을 넘으면 그대로 반복돼 서로 다른 회원이 똑같은 색을
   // 갖게 된다. 새 색상을 만들어내는 대신(색맹 검증이 안 됨), 같은 8색을 유지한 채 명도만
   // 단계적으로 어둡게 낮춰(글자는 항상 흰색이라 어둡게 할수록 대비는 오히려 좋아진다) 8명
-  // 단위로 순환한다 — 24명(8색 × 3단계)까지는 겹치지 않는다.
-  const MEMBER_COLOR_SHADE_STEPS = [0, 0.22, 0.4];
+  // 단위로 순환한다. 명도 차이는 색맹 유형(적록·청황 색약 등)과 무관하게 지각되므로 색맹
+  // 안전성은 그대로 유지된다. 단계를 3개(22%/40%, 24명 주기)로 뒀을 때는 두 가지 문제가
+  // 있었다 — ① 단계 간 차이가 작아 같은 색상(hue)의 인접 단계끼리 거의 같아 보였고,
+  // ② 24명을 넘으면 정확히 24명째마다 색상·단계가 완전히 똑같은 회원이 다시 나타났다(실제로
+  // 등록 순서가 24 차이 나는 두 회원이 완전히 같은 색으로 보이는 문제가 있었다). 그래서
+  // 단계를 5개로 늘리고 각 단계 간 간격도 넓혀(40명 주기) 두 문제를 함께 완화했다.
+  const MEMBER_COLOR_SHADE_STEPS = [0, 0.18, 0.33, 0.46, 0.58];
   function shadeColor(hex, darkenRatio) {
     if (!darkenRatio) return hex;
     const num = parseInt(hex.slice(1), 16);
@@ -2226,7 +2231,7 @@
     const doubleAssignMemberIds = (options.doubleAssignMemberIds && options.doubleAssignMemberIds.length)
       ? new Set(options.doubleAssignMemberIds) : null;
     const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY;
-    const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보C·D·E)
+    const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보C)
     // travelCountOnly: 인원(또는 세션 수) → 이동 횟수까지만 비교하고 멈추게 하는 옵션 —
     // 이동 시간, 이동시간+빈시간 합 같은 세부 기준(아래 addToIndex 참고)은 건너뛴다. 한때
     // 후보A·B가 이 옵션을 켜뒀지만, 그러면 인원·세션·이동 횟수까지 완전히 동점인 배치들
@@ -2236,6 +2241,16 @@
     // 켜지 않는다 — 모든 후보가 이동 횟수까지 동점이면 이동 시간, 그마저 동점이면 빈 시간
     // 합까지 비교해 가장 빈틈없는 배치를 고른다. 옵션 자체는 나중에 다시 필요할 수 있어 남겨둔다.
     const travelCountOnly = !!options.travelCountOnly;
+    // repairUnassigned 전용: 지정된 회원들의 "첫 세션"에만 필수 배정 회원과 같은 가중치를 준다
+    // (state.requiredMemberIds와 달리, 이미 1회를 받은 뒤에는 다시 보통 가중치로 돌아간다 —
+    // 그렇지 않으면 sessionCountFirst 전략에서 이미 배정 여부와 무관하게 매 요일 1단계마다
+    // 최우선으로 뽑혀 2회까지 억지로 채워지면서 다른 요일 배치를 필요 이상으로 크게 흔든다).
+    // 여러 명을 한꺼번에 지정할 수 있는 이유는 repairUnassigned 참고.
+    const forceOnceMemberIds = options.forceOnceMemberIds ? new Set(options.forceOnceMemberIds) : null;
+    // 재생성 탐색용: 1단계에서 요일을 처리하는 순서를 외부(searchStrategyPool/generateCandidatesAsync)에서
+    // 무작위로 섞어 넘겨줄 수 있다 — minimizeUnassigned의 "대안이 좁은 요일부터" 순서와 마찬가지로
+    // runWithGapPolicy가 기본 순서와 비교해 실제로 더 나을 때만 채택한다(아래 참고).
+    const externalDayOrder = options.stage1DayOrder || null;
 
     // 숨김 하드 로직(회원 개인 사정으로 인한 예외, 후보 조건에는 노출하지 않음): 상암점·여의도점·
     // 마포점 세 지점을 모두 다니는 회원은 "이동-회원-이동"(도착도 이동, 떠날 때도 이동 — 그
@@ -2620,6 +2635,10 @@
     // 인원(후보A의 최우선 기준)이 줄어드는 문제가 있어, 첫 세션에는 가중치를 주지 않는다.
     function fairnessWeight(memberId) {
       if (state.requiredMemberIds.includes(memberId)) return REQUIRED_MEMBER_WEIGHT;
+      if (forceOnceMemberIds && forceOnceMemberIds.has(memberId)) {
+        const usedDays = memberDays.get(memberId);
+        if (!usedDays || usedDays.size === 0) return REQUIRED_MEMBER_WEIGHT;
+      }
       if (doubleAssignMemberIds && doubleAssignMemberIds.has(memberId)) {
         const usedDays = memberDays.get(memberId);
         if (usedDays && usedDays.size >= 1) return REQUIRED_MEMBER_WEIGHT;
@@ -2729,25 +2748,39 @@
     }
 
     // 주어진 공강 허용 한도(allowGapMin)로 배정을 한 번 완결한다. 기본은 요일 순서
-    // 그대로 한 번 실행한다. minimizeUnassigned 옵션("후보A")이 켜지면, "신청 가능한
-    // 회원이 적은(대안이 좁은) 요일부터 먼저 채우면 미배정이 줄어들 것"이라는 가설로
-    // 1단계 처리 순서를 바꿔 한 번 더 실행해보고, 두 결과 중 실제로 배정된 회원 수가
-    // 더 많은 쪽을 택한다(동점이면 총 세션 수가 많은 쪽, 그래도 동점이면 기본 순서를 우선한다).
-    // 이 순서 바꾸기는 그 자체로 항상 더 나은 결과를 보장하는 게 아니라(체인이 서로 얽혀
-    // 있으면 오히려 다른 요일의 체인을 갈라놓아 더 나빠질 수도 있다), 그래서 두 결과를 직접
-    // 비교해 "적어도 기본 순서보다 나쁘지는 않은" 결과만 채택해야 "미배정 최소화"라는 이름에
-    // 맞는다.
+    // 그대로 한 번 실행한다. 그 외에 두 가지 경로로 "1단계 요일 처리 순서를 바꾸면 더
+    // 나아지는지"를 추가로 시도해볼 수 있다 — (1) minimizeUnassigned 옵션("후보A")이
+    // 켜지면 "신청 가능한 회원이 적은(대안이 좁은) 요일부터 먼저 채우면 미배정이 줄어들
+    // 것"이라는 고정된 가설을 항상 시도하고, (2) externalDayOrder가 주어지면(재생성 시도마다
+    // 무작위로 섞은 순서 — searchStrategyPool/generateCandidatesAsync 참고) 그 순서도 함께
+    // 시도한다. 요일을 순서대로 하나씩 확정해가는 구조상, 어떤 순서로 채우느냐에 따라 회원별
+    // 주간 배정 횟수 상한 때문에 뒤 요일에서만 갈 곳이 있는 회원이 밀려날 수 있어 — 이 두
+    // 경로 모두 "그 순서로 채웠을 때 실제로 배정 인원이 늘어나는지"를 겨냥한다. 시도한 결과들
+    // 중 배정된 회원 수가 더 많은 쪽을 택한다(동점이면 총 세션 수가 많은 쪽, 그래도 동점이면
+    // 먼저 나온 순서를 우선한다). 이 순서 바꾸기는 그 자체로 항상 더 나은 결과를 보장하는 게
+    // 아니라(체인이 서로 얽혀 있으면 오히려 다른 요일의 체인을 갈라놓아 더 나빠질 수도 있다),
+    // 그래서 직접 비교해 "적어도 기본 순서보다 나쁘지는 않은" 결과만 채택한다.
     function runWithGapPolicy(allowGapMin) {
       const naturalResult = runPass(days, allowGapMin);
-      if (!minimizeUnassigned) return naturalResult;
+      if (!minimizeUnassigned && !externalDayOrder) return naturalResult;
 
-      const sizeAscOrder = [...days].sort((a, b) => allMemberIdsForDay(a).size - allMemberIdsForDay(b).size);
-      const altResult = runPass(sizeAscOrder, allowGapMin);
-      const naturalMemberCount = new Set(naturalResult.map(r => r.memberId)).size;
-      const altMemberCount = new Set(altResult.map(r => r.memberId)).size;
-      if (altMemberCount > naturalMemberCount) return altResult;
-      if (altMemberCount === naturalMemberCount && altResult.length > naturalResult.length) return altResult;
-      return naturalResult;
+      let best = naturalResult;
+      let bestMemberCount = new Set(best.map(r => r.memberId)).size;
+      function consider(order) {
+        const attempt = runPass(order, allowGapMin);
+        const attemptMemberCount = new Set(attempt.map(r => r.memberId)).size;
+        if (attemptMemberCount > bestMemberCount
+          || (attemptMemberCount === bestMemberCount && attempt.length > best.length)) {
+          best = attempt; bestMemberCount = attemptMemberCount;
+        }
+      }
+      if (minimizeUnassigned) {
+        consider([...days].sort((a, b) => allMemberIdsForDay(a).size - allMemberIdsForDay(b).size));
+      }
+      if (externalDayOrder) {
+        consider(externalDayOrder.filter(d => byDay.has(d)));
+      }
+      return best;
     }
 
     // "이동시간·휴식시간을 제외한 빈 시간은 없도록" 엄격(allowGapMin=0)하게 한 번 배정해보고,
@@ -2853,8 +2886,8 @@
   // (그런 "지점별로 묶기"가 필요하면 groupByLocation 옵션으로 buildBestChain의 체인 선택
   // 단계에서만, 이미 완성된 동점 체인들 사이에서 고르게 한다 — 정렬 자체를 건드리지 않는다.)
   // 후보B는 sessionCountFirst 옵션으로, 인원(서로 다른 회원 수)이 아니라 총 수업 건수 자체를
-  // 먼저 최대화한다. 후보C·D·E는 maxTravelsPerWeek 옵션으로 일주일 총 이동 횟수 한도를 각각
-  // 5회·4회·3회로 제한한다. 후보G는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
+  // 먼저 최대화한다. 후보C는 maxTravelsPerWeek 옵션으로 일주일 총 이동 횟수 한도를
+  // 5회로 제한한다. 후보G는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
   // 이전 시작) 우선"을 추가한다. 후보A는 minimizeUnassigned 옵션으로, 기본 순서와 "대안이
   // 좁은 요일부터 먼저 채우는" 순서를 둘 다 시도해보고 실제로 미배정 회원이 더 적은 쪽을 택한다.
   function defaultSort(eligible, jitter) {
@@ -2884,13 +2917,12 @@
   // 이동 횟수 순으로 비교하되, 신청 가능한 회원이 적은 요일부터 먼저 채우는 대안 순서도 함께
   // 시도해보고 미배정이 더 적은 쪽을 택한다) → B(A와 같은 세 값을 비교하되 인원 대신 총 수업
   // 건수를 먼저 최대화 → 인원 → 이동 횟수) → C(A와 기준은 같고 일주일 총 이동 횟수를 5회로
-  // 제한) → D(A와 기준은 같고 일주일 총 이동 횟수를 4회로 제한) → E(A와 기준은 같고 일주일
-  // 총 이동 횟수를 3회로 제한) → G(A의 동점 기준에 낮 시간대 우선을 한 단계 더 추가한 대안) →
+  // 제한) → G(A의 동점 기준에 낮 시간대 우선을 한 단계 더 추가한 대안) →
   // I/J(특정 요일에 특정 지점을 최대한 먼저 배정하는 대안).
   const STRATEGIES = [
     {
-      title: "후보A - 인원·수업 최대화",
-      desc: "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.",
+      title: "후보A - 인원 최대화",
+      desc: "인원 최대 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.",
       // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
       // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
       // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
@@ -2910,18 +2942,6 @@
       title: "후보C - 일주일 총 이동 횟수 5회",
       desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 5회까지로 제한합니다.",
       options: { strengthenSearch: "count", maxTravelsPerWeek: 5 },
-      sort: defaultSort
-    },
-    {
-      title: "후보D - 일주일 총 이동 횟수 4회",
-      desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 4회까지로 제한합니다.",
-      options: { strengthenSearch: "count", maxTravelsPerWeek: 4 },
-      sort: defaultSort
-    },
-    {
-      title: "후보E - 일주일 총 이동 횟수 3회",
-      desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 3회까지로 제한합니다.",
-      options: { strengthenSearch: "count", maxTravelsPerWeek: 3 },
       sort: defaultSort
     },
     {
@@ -2999,21 +3019,72 @@
     return best;
   }
 
-  function buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned) {
+  // 요일을 넘나드는 맞바꾸기 보완: greedyAssign은 요일을 정해진 순서로 하나씩 확정해가므로,
+  // "이 회원의 유일한 가능 시간이 이미 꽉 찬 다른 요일 체인과 이동 한도 때문에 부딪힌다 —
+  // 자리를 만들려면 같은 요일이 아니라 다른 요일의 누군가를 옮겨야 한다"는 조합은 그 요일
+  // 하나만 다시 짜서는(strengthenCandidate의 day×지점 사전 배정으로도) 찾을 수 없다. 아직
+  // 미배정인 회원이 있으면, 그 회원(들)에게 딱 1회만(greedyAssign의 forceOnceMemberIds 옵션 —
+  // 이미 1회를 받은 뒤에는 보통 가중치로 돌아간다) 필수 배정 회원과 같은 최우선 가중치를 줘서
+  // 처음부터 다시 배정해본다 — 그러면 그 회원이 껴야 하는 요일의 체인이 통째로 다시 짜이면서,
+  // DP가 그 요일 안에서 그 회원을 포함한 최선의 조합(다른 요일 배치는 그대로 둔 채)을 스스로
+  // 찾는다. 그 결과가 기존보다 못하지 않으면(=다른 회원을 더 잃는 트레이드가 아니면) 교체하고,
+  // 못하면 버린다 — 그래서 이 보완은 "적어도 기존보다 나쁘지 않을 때만" 적용된다.
+  // 먼저 미배정 회원 전원을 한꺼번에 강제해본다 — 두 회원의 자리가 서로 다른 요일에서 맞물려야
+  // 하는 조합(한 명은 월요일 체인을, 다른 한 명은 금요일 체인을 흔들어야 함)은 한 명씩
+  // 순서대로 시도하면 먼저 고정된 선택이 다음 사람의 최선을 막을 수 있어, 동시에 시도하는
+  // 편이 더 잘 맞물린 조합을 찾을 때가 많다. 그래도 남는 미배정 회원은 한 명씩 시도한다.
+  // 최대 6명까지만 시도해 미배정이 많은 경우에도 시간이 무한정 늘어나지 않게 한다.
+  function repairUnassigned(baseline, sorted, eligibleIds, allMemberIds, options, pinned, primary) {
+    let best = baseline;
+    let bestScore = candidateSearchScore(best, primary);
+    function tryForce(ids) {
+      const forcedOptions = Object.assign({}, options, { forceOnceMemberIds: ids });
+      const attempt = buildCandidate(baseline.title, baseline.desc, sorted, eligibleIds, allMemberIds, forcedOptions, pinned);
+      const attemptScore = candidateSearchScore(attempt, primary);
+      if (!isCandidateWorse(attemptScore, bestScore)) {
+        best = attempt;
+        bestScore = attemptScore;
+        return true;
+      }
+      return false;
+    }
+    if (baseline.unassignedMembers.length > 0 && baseline.unassignedMembers.length <= 6) {
+      tryForce(baseline.unassignedMembers.map(m => m.id));
+    }
+    const tried = new Set();
+    let guard = 0;
+    while (guard < 6) {
+      guard++;
+      const target = best.unassignedMembers.find(m => !tried.has(m.id));
+      if (!target) break;
+      tried.add(target.id);
+      tryForce([target.id]);
+    }
+    return best;
+  }
+
+  function buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned, dayOrder) {
     const strategy = STRATEGIES[strategyIndex];
     const sorted = strategy.sort(eligible, jitter);
     const strategyOptions = typeof strategy.options === "function" ? strategy.options() : strategy.options;
     // "마포점 우선 2회 배정" 체크박스·"2회 배정 회원" 목록: 모든 후보 전략에 공통으로 적용되는
-    // 전역 옵션이므로, 전략별 options 위에 덧씌운다.
+    // 전역 옵션이므로, 전략별 options 위에 덧씌운다. dayOrder가 주어지면(재생성 탐색이 매
+    // 시도마다 무작위로 섞은 요일 순서 — searchStrategyPool·generateCandidatesAsync 참고)
+    // greedyAssign의 stage1DayOrder로 넘겨, 이번 시도에서 그 순서가 기본 순서보다 배정 인원을
+    // 늘리는지도 함께 비교하게 한다.
     const globalOptions = {};
     if (state.priorityMapoDouble) globalOptions.priorityDoubleLocationId = locationIdByName("마포점");
     if (state.doubleAssignMemberIds.length > 0) globalOptions.doubleAssignMemberIds = state.doubleAssignMemberIds;
+    if (dayOrder) globalOptions.stage1DayOrder = dayOrder;
     const options = Object.assign({}, strategyOptions, globalOptions);
     let cand = buildCandidate(strategy.title, strategy.desc, sorted, eligibleIds, allMemberIds, options, pinned);
     // strengthenSearch는 전략의 "이름"(배열 위치가 아니라)에 매인 명시적 플래그다 — 배열 순서가
     // 또 바뀌어도 엉뚱한 후보에 이 사전 탐색이 붙거나 빠지지 않도록.
     if (strategyOptions.strengthenSearch) {
       cand = strengthenCandidate(cand, sorted, eligibleIds, allMemberIds, options, pinned, strategyOptions.strengthenSearch);
+      if (cand.unassignedMembers.length > 0) {
+        cand = repairUnassigned(cand, sorted, eligibleIds, allMemberIds, options, pinned, strategyOptions.strengthenSearch);
+      }
     }
     cand.strategyIndex = strategyIndex;
     return cand;
@@ -3059,42 +3130,60 @@
     };
   }
 
+  // 1단계 요일 처리 순서도 tie-break jitter와 같은 자리에서 탐색 대상으로 삼는다: 요일을 정해진
+  // 순서로 하나씩 확정해가는 구조상, 앞선 요일에서 그럴듯한 조합을 먼저 확정해버리면 회원별
+  // 주간 배정 횟수 상한 때문에 뒤 요일에서만 갈 곳이 있는 회원의 자리를 못 만드는 경우가 있다
+  // (기본 순서·minimizeUnassigned의 "대안이 좁은 요일부터" 순서만으로는 못 찾는 조합). randomFn으로
+  // 매 시도마다 요일 순서를 섞어 greedyAssign의 stage1DayOrder로 넘기면, runWithGapPolicy가 그
+  // 순서도 기본 순서와 비교해 실제로 나을 때만 채택한다 — jitter와 마찬가지로 같은 시드면 항상
+  // 같은 순서열이 나와 재현 가능하다.
+  function shuffledDayOrder(randomFn) {
+    const order = DAYS.map((_, i) => i);
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(randomFn() * (i + 1));
+      const tmp = order[i]; order[i] = order[j]; order[j] = tmp;
+    }
+    return order;
+  }
+
   // 무거운 동기 계산 중간에 브라우저가 화면을 다시 그릴 틈을 준다(로딩 스피너·진행률 갱신용).
   function yieldToUI() {
     return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
   }
   const PROGRESS_YIELD_EVERY = 5; // 이만큼 조합을 만들 때마다 한 번씩 진행률을 갱신하고 화면을 그린다
 
-  // 전략 하나를 zeroJitter 포함 (attempts + 1)가지 조합으로 시도해 그중 candidateSearchScore
-  // 기준 최선을 돌려준다. randomFn으로 재현 가능한 시드 난수(makeSeededRandom)를 넘기면 항상
+  // 전략 하나를 zeroJitter 포함 (attempts + 1)가지 조합으로 시도해 그 전체 목록(풀)을 그대로
+  // 돌려준다 — 예전에는 여기서 최선 하나만 골라 나머지를 버렸는데(searchBestCandidateForStrategy),
+  // 그러면 "다음 후보"가 이 계산을 다 해놓고도 아직 못 본 조합을 찾을 때는 별도로 딱
+  // REGEN_MAX_ATTEMPTS(10)번만 새로 시도해야 했다 — 이미 만들어둔 (attempts+1)개 중에는
+  // "아직 못 봤고 지금 화면보다 못하지 않은" 조합이 있어도 그냥 버려졌으므로, 재생성이 실제보다
+  // 훨씬 쉽게 "더 나은 후보지를 찾지 못했습니다"로 포기해버리는 문제가 있었다. 풀 전체를
+  // 돌려주면 regenerateCandidate가 이 목록 안에서 직접 찾아, 추가 계산 없이 훨씬 많은 후보
+  // 중에서 고를 수 있다. randomFn으로 재현 가능한 시드 난수(makeSeededRandom)를 넘기면 항상
   // 같은 결과가, Math.random을 넘기면 매번 다를 수 있는 결과가 나온다. onProgress(0~1)를 넘기면
-  // 중간중간 진행률을 알려주면서 화면을 그릴 틈도 준다("다음 후보"처럼 전략 하나만 계산할 때도
-  // 이만큼(최대 101회) 시도하느라 몇 초씩 걸릴 수 있어서 필요하다).
-  async function searchBestCandidateForStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, pinned, attempts, randomFn, onProgress) {
-    const primary = strategyPrimary(strategyIndex);
+  // 중간중간 진행률을 알려주면서 화면을 그릴 틈도 준다.
+  async function searchStrategyPool(strategyIndex, eligible, eligibleIds, allMemberIds, pinned, attempts, randomFn, onProgress) {
     const zeroJitter = new Map(eligible.map(r => [r.id, 0]));
-    let best = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, zeroJitter, pinned);
-    let bestScore = candidateSearchScore(best, primary);
+    const pool = [buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, zeroJitter, pinned)];
     for (let i = 0; i < attempts; i++) {
       const jitter = new Map(eligible.map(r => [r.id, randomFn()]));
-      const attempt = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned);
-      const score = candidateSearchScore(attempt, primary);
-      if (isCandidateWorse(bestScore, score)) { best = attempt; bestScore = score; }
+      const dayOrder = shuffledDayOrder(randomFn);
+      pool.push(buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned, dayOrder));
       if (onProgress && (i + 1) % PROGRESS_YIELD_EVERY === 0) {
         onProgress((i + 1) / (attempts + 1));
         await yieldToUI();
       }
     }
     if (onProgress) onProgress(1);
-    return best;
+    return pool;
   }
-  const INITIAL_SEARCH_ATTEMPTS = 100; // "후보 생성하기" 시 전략당 추가로 시도해볼 조합 수
+  const INITIAL_SEARCH_ATTEMPTS = 50; // "후보 생성하기" 시 전략당 추가로 시도해볼 조합 수(tie-break jitter + 요일 순서를 함께 탐색하므로 기존보다 늘려둔다)
+  const REGENERATE_SEARCH_ATTEMPTS = 25; // "다음 후보" 시 전략당 추가로 시도해볼 조합 수(초기 생성과 다른 값을 쓸 수 있도록 별도로 둔다. 요일 순서 탐색이 추가돼 기존보다 늘려둔다)
 
   // strategyIndex별로 "이미 보여준 배정 결과"를 기록해, 재생성 시 똑같은 조합이 다시 나오는지
   // 판별한다. 배정 결과(assigned)를 이루는 신청 id 집합을 그대로 서명으로 쓴다 — 같은
   // 신청 조합이면 같은 서명이 나온다. (페이지를 새로고침하면 초기화되는 세션 한정 기록.)
   const candidateHistory = {}; // strategyIndex -> Set(signature)
-  const REGEN_MAX_ATTEMPTS = 10; // 이만큼 시도해도 못 보던 조합이 안 나오면 "새 후보 없음"으로 본다.
   // strategyIndex별로, 재생성으로 덮어쓰기 전의 이전 후보를 순서대로 쌓아둔다 — "이전 후보
   // 다시보기" 버튼으로 되돌아갈 수 있게(여러 번 재생성했으면 여러 단계 되돌아갈 수 있다).
   // candidateHistory와 마찬가지로 새로고침하면 초기화되는 세션 한정 기록.
@@ -3125,7 +3214,7 @@
     // 그래서 전략마다 만든 시도들(zeroJitter + 시드 난수 여러 개)을 하나의 공통 풀에 모아두고,
     // 각 전략은 자기 것이든 남의 것이든 상관없이 이 풀 전체에서 "자기 기준"(primary)으로 최선을
     // 고른다. 이러면 어떤 전략의 탐색이 우연히 찾아낸 좋은 조합을, 그 조합이 실제로 더 잘
-    // 맞는 다른 전략이 가져가 보여줄 수 있다. 후보C·D·E처럼 일주일 총 이동 횟수 상한이 있는
+    // 맞는 다른 전략이 가져가 보여줄 수 있다. 후보C처럼 일주일 총 이동 횟수 상한이 있는
     // 전략은 그 상한을 지키는 시도만 고를 수 있다(상한 없는 전략의 결과를 그대로 가져오면
     // 그 전략의 조건을 어길 수 있으므로). 시드가 고정돼 있어 같은 데이터라면 "후보 생성하기"를
     // 몇 번 눌러도 항상 같은 결과가 나온다(재현 가능).
@@ -3139,7 +3228,8 @@
       completed++;
       for (let i = 0; i < INITIAL_SEARCH_ATTEMPTS; i++) {
         const jitter = new Map(eligible.map(r => [r.id, rand()]));
-        pool.push(buildCandidateFromStrategy(idx, eligible, eligibleIds, allMemberIds, jitter, []));
+        const dayOrder = shuffledDayOrder(rand);
+        pool.push(buildCandidateFromStrategy(idx, eligible, eligibleIds, allMemberIds, jitter, [], dayOrder));
         completed++;
         if (completed % PROGRESS_YIELD_EVERY === 0) {
           onProgress(completed / totalBuilds);
@@ -3170,7 +3260,7 @@
 
   // 후보 카드 하나만 같은 전략 안에서 다시 계산한다 (동점인 신청들의 순서를 랜덤으로 바꿔 다른 배정을 시도).
   // 확정된 세션이 있으면 그대로 고정하고, 나머지 신청들 안에서만 다시 배정한다.
-  // 이미 봤던 조합만 계속 나오면(REGEN_MAX_ATTEMPTS번 시도해도 새 조합이 없으면), 처음 후보로
+  // 이번 풀(REGENERATE_SEARCH_ATTEMPTS+1개) 안에 이미 봤던 조합밖에 없으면, 처음 후보로
   // 되돌릴지 사용자에게 물어본다.
   // "다음 후보 보기" 버튼을 켤지 판단한다: 확정(고정)된 세션을 뺀 나머지 신청이 하나도
   // 없으면 다시 계산해봐야 항상 같은(빈) 결과라 "다음 후보"라 부를 게 없다.
@@ -3213,31 +3303,40 @@
     // 비교는 이 전략 자신의 primary로 해야 한다 — 그래야 후보B가 "다음 후보"를 눌러도
     // 인원 기준으로 강제되지 않고, 자기가 내세우는 수업 건수 우선 트레이드오프를 유지한다.
     const myPrimary = strategyPrimary(strategyIndex);
-    const baseline = await searchBestCandidateForStrategy(
-      strategyIndex, eligible, eligibleIds, allMemberIds, pinned, INITIAL_SEARCH_ATTEMPTS, Math.random, onProgress);
+    const pool = await searchStrategyPool(
+      strategyIndex, eligible, eligibleIds, allMemberIds, pinned, REGENERATE_SEARCH_ATTEMPTS, Math.random, onProgress);
+    let baseline = pool[0];
+    let baselineScore = candidateSearchScore(baseline, myPrimary);
+    pool.forEach(cand => {
+      const score = candidateSearchScore(cand, myPrimary);
+      if (isCandidateWorse(baselineScore, score)) { baseline = cand; baselineScore = score; }
+    });
     // floorCand: baseline과 prevCand 중 더 나은 쪽. "새로운 조합을 못 찾았을 때"도 이 값으로
     // 돌아가야지, baseline으로 그냥 되돌리면 prevCand보다 못한 결과가 화면에 나타날 수 있다
     // (아래 !newCand 분기 참고) — "다음 후보"를 반복 클릭했을 때 수업 건수가 오르내리며
     // 들쭉날쭉해 보이는 문제가 바로 이 지점에서 나고 있었다.
-    const floorCand = (prevCand && isCandidateWorse(candidateSearchScore(baseline, myPrimary), candidateSearchScore(prevCand, myPrimary)))
+    const floorCand = (prevCand && isCandidateWorse(baselineScore, candidateSearchScore(prevCand, myPrimary)))
       ? prevCand : baseline;
     const floorScore = candidateSearchScore(floorCand, myPrimary);
 
+    // 방금 만든 풀(pool) 안에서, 아직 못 본 조합 중 최소 허용선(floor) 이상인 것 중 가장 좋은
+    // 것을 고른다 — 별도로 다시 시도하지 않고 이미 계산해둔 (attempts+1)개를 그대로 훑으므로,
+    // 추가 계산 없이 예전(REGEN_MAX_ATTEMPTS=10개만 별도 시도)보다 훨씬 많은 후보 중에서 고를
+    // 수 있다.
     let newCand = null;
-    for (let i = 0; i < REGEN_MAX_ATTEMPTS; i++) {
-      const jitter = new Map(eligible.map(r => [r.id, Math.random()]));
-      const attempt = buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned);
-      if (isCandidateWorse(candidateSearchScore(attempt, myPrimary), floorScore)) continue; // 최소 허용선보다 못하면 버린다
-      const sig = candidateSignature(attempt);
-      if (!seen.has(sig)) {
-        newCand = attempt;
-        seen.add(sig);
-        break;
-      }
-    }
+    let newScore = null;
+    pool.forEach(cand => {
+      const score = candidateSearchScore(cand, myPrimary);
+      if (isCandidateWorse(score, floorScore)) return; // 최소 허용선보다 못하면 버린다
+      const sig = candidateSignature(cand);
+      if (seen.has(sig)) return;
+      if (!newCand || isCandidateWorse(newScore, score)) { newCand = cand; newScore = score; }
+    });
+    if (newCand) seen.add(candidateSignature(newCand));
 
     if (!newCand) {
-      if (!confirm("더 나은 새로운 후보지를 찾지 못했습니다. 지금까지 본 조합 기록을 지우고 다시 찾아보시겠습니까?")) return;
+      // 더 나은 조합을 못 찾았을 때도 사용자에게 묻지 않고, 지금까지 본 조합 기록을 지우고
+      // 자동으로 다시 찾는다(다음 클릭 때 새 조합을 탐색할 수 있도록).
       newCand = floorCand; // baseline이 아니라 floorCand — 지금 보다 못한 결과로 되돌리지 않는다.
       candidateHistory[strategyIndex] = new Set([candidateSignature(newCand)]);
       newCand.confirmedIds = [...confirmedIds];
