@@ -7,9 +7,9 @@
   const END_MIN = 24 * 60;    // 24:00 (오전 12시)
   const SLOT_MIN = 10;
   const SLOT_COUNT = (END_MIN - START_MIN) / SLOT_MIN;
-  const SESSION_DURATION_MIN = 50; // 수업(등록 회원) 시간
+  const SESSION_DURATION_MIN = 60; // 수업(등록 회원) 시간
   const CONSULT_DURATION_MIN = 30; // 상담 회원은 확보 시간이 더 짧음
-  const BREAK_MIN = 10; // 수업 사이 최소 쉬는 시간 (배정 시 requiredGapMin에서 항상 강제)
+  const BREAK_MIN = 0; // 수업 사이 쉬는 시간 없음(지점이 바뀔 때만 이동 시간만큼 간격을 둔다)
   const ALLOWED_GAP_MIN = 10; // 이동시간·휴식시간을 제외하고 추가로 허용되는 공강(설명 안 되는 빈 시간)
   const BLOCK_COLOR = "#4f46e5"; // 회원 미지정 등 예외 상황의 기본 블록 배경색
   // 회원별 블록 배경색(등록 순서대로 순환, 고정 순서 — 절대 임의로 섞지 않음). 색맹 시뮬레이션
@@ -40,6 +40,12 @@
   const MAX_SESSIONS_PER_MEMBER = 2;
   const MAX_TRAVELS_PER_DAY = 2; // 하루 지점 간 이동은 최소화하되, 하더라도 최대 2회까지
   const REQUIRED_MEMBER_WEIGHT = 1e6; // "필수 배정 회원"이 1단계 배정에서 다른 회원들보다 항상 우선하도록 주는 가중치
+
+  // "수업 스케줄 생성2" 전용 후보 생성 규칙: 등록 회원 60분·상담 회원 30분, 쉬는 시간 없음(이동이
+  // 필요할 때만 그 이동 시간만큼 간격을 둔다). "수업 스케줄 생성1"도 이제 동일한 규칙(등록 60분·
+  // 상담 30분, 쉬는 시간 없음)이지만, 상수는 여전히 별개로 관리해 한쪽을 바꿔도 다른 쪽에 영향이 없도록 한다.
+  const SESSION_DURATION_MIN_2 = 60;
+  const CONSULT_DURATION_MIN_2 = 30;
 
   const STORAGE_KEY = "pt_schedule_state_v3";
   const OLD_STORAGE_KEY = "pt_schedule_state_v2"; // pre-migration key: 30분 슬롯 기준
@@ -73,14 +79,19 @@
     excludedMemberIds: [],  // "미배정 회원": 후보 생성에서 아예 제외할 회원 id 목록
     requiredMemberIds: [],  // "필수 배정 회원": 가능하면 무조건 1회 이상 배정되어야 하는 회원 id 목록
     doubleAssignMemberIds: [],  // "2회 배정 회원": 1회 배정된 뒤 2번째 수업을 다른 회원보다 먼저 배정할 회원 id 목록
-    priorityMapoDouble: false  // "마포점 우선 2회 배정": 마포점 회원의 2번째 수업을 다른 지점보다 먼저 배정
+    priorityMapoDouble: false,  // "마포점 우선 2회 배정": 마포점 회원의 2번째 수업을 다른 지점보다 먼저 배정
+    // "수업 스케줄 생성2" 전용 설정 (새 후보 생성 알고리즘용, 기존 스케줄 생성과는 별개로 관리)
+    onceLimitedMemberIds2: [],  // 스케줄 생성2에서 최대 1회만 배정되어야 하는 회원 id 목록
+    excludedMemberIds2: []  // 스케줄 생성2에서 후보 생성 시 아예 제외할 회원 id 목록
   };
   let availableCells = new Set();
   let candidates = [];          // computed candidates
+  let schedule2Result = null;   // "수업 스케줄 생성2"의 계산 결과 (후보 1개, { assigned, unassignedMembers })
   // 회원 스케줄 추가(신청 시간 추가/삭제) 등 신청 데이터가 바뀌면 true로 표시해둔다.
   // "수업 스케줄 생성" 메뉴로 들어올 때 이 값이 true면, 최신 신청과 맞지 않는 옛 후보를 자동으로 비운다.
   let requestsChangedSinceGenerate = false;
-  const PAGE_IDS = ["settings", "schedule", "members", "memberSchedule"];
+  let requestsChangedSinceGenerate2 = false; // 위와 동일하지만 "수업 스케줄 생성2" 전용
+  const PAGE_IDS = ["settings", "schedule", "schedule2", "members", "memberSchedule"];
   // Pages from before the sidebar redesign ("requests"/"candidates"/"confirm") all live under "schedule" now.
   const OLD_PAGE_TO_NEW = { settings: "settings", requests: "schedule", candidates: "schedule", confirm: "schedule" };
   let currentPage = "settings";
@@ -129,6 +140,7 @@
   function saveState() {
     state.availableCells = Array.from(availableCells);
     state.candidates = candidates;
+    state.schedule2Result = schedule2Result;
     state.currentPage = currentPage;
     state.startMinBase = START_MIN; // 슬롯 인덱스가 어느 시작 시각을 기준으로 저장됐는지 기록 (마이그레이션용)
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -213,8 +225,11 @@
         state.requiredMemberIds = parsed.requiredMemberIds || [];
         state.doubleAssignMemberIds = parsed.doubleAssignMemberIds || [];
         state.priorityMapoDouble = !!parsed.priorityMapoDouble;
+        state.onceLimitedMemberIds2 = parsed.onceLimitedMemberIds2 || [];
+        state.excludedMemberIds2 = parsed.excludedMemberIds2 || [];
         availableCells = new Set(parsed.availableCells || []);
         candidates = parsed.candidates || [];
+        schedule2Result = parsed.schedule2Result || null;
         if (PAGE_IDS.indexOf(parsed.currentPage) !== -1) {
           currentPage = parsed.currentPage;
         } else if (OLD_PAGE_TO_NEW[parsed.currentPage]) {
@@ -263,15 +278,6 @@
     // Requests no longer pin a single branch of their own — a member's desired time is now
     // eligible at any of their registered branches, decided per-candidate at generation time.
     state.requests.forEach(r => { delete r.locationId; });
-    // 옛 버전에서는 그리드 클릭 1회가 수업(50분)+쉬는시간(10분)을 합친 60분을 예약했다.
-    // 이제 쉬는 시간은 배정 시점에 항상 강제되므로, 신청 자체는 실제 수업 길이(50분)만
-    // 차지하도록 옮겨서 촘촘한 후보가 나오게 한다.
-    let hadOldClickDuration = false;
-    state.requests.forEach(r => {
-      if (r.duration === 60) { r.duration = SESSION_DURATION_MIN; hadOldClickDuration = true; }
-    });
-    // 신청 길이가 바뀌었으니, 옛 길이 기준으로 계산된 기존 후보는 다시 생성하도록 비운다.
-    if (hadOldClickDuration) candidates = [];
     // 회원 구분(상담/등록)이 바뀐 뒤에도 그 회원의 기존 신청들이 옛 구분 기준 길이(예: 상담 30분)를
     // 그대로 갖고 있는 경우를 바로잡는다 — 신청의 길이는 항상 회원의 현재 구분과 일치해야 한다.
     let hadDurationMismatch = false;
@@ -282,10 +288,17 @@
       if (r.duration !== correctDuration) { r.duration = correctDuration; hadDurationMismatch = true; }
     });
     if (hadDurationMismatch) candidates = [];
+    // 전략(STRATEGIES) 목록이 줄어들어, 더 이상 존재하지 않는 strategyIndex를 가리키는 옛
+    // 후보가 남아있으면 "다음 후보" 클릭 시 STRATEGIES[strategyIndex]가 undefined라 에러가
+    // 나므로, 그런 후보가 하나라도 있으면 전체를 비워 다시 생성하게 한다.
+    if (candidates.some(c => !STRATEGIES[c.strategyIndex])) candidates = [];
     // 삭제된 회원이나 상담 회원(이미 항상 1회로 제한됨)을 가리키는 1회 제한 설정은 정리한다.
     state.onceLimitedMemberIds = state.onceLimitedMemberIds.filter(id => isOnceLimitEligible(memberById(id)));
     // 삭제된 회원을 가리키는 "미배정 회원" 설정은 정리한다.
     state.excludedMemberIds = state.excludedMemberIds.filter(id => !!memberById(id));
+    // 스케줄 생성2 전용 설정도 동일하게 정리한다.
+    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.filter(id => isOnceLimitEligible(memberById(id)));
+    state.excludedMemberIds2 = state.excludedMemberIds2.filter(id => !!memberById(id));
     // 일요일 기능이 제거되어(DAYS에서 빠짐), 옛 요일 인덱스 6(일요일)을 가리키던 데이터가 남아있다면 정리한다.
     const hadSunday = state.requests.some(r => r.day >= DAYS.length)
       || Array.from(availableCells).some(k => parseInt(k.split("-")[0], 10) >= DAYS.length);
@@ -299,7 +312,7 @@
 
   function memberById(id) { return state.members.find(m => m.id === id); }
 
-  // 상담 회원은 확보 시간이 짧다(30분) — 그 외(등록 회원)는 기본 수업 시간(50분).
+  // 상담 회원은 확보 시간이 짧다(30분) — 그 외(등록 회원)는 기본 수업 시간(60분).
   // 구분이 비어있으면 상담으로 취급한다(다른 곳의 기본값과 동일).
   function sessionDurationFor(member) {
     return (member && (member.category || "상담")) === "상담" ? CONSULT_DURATION_MIN : SESSION_DURATION_MIN;
@@ -470,9 +483,71 @@
         block.style.cursor = "pointer";
         block.addEventListener("click", () => b.onClick());
       }
+      if (!b.excluded && b.contextMenuItems) {
+        block.style.cursor = "pointer";
+        block.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openContextMenu(e.clientX, e.clientY, b.contextMenuItems(e.clientX, e.clientY));
+        });
+      }
       container.appendChild(block);
     });
   }
+
+  /* ---------------- Generic block click menu (그리드 블록 클릭 메뉴) ---------------- */
+  let activeContextMenuEl = null;
+
+  function closeContextMenu() {
+    if (activeContextMenuEl) {
+      activeContextMenuEl.remove();
+      activeContextMenuEl = null;
+    }
+  }
+
+  // items: [{ label, onClick, disabled, danger }] 또는 { separator: true }
+  function openContextMenu(x, y, items) {
+    closeContextMenu();
+    const menu = document.createElement("div");
+    menu.className = "block-context-menu";
+    items.forEach(it => {
+      if (it.separator) {
+        const sep = document.createElement("div");
+        sep.className = "block-context-menu-sep";
+        menu.appendChild(sep);
+        return;
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "block-context-menu-item" + (it.danger ? " danger" : "");
+      btn.textContent = it.label;
+      btn.disabled = !!it.disabled;
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeContextMenu();
+        if (it.onClick) it.onClick();
+      });
+      menu.appendChild(btn);
+    });
+    document.body.appendChild(menu);
+    const rect = menu.getBoundingClientRect();
+    const left = Math.min(x, Math.max(0, window.innerWidth - rect.width - 8));
+    const top = Math.min(y, Math.max(0, window.innerHeight - rect.height - 8));
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+    activeContextMenuEl = menu;
+  }
+
+  document.addEventListener("click", (e) => {
+    if (activeContextMenuEl && !activeContextMenuEl.contains(e.target)) closeContextMenu();
+  });
+  document.addEventListener("contextmenu", (e) => {
+    if (activeContextMenuEl && !activeContextMenuEl.contains(e.target)) closeContextMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeContextMenu();
+  });
+  window.addEventListener("scroll", closeContextMenu, true);
+  window.addEventListener("resize", closeContextMenu);
 
   /* ---------------- Settings page: locations & travel time ---------------- */
   const locationForm = document.getElementById("locationForm");
@@ -489,12 +564,18 @@
   let editingLocationId = null;
 
   // 기본 설정(근무 가능 시간·지점·이동 시간)이 바뀌면 이미 생성된 수업 스케줄 후보는 더 이상
-  // 유효하지 않을 수 있으므로 자동으로 비운다.
+  // 유효하지 않을 수 있으므로 자동으로 비운다. 스케줄 생성2 결과도 같은 입력값에 의존하므로
+  // 함께 비운다.
   function invalidateCandidates() {
-    if (candidates.length === 0) return;
+    if (candidates.length === 0 && !schedule2Result) return;
     candidates = [];
     generateHintEl.textContent = "";
     renderCandidates();
+    if (schedule2Result) {
+      schedule2Result = null;
+      renderSchedule2Result();
+      generateHint2El.textContent = "기본 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
+    }
     saveState();
     showToast("기본 설정이 변경되어 생성된 수업 스케줄 후보가 초기화되었습니다", "info");
   }
@@ -518,6 +599,12 @@
     });
     Object.keys(state.travelTimes).forEach(k => {
       if (k.indexOf(loc.id) !== -1) delete state.travelTimes[k];
+    });
+    // "지점 추가하기"로 개별 신청에 얹어둔 추가 지점도 함께 정리한다.
+    state.requests.forEach(r => {
+      if (Array.isArray(r.extraLocationIds) && r.extraLocationIds.includes(loc.id)) {
+        r.extraLocationIds = r.extraLocationIds.filter(id => id !== loc.id);
+      }
     });
     saveState();
     renderLocationList();
@@ -897,7 +984,7 @@
   }, { passive: false });
 
   // "한 번에 추가" 컨트롤: 요일마다 독립된 시작~종료 시간대 선택창을 두고(기본값 "선택안함"),
-  // 시간대를 지정한 요일들만 모아 그 범위 안에서 가능한 모든 50분 후보 시작 시각(10분 간격)을
+  // 시간대를 지정한 요일들만 모아 그 범위 안에서 가능한 모든 60분 후보 시작 시각(10분 간격)을
   // 한 번에 희망 시간으로 등록한다.
   const rangeDayRows = DAYS.map((d, di) => {
     const row = document.createElement("div");
@@ -958,11 +1045,12 @@
     }
     const added = configuredRows.reduce((sum, r) => sum + addDesiredRange(activeMember, r.day, r.start, r.end), 0);
     if (added === 0) {
-      alert("추가할 새 시간대가 없습니다. 이미 등록되었거나, 그 범위엔 50분 수업이 들어갈 자리가 없습니다.");
+      alert("추가할 새 시간대가 없습니다. 이미 등록되었거나, 그 범위엔 수업이 들어갈 자리가 없습니다.");
       return;
     }
     configuredRows.forEach(r => { r.startSel.value = ""; r.endSel.value = ""; });
     requestsChangedSinceGenerate = true;
+    requestsChangedSinceGenerate2 = true;
     saveState();
     renderRequestList();
     showToast("일정이 추가 되었습니다.", "success");
@@ -973,6 +1061,7 @@
     if (!confirm("스케줄이 등록된 회원의 가능 시간을 모두 지우고 초기화할까요?")) return;
     state.requests = [];
     requestsChangedSinceGenerate = true;
+    requestsChangedSinceGenerate2 = true;
     saveState();
     renderRequestList();
     showToast("전체 스케줄이 초기화되었습니다", "info");
@@ -1129,7 +1218,16 @@
     const tokens = line.trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) return null;
     const name = tokens[0];
-    const result = { raw: line.trim(), name, days: [], warnings: [], errors: [] };
+    const result = { raw: line.trim(), name, days: [], warnings: [], errors: [], clearAll: false };
+
+    // "이름 x"(대소문자 무관)만 단독으로 오면, 그 회원의 기존 희망 시간을 전부 지우라는
+    // 명시적 지시로 본다(등록 안 한 것처럼 초기화). 다른 요일·시간 표기와 섞여 있으면
+    // 평소처럼 해석한다.
+    if (tokens.length === 2 && /^x$/i.test(tokens[1])) {
+      result.clearAll = true;
+      return result;
+    }
+
     let currentDays = null;
 
     function applyTimeToken(tok) {
@@ -1323,6 +1421,11 @@
           chip.innerHTML = "<b>" + DAYS[dayEntry.day] + "</b> " + describeDaySpecs(dayEntry.specs);
           scheduleEl.appendChild(chip);
         });
+      } else if (parsed.clearAll) {
+        const chip = document.createElement("span");
+        chip.className = "bulk-preview-day-chip bulk-preview-day-chip-clear";
+        chip.textContent = "기존 가능 시간 전체 삭제";
+        scheduleEl.appendChild(chip);
       } else {
         const chip = document.createElement("span");
         chip.className = "bulk-preview-day-chip";
@@ -1374,19 +1477,21 @@
     }
     let createdCount = 0;
     const zeroFitNames = []; // 파싱은 됐지만 마감 시간 등으로 실제 등록된 시간이 하나도 없는 회원
-    const emptyRowNames = []; // 등록할 시간이 아예 없어 건너뛴 줄
+    const emptyRowNames = []; // 신규 회원인데 등록할 시간이 없어 건너뛴 줄
+    const clearedNames = []; // 기존 회원인데 "등록할 시간 없음"이라 기존 스케줄을 모두 지운 회원
 
     // 같은 회원을 가리키는 여러 줄(이름을 여러 줄로 나눠 붙여넣은 경우 등)이 서로의 스케줄을
     // 덮어쓰지 않도록, 적용 대상 회원별로 파싱된 스케줄을 먼저 합친 뒤 회원당 한 번만 교체한다.
     const entriesByMemberKey = new Map(); // memberId -> { member, isNew, days: Map<day, specs[]> }
     bulkImportRows.forEach(row => {
       if (row.choice === "__skip__") return;
-      if (row.parsed.days.length === 0) {
-        emptyRowNames.push(row.parsed.name);
-        return;
-      }
       let member, isNew = false;
       if (row.choice === "__new__") {
+        // 신규 회원은 등록할 시간이 없으면 만들 이유가 없으니 건너뛴다.
+        if (row.parsed.days.length === 0) {
+          emptyRowNames.push(row.parsed.name);
+          return;
+        }
         if (!row.newLocationId) return;
         member = {
           id: uid("m"),
@@ -1397,6 +1502,7 @@
         };
         isNew = true;
       } else {
+        // 기존 회원은 "등록할 시간 없음"도 유효한 지정이다 — 아래에서 기존 스케줄을 모두 지운다.
         member = memberById(row.choice);
         if (!member) return;
       }
@@ -1441,10 +1547,15 @@
         });
       });
       appliedCount++;
-      if (addedForMember === 0) zeroFitNames.push(member.name);
+      if (entry.days.size === 0) {
+        if (!entry.isNew) clearedNames.push(member.name);
+      } else if (addedForMember === 0) {
+        zeroFitNames.push(member.name);
+      }
     });
 
     requestsChangedSinceGenerate = true;
+    requestsChangedSinceGenerate2 = true;
     saveState();
     renderMemberTable();
     renderRequestList();
@@ -1453,9 +1564,10 @@
     const notes = [];
     if (createdCount) notes.push("신규 " + createdCount + "명");
     if (zeroFitNames.length) notes.push(zeroFitNames.join(", ") + "은(는) 마감 시간 등으로 등록된 시간이 없습니다");
+    if (clearedNames.length) notes.push(clearedNames.join(", ") + "은(는) 등록할 시간이 없어 기존 시간을 모두 삭제했습니다");
     if (emptyRowNames.length) notes.push(emptyRowNames.join(", ") + "은(는) 등록할 시간이 없어 건너뛰었습니다");
     const suffix = notes.length ? " (" + notes.join(" · ") + ")" : "";
-    showToast(appliedCount + "명 스케줄 등록 완료" + suffix, (zeroFitNames.length || emptyRowNames.length) ? "info" : "success");
+    showToast(appliedCount + "명 스케줄 등록 완료" + suffix, (zeroFitNames.length || emptyRowNames.length || clearedNames.length) ? "info" : "success");
   });
 
   // Notion 스타일 지점 다중 선택 위젯: 드롭다운에서 클릭 한 번으로 지점을 추가/제거한다.
@@ -1643,11 +1755,15 @@
     state.excludedMemberIds = state.excludedMemberIds.filter(id => id !== member.id);
     state.requiredMemberIds = state.requiredMemberIds.filter(id => id !== member.id);
     state.doubleAssignMemberIds = state.doubleAssignMemberIds.filter(id => id !== member.id);
+    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.filter(id => id !== member.id);
+    state.excludedMemberIds2 = state.excludedMemberIds2.filter(id => id !== member.id);
     requestsChangedSinceGenerate = true;
+    requestsChangedSinceGenerate2 = true;
     saveState();
     renderMemberTable();
     renderRequestList();
     renderCandidates();
+    renderSchedule2Result();
     showToast("'" + member.name + "' 회원이 삭제되었습니다", "danger");
   }
 
@@ -1659,12 +1775,13 @@
 
   function setMemberCategory(member, category) {
     member.category = category;
-    // 구분이 바뀌면 확보 시간(상담 30분/등록 50분)도 바뀌므로, 이미 등록된 이 회원의
+    // 구분이 바뀌면 확보 시간(상담 30분/등록 60분)도 바뀌므로, 이미 등록된 이 회원의
     // 신청들도 새 구분 기준 길이로 맞춰준다 — 안 그러면 예전 구분 기준 길이가 그대로 남아
     // 그리드에는 옛 길이만큼만 자리가 확보된 것처럼 보인다.
     const newDuration = sessionDurationFor(member);
     state.requests.forEach(r => { if (r.memberId === member.id) r.duration = newDuration; });
     requestsChangedSinceGenerate = true;
+    requestsChangedSinceGenerate2 = true;
     saveState();
     renderRequestList();
     showToast("회원 구분이 변경되었습니다", "success");
@@ -1689,6 +1806,8 @@
     renderExcludedUI();
     renderRequiredUI();
     renderDoubleAssignUI();
+    renderOnceLimit2UI();
+    renderExcluded2UI();
     memberTableBodyEl.innerHTML = "";
     memberLocationSortArrowEl.textContent =
       memberLocationSortDir === "asc" ? "▲" : memberLocationSortDir === "desc" ? "▼" : "";
@@ -1937,6 +2056,7 @@
     const idSet = new Set(reqIds);
     state.requests = state.requests.filter(r => !idSet.has(r.id));
     requestsChangedSinceGenerate = true;
+    requestsChangedSinceGenerate2 = true;
     renderRequestList();
     saveState();
   }
@@ -1965,6 +2085,65 @@
     });
     runs.sort((a, b) => a.day - b.day || a.startSlot - b.startSlot);
     return runs;
+  }
+
+  // 그리드에 표시되는 시간 블록(run) 하나에 딸린 "추가 지점"들 — 회원의 기본 지점과 별개로,
+  // 이 시간대에만 배정 가능하게 허용해둔 지점이다. 블록을 이루는 개별 신청(run.reqs)들에
+  // 똑같이 저장되므로 첫 번째 신청 것만 읽으면 된다.
+  function requestRunExtraLocationIds(run) {
+    return (run.reqs[0] && run.reqs[0].extraLocationIds) || [];
+  }
+
+  function setRunExtraLocationIds(run, ids) {
+    run.reqs.forEach(r => { r.extraLocationIds = ids.slice(); });
+  }
+
+  function addExtraLocationToRun(run, locId) {
+    const current = requestRunExtraLocationIds(run);
+    if (current.includes(locId)) return;
+    setRunExtraLocationIds(run, current.concat([locId]));
+    requestsChangedSinceGenerate = true;
+    requestsChangedSinceGenerate2 = true;
+    saveState();
+    renderRequestList();
+    showToast("지점이 추가되었습니다", "success");
+  }
+
+  function removeExtraLocationFromRun(run, locId) {
+    setRunExtraLocationIds(run, requestRunExtraLocationIds(run).filter(id => id !== locId));
+    requestsChangedSinceGenerate = true;
+    requestsChangedSinceGenerate2 = true;
+    saveState();
+    renderRequestList();
+    showToast("지점이 제거되었습니다", "info");
+  }
+
+  // "지점 추가하기" 하위 메뉴: 회원의 기본 지점과 이미 추가된 지점을 뺀 나머지 지점만 보여준다.
+  function openAddRunLocationMenu(member, run, x, y) {
+    const excluded = new Set((member.locationIds || []).concat(requestRunExtraLocationIds(run)));
+    const items = state.locations
+      .filter(l => !excluded.has(l.id))
+      .map(l => ({ label: l.name, onClick: () => addExtraLocationToRun(run, l.id) }));
+    if (items.length === 0) items.push({ label: "추가할 수 있는 지점이 없습니다", disabled: true });
+    openContextMenu(x, y, items);
+  }
+
+  // 좌클릭 시 뜨는 메뉴: 지점 추가하기(이 시간대만 다른 지점에서도 배정 가능해짐), 이미
+  // 추가해둔 지점 제거하기.
+  function buildRequestRunMenu(member, run, x, y) {
+    const items = [
+      { label: "지점 추가하기", onClick: () => openAddRunLocationMenu(member, run, x, y) }
+    ];
+    const extraIds = requestRunExtraLocationIds(run);
+    if (extraIds.length > 0) {
+      items.push({ separator: true });
+      extraIds.forEach(id => {
+        const loc = locationById(id);
+        if (!loc) return;
+        items.push({ label: "'" + loc.name + "' 지점 제거", danger: true, onClick: () => removeExtraLocationFromRun(run, id) });
+      });
+    }
+    return items;
   }
 
   function renderRequestList() {
@@ -2070,9 +2249,8 @@
       .map(l => l.name)
       .join(" · ");
 
-    // 그리드에는 실제로 확보되는 시간을 하나의 블록으로 보여준다: 마지막으로 시작 가능한
-    // 수업이 끝난 뒤에는 항상 최소 휴식 시간(BREAK_MIN)이 따라붙으므로, 종료 시각을 그만큼
-    // 더 늦춰서 보여준다 (별도 구간으로 나누지 않고 하나의 블록에 합쳐서). 마감 시간은 넘지 않는다.
+    // 그리드에는 실제로 확보되는 시간을 하나의 블록으로 보여준다(쉬는 시간이 있던 시절의 흔적으로,
+    // BREAK_MIN이 0이면 종료 시각을 늘리지 않는다 — 지금은 그렇다).
     const breakSlots = durationToSlots(BREAK_MIN);
 
     const scheduleGridRange = businessHoursGridRange();
@@ -2089,15 +2267,21 @@
     renderGrid(scheduleGridEl, availableCells, {
       blocks: runs.map(run => {
         const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);
+        // "지점 추가하기"로 이 시간대에만 추가해둔 지점이 있으면 이름 뒤에 덧붙여 보여준다.
+        const extraNames = requestRunExtraLocationIds(run)
+          .map(id => locationById(id))
+          .filter(Boolean)
+          .map(l => l.name);
         return {
           day: run.day,
           startSlot: run.startSlot,
           duration: (displayEndSlot - run.startSlot) * SLOT_MIN,
           label: memberLabel,
-          loc: memberLocNames,
+          loc: memberLocNames + (extraNames.length > 0 ? " +" + extraNames.join(",") : ""),
           sublabel: slotLabel(run.startSlot) + "~" + minutesLabel(START_MIN + displayEndSlot * SLOT_MIN),
           color,
-          onDelete: () => removeRequests(run.reqs.map(r => r.id))
+          onDelete: () => removeRequests(run.reqs.map(r => r.id)),
+          contextMenuItems: (x, y) => buildRequestRunMenu(activeMember, run, x, y)
         };
       }),
       rangeStartSlot,
@@ -2146,17 +2330,26 @@
     return (member && member.locationIds && member.locationIds.length > 0) ? member.locationIds : [null];
   }
 
-  // 두 세션 사이에 실제로 확보해야 하는 최소 간격(분): 같은 지점이어도 최소 BREAK_MIN(쉬는
-  // 시간), 지점이 다르면 그 위에 이동 시간만큼 더. "스케줄과 이동시간은 겹칠 수 없습니다"
-  // 조건의 하한이다. 10분 슬롯 격자에 맞춰 올림한다 — 이동 시간이 슬롯 배수가 아니면(예: 15분)
-  // 정확히 그 값에 맞는 시작 시각이 격자 위에 존재할 수 없으므로, 격자에서 표현 가능한 가장
-  // 좁은 간격을 "빈 시간 없음"의 기준으로 삼아야 한다.
+  // 회원의 기본 지점들에 더해, 그 신청 하나에만 "지점 추가하기"로 별도로 허용해둔 지점
+  // (req.extraLocationIds)까지 합쳐서 돌려준다 — 다른 신청(시간대)에는 영향을 주지 않는다.
+  function candidateLocationsForRequest(req) {
+    const base = candidateLocationsFor(req.memberId).filter(id => id !== null);
+    const extra = (req.extraLocationIds || []).filter(id => !base.includes(id));
+    const combined = base.concat(extra);
+    return combined.length > 0 ? combined : [null];
+  }
+
+  // 두 세션 사이에 실제로 확보해야 하는 최소 간격(분): 쉬는 시간 없이, 지점이 다를 때만 그
+  // 이동 시간만큼(BREAK_MIN은 0이라 같은 지점이면 간격이 필요 없다). "스케줄과 이동시간은
+  // 겹칠 수 없습니다" 조건의 하한이다. 10분 슬롯 격자에 맞춰 올림한다 — 이동 시간이 슬롯
+  // 배수가 아니면(예: 15분) 정확히 그 값에 맞는 시작 시각이 격자 위에 존재할 수 없으므로,
+  // 격자에서 표현 가능한 가장 좁은 간격을 "빈 시간 없음"의 기준으로 삼아야 한다.
   function requiredGapMin(locA, locB) {
     const raw = Math.max(BREAK_MIN, travelMinutes(locA, locB));
     return Math.ceil(raw / SLOT_MIN) * SLOT_MIN;
   }
 
-  // "후보G" 전용 tie-break(preferDaytime 옵션)의 "낮 시간대 우선"에 쓴다 — 18시 이전에
+  // tie-break(preferDaytime 옵션)의 "낮 시간대 우선"에 쓴다 — 18시 이전에
   // 시작하는 신청인지만 보면 된다.
   const DAYTIME_END_MIN = 18 * 60;
   function isDaytimeStart(cand) {
@@ -2203,7 +2396,7 @@
   //   인원을 줄이면서까지 강제하지는 않는, 동점 상황에서만 작동하는 선호다.)
   // options: { travelFirst: 인원(가중치 합)보다 이동 시간 최소화를 먼저 비교한다 —
   //   그래도 "빈 시간 없음"은 체인 구조 자체가 보장하므로 항상 유지된다.
-  //   preferDaytime: 인원·이동까지 같으면("후보G") 낮 시간대(18시 이전 시작) 세션이 많이
+  //   preferDaytime: 인원·이동까지 같으면 낮 시간대(18시 이전 시작) 세션이 많이
   //   들어간 체인을 우선한다 — 저녁보다 낮에 몰아 배정하면 그만큼 그날 안에서 이동할 수 있는
   //   여지(뒤에 이어붙일 다른 회원)가 늘어나 결과적으로 이동을 줄이는 데 도움이 된다는 전제.
   //   groupByLocation: 그 다음으로(또는 preferDaytime 없이 바로) 같은 지점이 연달아
@@ -2225,13 +2418,13 @@
     // 회원만" 채우는 방식이 아니라, 처음부터 모든 회원(정원 안에서)을 대상으로 요일별 최선
     // 체인을 짜게 한다 — 인원(서로 다른 회원 수)이 아니라 세션 총 개수를 곧바로 최대화한다.
     const sessionCountFirst = !!options.sessionCountFirst;
-    const pinnedLocationDay = options.pinnedLocationDay || null; // { day, locationId } — 후보I/J
+    const pinnedLocationDay = options.pinnedLocationDay || null; // { day, locationId } — 특정 요일에 특정 지점을 먼저 배정(strengthenCandidate의 사전 단계 탐색용)
     const priorityDoubleLocationId = options.priorityDoubleLocationId || null; // "마포점 우선 2회 배정" 체크박스
     // "2회 배정 회원": 지정된 회원의 2번째 세션을 다른 회원들의 2번째 세션보다 먼저 채운다.
     const doubleAssignMemberIds = (options.doubleAssignMemberIds && options.doubleAssignMemberIds.length)
       ? new Set(options.doubleAssignMemberIds) : null;
     const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY;
-    const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도(후보C)
+    const maxTravelsPerWeek = options.maxTravelsPerWeek || null; // 일주일 총 이동 횟수 한도
     // travelCountOnly: 인원(또는 세션 수) → 이동 횟수까지만 비교하고 멈추게 하는 옵션 —
     // 이동 시간, 이동시간+빈시간 합 같은 세부 기준(아래 addToIndex 참고)은 건너뛴다. 한때
     // 후보A·B가 이 옵션을 켜뒀지만, 그러면 인원·세션·이동 횟수까지 완전히 동점인 배치들
@@ -2328,7 +2521,7 @@
     // 끝나는 이전 세션"을 매번 전체를 훑지 않고 바로 찾을 수 있다.
     // endBefore가 있으면({slot, locationId}), 하루 전체가 아니라 그 시각·지점 앞에 정확히
     // 맞물려 끝나는 체인만 찾는다 — 확정(고정)된 세션 앞의 빈 시간을 채울 때 쓴다.
-    // onlyLocationId가 있으면(후보I/J의 "지점 우선 배정" 사전 단계), 그 지점을 등록해둔
+    // onlyLocationId가 있으면("지점 우선 배정" 사전 단계), 그 지점을 등록해둔
     // 회원의 그 지점 후보만으로 체인을 짠다 — 같은 지점끼리는 이동 시간이 0이므로, 이 체인은
     // 곧 "그 요일에 그 지점으로 최대한 많이 배정하는" 결과가 된다.
     function buildBestChain(day, eligibleMemberIds, weightFn, endBefore, onlyLocationId) {
@@ -2340,7 +2533,7 @@
         && (!endBefore || r.startSlot + durationToSlots(r.duration) <= endBefore.slot));
       const nodes = [];
       cands.forEach(cand => {
-        const memberLocs = candidateLocationsFor(cand.memberId);
+        const memberLocs = candidateLocationsForRequest(cand);
         const locs = onlyLocationId ? (memberLocs.includes(onlyLocationId) ? [onlyLocationId] : []) : memberLocs;
         locs.forEach(locId => {
           nodes.push({ cand, locationId: locId, end: cand.startSlot + durationToSlots(cand.duration) });
@@ -2355,7 +2548,7 @@
       // 그마저 동점이면 이동 시간 합 + 빈 시간(슬랙) 합이 더 적은 쪽을(=이동 시간이 같다면
       // 결국 빈 시간이 적은 쪽을) 고르고, 그다음으로 하루의 첫 수업이 30분 단위 시각(예:
       // 13:00, 13:30)에 시작하는 체인을 우선한다 — 인원을 줄이면서까지 정렬을 강제하지는
-      // 않고, 이미 동점인 대안들 사이에서만 고른다. preferDaytime 옵션("후보G")이
+      // 않고, 이미 동점인 대안들 사이에서만 고른다. preferDaytime 옵션이
       // 켜지면 그다음으로 낮 시간대(18시 이전 시작) 세션이 많이 들어간 체인을 우선하고,
       // groupByLocation 옵션이 켜지면 그다음으로 같은 지점이 연달아 이어지는(지점을 덜
       // 옮겨다니는) 체인을 우선한다. 그래서 색인은 이 값들을 옵션에 맞는 순서로 정렬해둔다 —
@@ -2553,7 +2746,7 @@
         dayCands.forEach(cand => {
           if (!eligibleMemberIds.has(cand.memberId) || usedMembers.has(cand.memberId)) return;
           let bestLoc = null;
-          candidateLocationsFor(cand.memberId).forEach(locId => {
+          candidateLocationsForRequest(cand).forEach(locId => {
             const need = requiredGapMin(chainEnd.locationId, locId);
             const actual = (cand.startSlot - (chainEnd.startSlot + durationToSlots(chainEnd.duration))) * SLOT_MIN;
             if (actual < need || actual > need + allowGapMin) return;
@@ -2670,7 +2863,8 @@
     }
 
     // 지정한 요일에는, 지정한 지점만으로 만들 수 있는 최대(가장 많이 배정되는) 체인을 1단계보다
-    // 먼저 확정한다("후보I": 수요일 상암점, "후보J": 금요일 마포점). 그 요일에 이미 확정(고정)된
+    // 먼저 확정한다(strengthenCandidate가 모든 요일×지점 조합에 대해 이 옵션을 시도해본다).
+    // 그 요일에 이미 확정(고정)된
     // 세션이 있으면 충돌을 피해 건드리지 않는다. 이후 1~3단계는 이 체인 뒤(extendExistingChain)와
     // 나머지 요일에서 평소처럼 진행되므로 "그 지점을 최대한 먼저 배정하고 나머지를 배정"이 된다.
     if (pinnedLocationDay && !(pinned.some(p => p.day === pinnedLocationDay.day)) && (byDay.get(pinnedLocationDay.day) || []).length > 0) {
@@ -2827,10 +3021,10 @@
   }
 
   // 회원이 등록한 가능 시간 총합(분)을, 회원 스케줄 추가 그리드에 보이는 것과 같은 방식으로
-  // 계산한다 — 각 구간(run)마다 마지막 수업 뒤에 붙는 최소 휴식 시간(BREAK_MIN)까지 포함해서
-  // 더한다. 등록/상담 회원 모두 이 총합이 1시간(60분) 이하면 애초에 같은 날 두 번째 수업을
-  // 넣을 시간이 물리적으로 없으므로(수업+휴식이 최소 40~60분), 1회만 배정되어도 예외적인
-  // 상황이 아니다.
+  // 계산한다(BREAK_MIN이 0이 아니었다면 구간마다 그만큼 더했을 자리 — 지금은 더할 것이 없다).
+  // 등록/상담 회원 모두 이 총합이 1시간(60분) 이하면 애초에 같은 날 두 번째 수업을
+  // 넣을 시간이 물리적으로 없으므로(등록 수업은 최소 120분, 상담은 최소 60분 필요), 1회만
+  // 배정되어도 예외적인 상황이 아니다.
   function totalAvailableMinutesFor(memberId) {
     const breakSlots = durationToSlots(BREAK_MIN);
     const runs = mergeRequestRuns(state.requests.filter(r => r.memberId === memberId));
@@ -2886,9 +3080,7 @@
   // (그런 "지점별로 묶기"가 필요하면 groupByLocation 옵션으로 buildBestChain의 체인 선택
   // 단계에서만, 이미 완성된 동점 체인들 사이에서 고르게 한다 — 정렬 자체를 건드리지 않는다.)
   // 후보B는 sessionCountFirst 옵션으로, 인원(서로 다른 회원 수)이 아니라 총 수업 건수 자체를
-  // 먼저 최대화한다. 후보C는 maxTravelsPerWeek 옵션으로 일주일 총 이동 횟수 한도를
-  // 5회로 제한한다. 후보G는 preferDaytime 옵션으로 "인원·이동까지 같으면 낮 시간대(18시
-  // 이전 시작) 우선"을 추가한다. 후보A는 minimizeUnassigned 옵션으로, 기본 순서와 "대안이
+  // 먼저 최대화한다. 후보A는 minimizeUnassigned 옵션으로, 기본 순서와 "대안이
   // 좁은 요일부터 먼저 채우는" 순서를 둘 다 시도해보고 실제로 미배정 회원이 더 적은 쪽을 택한다.
   function defaultSort(eligible, jitter) {
     return [...eligible].sort((a, b) =>
@@ -2896,14 +3088,6 @@
       || (endBucket(a) - endBucket(b))
       || (jitter.get(a.id) - jitter.get(b.id))
       || reqEnd(a) - reqEnd(b));
-  }
-
-  // 후보I/J("지점 우선 배정")용: 이름으로 지점을 찾아 { day, locationId } 형태로 돌려준다.
-  // 지점 이름이 바뀌었거나 삭제됐으면 null을 돌려주고, 이때 greedyAssign은 이 사전 단계를
-  // 그냥 건너뛴다(다른 조건은 정상 적용, 에러 없이 후보A와 같은 배치가 된다).
-  function pinnedLocationDayFor(day, locationName) {
-    const loc = state.locations.find(l => l.name === locationName);
-    return loc ? { day, locationId: loc.id } : null;
   }
 
   // "마포점 우선 2회 배정" 체크박스용: 이름으로 지점을 찾는다. 지점이 삭제/개명되어 없으면
@@ -2916,13 +3100,11 @@
   // 표시 순서는 사용자가 지정한 순서를 그대로 따른다: A(기본, 미배정 없음 → 총 수업 건수 →
   // 이동 횟수 순으로 비교하되, 신청 가능한 회원이 적은 요일부터 먼저 채우는 대안 순서도 함께
   // 시도해보고 미배정이 더 적은 쪽을 택한다) → B(A와 같은 세 값을 비교하되 인원 대신 총 수업
-  // 건수를 먼저 최대화 → 인원 → 이동 횟수) → C(A와 기준은 같고 일주일 총 이동 횟수를 5회로
-  // 제한) → G(A의 동점 기준에 낮 시간대 우선을 한 단계 더 추가한 대안) →
-  // I/J(특정 요일에 특정 지점을 최대한 먼저 배정하는 대안).
+  // 건수를 먼저 최대화 → 인원(미배정 1명까지 허용) → 이동 횟수).
   const STRATEGIES = [
     {
       title: "후보A - 인원 최대화",
-      desc: "인원 최대 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.",
+      desc: "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.",
       // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
       // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
       // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
@@ -2934,43 +3116,18 @@
     },
     {
       title: "후보B - 수업 횟수 최대화",
-      desc: "수업 횟수 최대 → 인원 최대 → 이동 횟수 최저 순으로 배정합니다.",
+      desc: "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.",
       options: { sessionCountFirst: true, strengthenSearch: "sessions" },
-      sort: defaultSort
-    },
-    {
-      title: "후보C - 일주일 총 이동 횟수 5회",
-      desc: "후보A와 같은 기준이지만, 일주일 총 이동 횟수를 5회까지로 제한합니다.",
-      options: { strengthenSearch: "count", maxTravelsPerWeek: 5 },
-      sort: defaultSort
-    },
-    {
-      title: "후보G - 낮 시간대 우선",
-      desc: "후보A와 같은 기준이지만, 그마저 동점이면 18시 이전에 시작하는 수업이 많은 배치를 우선합니다.",
-      options: { strengthenSearch: "count", preferDaytime: true },
-      sort: defaultSort
-    },
-    {
-      title: "후보I - 수요일 상암점 우선",
-      desc: "후보A와 같은 기준이지만, 수요일에는 상암점 수업을 최대한 먼저 배정한 뒤 나머지를 배정합니다.",
-      options: () => ({ pinnedLocationDay: pinnedLocationDayFor(2, "상암점") }), // 수 = index 2
-      sort: defaultSort
-    },
-    {
-      title: "후보J - 금요일 마포점 우선",
-      desc: "후보A와 같은 기준이지만, 금요일에는 마포점 수업을 최대한 먼저 배정한 뒤 나머지를 배정합니다.",
-      options: () => ({ pinnedLocationDay: pinnedLocationDayFor(4, "마포점") }), // 금 = index 4
       sort: defaultSort
     }
   ];
 
   // 후보A/B는 스스로 정해둔 3단계 비교 순서(후보A: 인원 → 총 수업 건수 → 이동 횟수, 후보B:
   // 총 수업 건수 → 인원 → 이동 횟수)를 내세우지만, 그리디 알고리즘은 요일을 처리하는 순서에
-  // 따라 이 기준으로도 최선이 아닌 결과를 낼 수 있다 — 실제로 특정 요일·지점을 먼저 채우는
-  // 후보I/J가 우연히 더 나은 조합을 찾아내는 경우가 있었다. 그래서 이 두 후보는 모든 (요일,
-  // 지점) 조합을 "그 요일엔 그 지점부터 최대한 채운다"는 사전 단계로 하나씩 시도해보고, 그중
-  // baseline보다 나은 결과가 있으면 그걸로 교체한다 — 후보I/J와 같은 메커니즘을 전수 조사하는
-  // 셈이다. 지점이 1개뿐이면 사전 단계를 시도할 의미가 없으므로 건너뛴다.
+  // 따라 이 기준으로도 최선이 아닌 결과를 낼 수 있다 — 실제로 특정 요일·지점을 먼저 채우면
+  // 우연히 더 나은 조합을 찾아내는 경우가 있었다. 그래서 모든 (요일, 지점) 조합을 "그 요일엔
+  // 그 지점부터 최대한 채운다"는 사전 단계로 하나씩 시도해보고, 그중 baseline보다 나은 결과가
+  // 있으면 그걸로 교체한다. 지점이 1개뿐이면 사전 단계를 시도할 의미가 없으므로 건너뛴다.
   // primary가 "count"면 인원을 먼저 비교하고 그다음 총 수업 건수를(후보A), "sessions"면 총
   // 수업 건수를 먼저 비교하고 그다음 인원을(후보B) 비교한다 — 어느 쪽이든 마지막은 이동 횟수다.
   // 두 값 중 하나만 비교하면(예: 인원과 이동 횟수만) 그 사이에 있는 값(총 수업 건수 또는 인원)이
@@ -3177,8 +3334,18 @@
     if (onProgress) onProgress(1);
     return pool;
   }
-  const INITIAL_SEARCH_ATTEMPTS = 50; // "후보 생성하기" 시 전략당 추가로 시도해볼 조합 수(tie-break jitter + 요일 순서를 함께 탐색하므로 기존보다 늘려둔다)
-  const REGENERATE_SEARCH_ATTEMPTS = 25; // "다음 후보" 시 전략당 추가로 시도해볼 조합 수(초기 생성과 다른 값을 쓸 수 있도록 별도로 둔다. 요일 순서 탐색이 추가돼 기존보다 늘려둔다)
+  // "후보 생성하기" 시 전략당 추가로 시도해볼 조합 수. generateCandidatesAsync는 모든 전략의
+  // 시도 결과를 하나의 공용 풀에 합치고(아래 pool 관련 주석 참고) 각 후보는 자기 기준으로 그
+  // 풀 전체에서 최선을 고르므로, 표시되는 전략 수가 줄 때마다(원래 6개 → 후보C/G 삭제로 4개 →
+  // 후보I/J 삭제로 2개) 전략당 시도 수를 그만큼 늘려야 풀 전체 크기(=탐색 다양성)가 줄어들지
+  // 않는다 — 안 늘리면 후보A("인원 최대화")가 삭제된 전략들의 시도에서 빌려오던, 미배정 0명
+  // 조합을 더는 찾지 못해 같은 데이터로도 미배정이 생기는 회귀가 생긴다. 원래 6 × (50+1) ≈
+  // 2 × (153+1)로 총 시도 수를 맞춘다.
+  const INITIAL_SEARCH_ATTEMPTS = 153;
+  // "다음 후보" 시 전략당 추가로 시도해볼 조합 수. regenerateCandidate는 (generateCandidatesAsync와
+  // 달리) searchStrategyPool로 그 전략 하나만의 풀을 새로 만들어 쓰므로 다른 전략 수의 영향을
+  // 받지 않는다 — 초기 생성과 다른 값을 쓸 수 있도록 별도로 둔 것뿐이다.
+  const REGENERATE_SEARCH_ATTEMPTS = 25;
 
   // strategyIndex별로 "이미 보여준 배정 결과"를 기록해, 재생성 시 똑같은 조합이 다시 나오는지
   // 판별한다. 배정 결과(assigned)를 이루는 신청 id 집합을 그대로 서명으로 쓴다 — 같은
@@ -3214,8 +3381,8 @@
     // 그래서 전략마다 만든 시도들(zeroJitter + 시드 난수 여러 개)을 하나의 공통 풀에 모아두고,
     // 각 전략은 자기 것이든 남의 것이든 상관없이 이 풀 전체에서 "자기 기준"(primary)으로 최선을
     // 고른다. 이러면 어떤 전략의 탐색이 우연히 찾아낸 좋은 조합을, 그 조합이 실제로 더 잘
-    // 맞는 다른 전략이 가져가 보여줄 수 있다. 후보C처럼 일주일 총 이동 횟수 상한이 있는
-    // 전략은 그 상한을 지키는 시도만 고를 수 있다(상한 없는 전략의 결과를 그대로 가져오면
+    // 맞는 다른 전략이 가져가 보여줄 수 있다. 일주일 총 이동 횟수 상한(maxTravelsPerWeek)이
+    // 있는 전략은 그 상한을 지키는 시도만 고를 수 있다(상한 없는 전략의 결과를 그대로 가져오면
     // 그 전략의 조건을 어길 수 있으므로). 시드가 고정돼 있어 같은 데이터라면 "후보 생성하기"를
     // 몇 번 눌러도 항상 같은 결과가 나온다(재현 가능).
     const pool = [];
@@ -3415,8 +3582,8 @@
     });
   }
 
-  // 같은 요일 안에서 연속된 두 세션 사이마다 블록을 만든다: 지점이 바뀌면 이동 시간,
-  // 같은 지점이면(또는 이동 시간이 0분이면) 최소로 보장되는 휴식 시간을 표시한다.
+  // 같은 요일 안에서 연속된 두 세션 사이, 지점이 달라 실제로 이동이 필요한 구간만 표시한다
+  // (쉬는 시간 없음이 규칙이므로 같은 지점이면 표시할 것이 없다).
   function candidateToTravelBlocks(candidate) {
     const byDay = new Map();
     candidate.assigned.forEach(r => {
@@ -3434,7 +3601,7 @@
         const mins = travelMinutes(prev.locationId, cur.locationId);
         if (mins > 0) {
           travelBlocks.push({ day: prev.day, startSlot, duration: mins, label: "이동 " + mins + "분", type: "travel" });
-        } else {
+        } else if (BREAK_MIN > 0) {
           // 지점이 같아도(또는 이동 시간이 0분이어도) 최소 BREAK_MIN만큼은 쉬는 시간으로 예약돼 있다.
           const breakMin = Math.min(BREAK_MIN, gapMin);
           travelBlocks.push({ day: prev.day, startSlot, duration: breakMin, label: "휴식 " + breakMin + "분", type: "break" });
@@ -4046,11 +4213,1691 @@
     saveState();
   });
 
+  /* ---------------- "수업 스케줄 생성2" 전용: 미배정 회원 · 1회 제한 회원 ----------------
+     새 후보 생성 알고리즘을 준비 중이라, 기존 스케줄 생성(schedule)과는 별개의 상태
+     (onceLimitedMemberIds2 / excludedMemberIds2)로 관리한다. 후보 생성 기능이 아직 없으므로
+     여기서는 후보 초기화 같은 부수효과 없이 상태 저장과 칩/드롭다운 렌더링만 한다. */
+
+  const onceLimit2MsEl = document.getElementById("onceLimitMs2");
+  const onceLimit2ControlEl = document.getElementById("onceLimitControl2");
+  const onceLimit2ChipRowEl = document.getElementById("onceLimitChipRow2");
+  const onceLimit2DropdownEl = document.getElementById("onceLimitDropdown2");
+  let onceLimit2DropdownOpen = false;
+
+  // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 결과가 있으면 즉시 비운다.
+  function onOnceLimit2Changed() {
+    if (schedule2Result) {
+      schedule2Result = null;
+      renderSchedule2Result();
+      generateHint2El.textContent = "1회 제한 회원 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
+    } else {
+      requestsChangedSinceGenerate2 = true;
+    }
+    saveState();
+    renderOnceLimit2Chips();
+    renderOnceLimit2Dropdown();
+  }
+
+  function addOnceLimit2Member(memberId) {
+    if (state.onceLimitedMemberIds2.includes(memberId)) return;
+    if (state.excludedMemberIds2.includes(memberId)) {
+      alert("미배정 회원에 추가되어 있는 회원입니다.\n미배정 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
+    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.concat(memberId);
+    onOnceLimit2Changed();
+  }
+
+  function removeOnceLimit2Member(memberId) {
+    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.filter(id => id !== memberId);
+    onOnceLimit2Changed();
+  }
+
+  function renderOnceLimit2Chips() {
+    onceLimit2ChipRowEl.innerHTML = "";
+    onceLimit2ChipRowEl.appendChild(onceLimit2MsEl);
+    const selectedMembers = state.onceLimitedMemberIds2
+      .map(id => memberById(id))
+      .filter(isOnceLimitEligible)
+      .sort(compareOnceLimitMembers);
+    if (selectedMembers.length === 0) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "ms-placeholder";
+      placeholder.textContent = "설정된 회원 없음";
+      onceLimit2ChipRowEl.appendChild(placeholder);
+      return;
+    }
+    selectedMembers.forEach(m => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      appendOnceLimitMemberLabel(chip, m);
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.textContent = "×";
+      removeBtn.title = "제거";
+      removeBtn.addEventListener("click", () => removeOnceLimit2Member(m.id));
+      chip.appendChild(removeBtn);
+      onceLimit2ChipRowEl.appendChild(chip);
+    });
+  }
+
+  function renderOnceLimit2Dropdown() {
+    onceLimit2DropdownEl.innerHTML = "";
+    const eligibleMembers = state.members.filter(isOnceLimitEligible);
+    const addable = eligibleMembers
+      .filter(m => !state.onceLimitedMemberIds2.includes(m.id))
+      .sort(compareOnceLimitMembers);
+    if (eligibleMembers.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "등록 회원이 없습니다. (상담 회원은 이미 항상 1회로 제한됩니다)";
+      onceLimit2DropdownEl.appendChild(empty);
+      return;
+    }
+    if (addable.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "모든 회원이 이미 추가되어 있습니다.";
+      onceLimit2DropdownEl.appendChild(empty);
+      return;
+    }
+    addable.forEach(m => {
+      const item = document.createElement("div");
+      item.className = "ms-option";
+      item.setAttribute("role", "option");
+      appendOnceLimitMemberLabel(item, m);
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        addOnceLimit2Member(m.id);
+      });
+      onceLimit2DropdownEl.appendChild(item);
+    });
+  }
+
+  function openOnceLimit2Dropdown() {
+    if (!state.members.some(isOnceLimitEligible)) return;
+    onceLimit2DropdownOpen = true;
+    onceLimit2MsEl.classList.add("open");
+    onceLimit2ControlEl.setAttribute("aria-expanded", "true");
+  }
+
+  function closeOnceLimit2Dropdown() {
+    onceLimit2DropdownOpen = false;
+    onceLimit2MsEl.classList.remove("open");
+    onceLimit2ControlEl.setAttribute("aria-expanded", "false");
+  }
+
+  onceLimit2ControlEl.addEventListener("click", () => {
+    if (onceLimit2DropdownOpen) closeOnceLimit2Dropdown();
+    else openOnceLimit2Dropdown();
+  });
+
+  function renderOnceLimit2UI() {
+    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.filter(id => isOnceLimitEligible(memberById(id)));
+    renderOnceLimit2Chips();
+    renderOnceLimit2Dropdown();
+  }
+
+  document.addEventListener("click", (e) => {
+    if (onceLimit2DropdownOpen && !onceLimit2MsEl.contains(e.target)) closeOnceLimit2Dropdown();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && onceLimit2DropdownOpen) closeOnceLimit2Dropdown();
+  });
+
+  const excluded2MsEl = document.getElementById("excludedMs2");
+  const excluded2ControlEl = document.getElementById("excludedControl2");
+  const excluded2ChipRowEl = document.getElementById("excludedChipRow2");
+  const excluded2DropdownEl = document.getElementById("excludedDropdown2");
+  let excluded2DropdownOpen = false;
+
+  // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 결과가 있으면 즉시 비운다.
+  function onExcluded2Changed() {
+    if (schedule2Result) {
+      schedule2Result = null;
+      renderSchedule2Result();
+      generateHint2El.textContent = "미배정 회원 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
+    } else {
+      requestsChangedSinceGenerate2 = true;
+    }
+    saveState();
+    renderExcluded2Chips();
+    renderExcluded2Dropdown();
+  }
+
+  function addExcluded2Member(memberId) {
+    if (state.excludedMemberIds2.includes(memberId)) return;
+    if (state.onceLimitedMemberIds2.includes(memberId)) {
+      alert("1회 제한 회원에 추가되어 있는 회원입니다.\n1회 제한 회원에서 삭제 후 다시 추가해 주세요.");
+      return;
+    }
+    state.excludedMemberIds2 = state.excludedMemberIds2.concat(memberId);
+    onExcluded2Changed();
+  }
+
+  function removeExcluded2Member(memberId) {
+    state.excludedMemberIds2 = state.excludedMemberIds2.filter(id => id !== memberId);
+    onExcluded2Changed();
+  }
+
+  function renderExcluded2Chips() {
+    excluded2ChipRowEl.innerHTML = "";
+    excluded2ChipRowEl.appendChild(excluded2MsEl);
+    const selectedMembers = state.excludedMemberIds2
+      .map(id => memberById(id))
+      .filter(Boolean)
+      .sort(compareOnceLimitMembers);
+    if (selectedMembers.length === 0) {
+      const placeholder = document.createElement("span");
+      placeholder.className = "ms-placeholder";
+      placeholder.textContent = "설정된 회원 없음";
+      excluded2ChipRowEl.appendChild(placeholder);
+      return;
+    }
+    selectedMembers.forEach(m => {
+      const chip = document.createElement("span");
+      chip.className = "chip chip-excluded";
+      appendOnceLimitMemberLabel(chip, m);
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.textContent = "×";
+      removeBtn.title = "제거";
+      removeBtn.addEventListener("click", () => removeExcluded2Member(m.id));
+      chip.appendChild(removeBtn);
+      excluded2ChipRowEl.appendChild(chip);
+    });
+  }
+
+  function renderExcluded2Dropdown() {
+    excluded2DropdownEl.innerHTML = "";
+    const addable = state.members
+      .filter(m => !state.excludedMemberIds2.includes(m.id))
+      .sort(compareOnceLimitMembers);
+    if (state.members.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "등록된 회원이 없습니다.";
+      excluded2DropdownEl.appendChild(empty);
+      return;
+    }
+    if (addable.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "ms-empty";
+      empty.textContent = "모든 회원이 이미 추가되어 있습니다.";
+      excluded2DropdownEl.appendChild(empty);
+      return;
+    }
+    addable.forEach(m => {
+      const item = document.createElement("div");
+      item.className = "ms-option";
+      item.setAttribute("role", "option");
+      appendOnceLimitMemberLabel(item, m);
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        addExcluded2Member(m.id);
+      });
+      excluded2DropdownEl.appendChild(item);
+    });
+  }
+
+  function openExcluded2Dropdown() {
+    if (state.members.length === 0) return;
+    excluded2DropdownOpen = true;
+    excluded2MsEl.classList.add("open");
+    excluded2ControlEl.setAttribute("aria-expanded", "true");
+  }
+
+  function closeExcluded2Dropdown() {
+    excluded2DropdownOpen = false;
+    excluded2MsEl.classList.remove("open");
+    excluded2ControlEl.setAttribute("aria-expanded", "false");
+  }
+
+  excluded2ControlEl.addEventListener("click", () => {
+    if (excluded2DropdownOpen) closeExcluded2Dropdown();
+    else openExcluded2Dropdown();
+  });
+
+  function renderExcluded2UI() {
+    state.excludedMemberIds2 = state.excludedMemberIds2.filter(id => !!memberById(id));
+    renderExcluded2Chips();
+    renderExcluded2Dropdown();
+  }
+
+  document.addEventListener("click", (e) => {
+    if (excluded2DropdownOpen && !excluded2MsEl.contains(e.target)) closeExcluded2Dropdown();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && excluded2DropdownOpen) closeExcluded2Dropdown();
+  });
+
+  /* ---------------- "수업 스케줄 생성2": 새 후보 생성 알고리즘 ----------------
+     기존 "수업 스케줄 생성1"(greedyAssign 등)과는 완전히 별개의, 훨씬 단순한 그리디
+     알고리즘이다. 규칙:
+       - 등록 회원 수업은 60분, 상담 회원은 30분(SESSION_DURATION_MIN_2 / CONSULT_DURATION_MIN_2).
+       - 쉬는 시간은 두지 않는다 — 같은 지점이면 바로 이어서, 지점이 다르면 이동 시간만큼만 간격을 둔다.
+       - 1순위: 미배정 회원이 없도록 한다. 2순위: 그 안에서 총 수업 수를 최대화한다.
+       - 후보는 여러 개를 비교하지 않고 1개만 만든다(재생성 기능 없음).
+     전략: 하루를 이른 시각부터 훑으며 이어서 시작할 수 있는(같은 지점이면 바로, 다른 지점이면
+     이동 시간만큼 지난 뒤) 신청으로 최대한 빈틈없이 채운다 — 이동이 필요한 구간은 "빈 시간"이
+     아니라 "이동 시간"으로 활용하는 것이 핵심이다(findInsertSlot의 간격 검사가 이를 보장).
+     다만 무조건 이른 순서로만 채우면 신청 폭이 좁은 회원이 자리를 뺏겨 미배정으로 남기 쉬우므로,
+     먼저 신청 가능한 자리 수가 적은 회원부터 1회씩 자리를 확보해준 뒤(1단계), 남은 자리를
+     시간순으로 최대한 채운다(2단계). */
+
+  function sessionDurationFor2(member) {
+    return (member && (member.category || "상담")) === "상담" ? CONSULT_DURATION_MIN_2 : SESSION_DURATION_MIN_2;
+  }
+
+  function maxSessionsFor2(member) {
+    if (!member) return 1;
+    if (state.onceLimitedMemberIds2.includes(member.id)) return 1;
+    return (member.category || "상담") === "상담" ? 1 : MAX_SESSIONS_PER_MEMBER;
+  }
+
+  // 두 세션 사이에 필요한 최소 간격(분): 쉬는 시간 없이, 지점이 다를 때만 그 이동 시간만큼.
+  // 슬롯 격자에 맞춰 올림한다(격자에서 표현 가능한 가장 좁은 간격을 기준으로 삼기 위함).
+  function requiredGapMin2(locA, locB) {
+    const raw = travelMinutes(locA, locB);
+    return raw > 0 ? Math.ceil(raw / SLOT_MIN) * SLOT_MIN : 0;
+  }
+
+  function isEligibleRequest2(req) {
+    const member = memberById(req.memberId);
+    if (!member || state.excludedMemberIds2.includes(req.memberId)) return false;
+    const slots = durationToSlots(sessionDurationFor2(member));
+    for (let i = 0; i < slots; i++) {
+      if (!availableCells.has(cellKey(req.day, req.startSlot + i))) return false;
+    }
+    return true;
+  }
+
+  // 하루치 후보(신청 x 사용 가능 지점 조합)를 노드로 만든다. weightFn(memberId, startSlot,
+  // locationId)이 0/false를 돌려주면 그 조합은 후보에서 아예 뺀다 — 양수를 돌려주면 그
+  // 값이 그 노드를 골랐을 때 얻는 가중치(보통 1, 이미 확정된 자리를 그대로 유지시키고 싶을
+  // 때는 아주 큰 값)가 된다.
+  // jitterFn이 있으면(무작위 함수) 노드마다 작은 무작위 값을 하나씩 붙여둔다 — runChainDP가
+  // 다른 조건이 모두 동점일 때 이 값을 마지막 동점 처리 기준으로 써서, 요일 순서를 아무리
+  // 바꿔도 항상 시간순으로만 동점을 처리해 매번 "누가 2회를 받을지"가 똑같이 정해지던
+  // 문제를 깨뜨린다(요일 전체 재섞기 다듬기 단계 전용).
+  function buildDayNodes(dayRequests, weightFn, jitterFn) {
+    const nodes = [];
+    dayRequests.forEach(r => {
+      const member = memberById(r.memberId);
+      const duration = sessionDurationFor2(member);
+      const end = r.startSlot + durationToSlots(duration);
+      candidateLocationsForRequest(r).forEach(locationId => {
+        const weight = weightFn(r.memberId, r.startSlot, locationId);
+        if (!weight) return;
+        nodes.push({ memberId: r.memberId, day: r.day, startSlot: r.startSlot, duration, locationId, end, weight, jitter: jitterFn ? jitterFn() : 0 });
+      });
+    });
+    return nodes;
+  }
+
+  // "빈 시간 없이, 하루 이동 최대 MAX_TRAVELS_PER_DAY번까지"를 만족하며 가중치 합이 최대인
+  // 체인을 DP로 찾는다 — 끝나는 시각 순으로 노드를 처리하면서, 각 노드 앞에 올 수 있는(겹치지
+  // 않고 필요한 이동 시간만큼 간격이 확보된) 이전 노드들 중 가장 좋은 것을 이어붙인다
+  // (고전적인 "가중치 있는 구간 스케줄링" DP를, 지점마다 다른 이동 시간이 필요하다는 조건과
+  // 하루 이동 횟수 제한까지 반영해 확장한 것). 단순 그리디와 달리 이미 고른 것을 무를 수는
+  // 없지만 "앞에서부터 그리디하게 확정"하지 않고 전체를 한 번에 최적화하므로, 이르지만
+  // 고립된 신청 하나 때문에 뒤의 더 큰 무리를 놓치는 일이 없다.
+  function runChainDP(nodes, maxTravelsPerDay) {
+    if (maxTravelsPerDay === undefined) maxTravelsPerDay = MAX_TRAVELS_PER_DAY;
+    nodes = nodes.slice().sort((a, b) => a.end - b.end || a.startSlot - b.startSlot);
+    const n = nodes.length;
+    const dp = new Array(n), tc = new Array(n), tm = new Array(n), idle = new Array(n), js = new Array(n), prev = new Array(n);
+    // 인원(가중치 합) → 이동 횟수 → 이동 시간 → 빈 시간(이동에 실제로 필요한 시간을 넘어서는
+    // 여분의 간격) → 지터(무작위 값, buildDayNodes 참고) 순으로 비교한다. 세션 수·이동은
+    // 완전히 같은데 시작 시각만 다른 선택지들(예: 15:00 시작과 15:30 시작 둘 다 다음 세션에
+    // 문제없이 이어지는 경우) 사이에서는 빈 시간 기준이, 뒤에 남는 빈 시간을 최소화하는
+    // 시작 시각을 고르게 해준다. 지터는 평소엔 전부 0이라 아무 영향이 없고, 요일 전체
+    // 재섞기 다듬기 단계에서만 값을 채워 넣어 "동점이면 항상 시간순으로만 정해지던" 동점
+    // 처리를 매 시도마다 다르게 흔들어준다.
+    function better(dpA, tcA, tmA, idleA, jsA, dpB, tcB, tmB, idleB, jsB) {
+      if (dpA !== dpB) return dpA > dpB;
+      if (tcA !== tcB) return tcA < tcB;
+      if (tmA !== tmB) return tmA < tmB;
+      if (idleA !== idleB) return idleA < idleB;
+      return jsA < jsB;
+    }
+    for (let i = 0; i < n; i++) {
+      const node = nodes[i];
+      let bestDp = node.weight, bestTc = 0, bestTm = 0, bestIdle = 0, bestJs = node.jitter || 0, bestPrev = -1;
+      for (let j = 0; j < i; j++) {
+        const p = nodes[j];
+        if (p.memberId === node.memberId) continue; // 회원당 1일 최대 1회
+        const gapNeed = requiredGapMin2(p.locationId, node.locationId);
+        const gapActual = (node.startSlot - p.end) * SLOT_MIN;
+        if (gapActual < gapNeed) continue;
+        const addsTravel = travelMinutes(p.locationId, node.locationId) > 0 ? 1 : 0;
+        const newTc = tc[j] + addsTravel;
+        if (newTc > maxTravelsPerDay) continue;
+        const newDp = dp[j] + node.weight;
+        const newTm = tm[j] + travelMinutes(p.locationId, node.locationId);
+        const newIdle = idle[j] + (gapActual - gapNeed);
+        const newJs = js[j] + (node.jitter || 0);
+        if (better(newDp, newTc, newTm, newIdle, newJs, bestDp, bestTc, bestTm, bestIdle, bestJs)) {
+          bestDp = newDp; bestTc = newTc; bestTm = newTm; bestIdle = newIdle; bestJs = newJs; bestPrev = j;
+        }
+      }
+      dp[i] = bestDp; tc[i] = bestTc; tm[i] = bestTm; idle[i] = bestIdle; js[i] = bestJs; prev[i] = bestPrev;
+    }
+    let bestEnd = -1, bestDpAll = 0, bestTcAll = 0, bestTmAll = 0, bestIdleAll = 0, bestJsAll = 0;
+    for (let i = 0; i < n; i++) {
+      if (bestEnd === -1 || better(dp[i], tc[i], tm[i], idle[i], js[i], bestDpAll, bestTcAll, bestTmAll, bestIdleAll, bestJsAll)) {
+        bestDpAll = dp[i]; bestTcAll = tc[i]; bestTmAll = tm[i]; bestIdleAll = idle[i]; bestJsAll = js[i]; bestEnd = i;
+      }
+    }
+    const chain = [];
+    const used = new Set();
+    let cur = bestEnd;
+    while (cur !== -1 && cur !== undefined) {
+      const node = nodes[cur];
+      // 회원이 하루에 서로 겹치지 않는 신청을 두 번(예: 오전·저녁을 따로 등록) 낸 드문
+      // 경우를 위한 안전망 — 인접 검사만으로는 못 거르는 비인접 중복을 여기서 한 번 더 막는다.
+      if (!used.has(node.memberId)) {
+        chain.unshift(node);
+        used.add(node.memberId);
+      }
+      cur = prev[cur];
+    }
+    return chain;
+  }
+
+  // 1단계에서 요일을 어떤 순서로 처리하느냐에 따라 "누가 어느 요일에 먼저 자리를 잡는지"가
+  // 달라진다 — 예를 들어 두 요일 모두 가능한 회원을 앞 요일에 먼저 배정해버리면, 뒤 요일에
+  // 정작 그 시간대를 쓸 수 있는 사람이 그 회원뿐이었던 경우 그 자리가 그냥 비어버릴 수 있다.
+  // 하루 안에서는 DP로 항상 최선을 찾지만, "어느 요일부터 볼지"까지는 요일 수가 6개뿐이라도
+  // 모든 조합을 다 따질 수는 없으므로, 여러 그럴듯한 순서로 전체 파이프라인을 반복 실행해보고
+  // (미배정 → 수업 수 → 이동 횟수 → 이동 시간 순으로) 가장 좋은 결과를 채택한다.
+  // seedOffset: 다듬기 단계(특히 담금질 기법)가 쓰는 의사난수 시드를 통째로 밀어, 같은 요일
+  // 순서·같은 배치에서 시작해도 서로 다른 탐색 경로를 시도해볼 수 있게 한다(generateSchedule2Async의
+  // 다중 재시작용 — 담금질 기법은 무작위로 하나씩 옮겨보다가 가끔 일부러 나빠지는 이동도
+  // 받아들이며 헤매는 방식이라, 시드가 고정돼 있으면 매번 정확히 같은 경로만 훑어보고 만다.
+  // 사람이 손으로 짠 배치처럼 3명 이상이 요일을 넘나들며 동시에 자리를 맞바꿔야만 나오는
+  // 조합은, 그 경로를 우연히 밟은 시드로만 찾을 수 있다 — 그래서 여러 시드로 재시작해보는
+  // 것이 요일 순서를 여러 개 시도하는 것만큼이나 중요하다).
+  function runSchedule2Pipeline(eligibleReqs, reqsByDay, daysWithReqs, stage1DayOrder, runRepair, runPolish, polishBudgetMs, seedOffset) {
+    seedOffset = seedOffset || 0;
+    const assignedCountByMember = new Map();
+    const assignedDaysByMember = new Map();
+    const dayChains = new Map();
+    // 연쇄 교환(tryPlaceMember)은 최악의 경우 회원·신청이 아주 많고 서로 자리를 강하게
+    // 물고 있으면 재귀 시도가 크게 늘어날 수 있다. 요일 순서 후보를 가볍게 비교하는 탐색
+    // 단계(runPolish=false)에서는 다듬기 단계의 시간 예산(POLISH_DEADLINE)이 아예 적용되지
+    // 않으므로, 이 단계 자체에도 최소한의 시간 상한을 둬 한 후보 때문에 전체 탐색이 통째로
+    // 오래 걸리는 일을 막는다.
+    const REPAIR_DEADLINE = performance.now() + 3000;
+
+    // "그 요일의, 이 회원의 신청들"을 매번 배열 전체를 훑어(filter) 찾지 않도록 미리
+    // 회원별·요일별로 묶어둔다 — 회원·신청이 많을 때 복구/다듬기 단계들이 이걸 아주 여러 번
+    // 반복해서 찾으므로, 이 인덱스 하나로 전체 성능이 크게 갈린다.
+    const reqsByMemberDay = new Map(); // memberId -> (day -> requests[])
+    eligibleReqs.forEach(r => {
+      if (!reqsByMemberDay.has(r.memberId)) reqsByMemberDay.set(r.memberId, new Map());
+      const byDay = reqsByMemberDay.get(r.memberId);
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    function reqsFor(memberId, day) {
+      const byDay = reqsByMemberDay.get(memberId);
+      return (byDay && byDay.get(day)) || [];
+    }
+    function reqAt(memberId, day, startSlot) {
+      return reqsFor(memberId, day).find(r => r.startSlot === startSlot);
+    }
+
+    function isEligibleForDay(memberId, day) {
+      const cap = maxSessionsFor2(memberById(memberId));
+      if ((assignedCountByMember.get(memberId) || 0) >= cap) return false;
+      const days = assignedDaysByMember.get(memberId);
+      return !(days && days.has(day));
+    }
+    function commit(day, node) {
+      assignedCountByMember.set(node.memberId, (assignedCountByMember.get(node.memberId) || 0) + 1);
+      if (!assignedDaysByMember.has(node.memberId)) assignedDaysByMember.set(node.memberId, new Set());
+      assignedDaysByMember.get(node.memberId).add(day);
+    }
+    function uncommit(day, node) {
+      assignedCountByMember.set(node.memberId, assignedCountByMember.get(node.memberId) - 1);
+      assignedDaysByMember.get(node.memberId).delete(day);
+    }
+
+    // 그 요일에 아직 미배정인 회원들이 가장 많이 쓰는 지점(가장 많은 서로 다른 회원이 다닐
+    // 수 있는 지점)을 구한다 — 그 지점 후보에게 아주 작은 가중치 보너스를 줘서, 인원 수는
+    // 그대로 최대화하면서도 동점일 때는 요일 하나를 한 지점으로 크게 뭉치는 쪽을 우선하게
+    // 한다(수동으로 짠 스케줄에서 확인된 "요일마다 지점을 크게 하나로 묶는" 패턴 — 예를
+    // 들어 화요일 전원을 마포점으로만 채워 그날 이동을 0번으로 만드는 식 — 을 재현하기
+    // 위함). 보너스는 1보다 훨씬 작게 둬서 "인원 최대화"보다 항상 낮은 우선순위를 갖는다.
+    function dominantLocationFor(day) {
+      const membersByLoc = new Map();
+      reqsByDay.get(day).forEach(r => {
+        if ((assignedCountByMember.get(r.memberId) || 0) !== 0) return;
+        candidateLocationsForRequest(r).forEach(locId => {
+          if (!membersByLoc.has(locId)) membersByLoc.set(locId, new Set());
+          membersByLoc.get(locId).add(r.memberId);
+        });
+      });
+      let dominantLoc = null, dominantCount = -1;
+      membersByLoc.forEach((set, locId) => {
+        if (set.size > dominantCount) { dominantCount = set.size; dominantLoc = locId; }
+      });
+      return dominantLoc;
+    }
+
+    // 1단계: "미배정 회원 없음"이 최우선 목표이므로, 주어진 요일 순서대로 처리하며 그 시점까지
+    // 아직 한 번도 배정받지 못한 회원들만으로 그 요일의 최선 체인(DP)을 짠다.
+    stage1DayOrder.forEach(day => {
+      const dominantLoc = dominantLocationFor(day);
+      const nodes = buildDayNodes(reqsByDay.get(day), (memberId, startSlot, locationId) => {
+        if ((assignedCountByMember.get(memberId) || 0) !== 0) return 0;
+        return locationId === dominantLoc ? 1.02 : 1;
+      });
+      const chain = runChainDP(nodes);
+      chain.forEach(node => commit(day, node));
+      dayChains.set(day, chain);
+    });
+
+    // 2단계: 요일별로, 1단계에서 확정된 자리는 압도적으로 큰 가중치로 고정해 절대 빠지지
+    // 않게 한 채(그 회원의 다른 자리는 후보에서 제외), 그 주변을 포함해 하루 전체를 다시
+    // DP로 짜서 남은 자리를 최대한 채운다 — 코어 시간대든 어디든 상관없이, 확정된 체인을
+    // 깨지 않으면서 수업 수를 최대화하는 방향으로 자연스럽게 채워진다.
+    const PIN_WEIGHT = 1e6;
+    daysWithReqs.forEach(day => {
+      const existingChain = dayChains.get(day) || [];
+      existingChain.forEach(node => uncommit(day, node));
+      const pinnedKeys = new Set(existingChain.map(n => n.memberId + "|" + n.startSlot + "|" + n.locationId));
+      const pinnedMemberIds = new Set(existingChain.map(n => n.memberId));
+      const nodes = buildDayNodes(reqsByDay.get(day), (memberId, startSlot, locationId) => {
+        if (pinnedKeys.has(memberId + "|" + startSlot + "|" + locationId)) return PIN_WEIGHT;
+        if (pinnedMemberIds.has(memberId)) return 0; // 이미 확정된 회원은 그 자리 외에는 후보가 아니다
+        return isEligibleForDay(memberId, day) ? 1 : 0;
+      });
+      const chain = runChainDP(nodes);
+      chain.forEach(node => commit(day, node));
+      dayChains.set(day, chain);
+    });
+
+    // 3단계: 그래도 미배정으로 남은 회원이 있으면, 이미 확정된 세션은 그대로 둔 채 그 회원
+    // 한 명만이라도 넣을 수 있는 요일을 찾는다. 곧바로 빈 자리가 없으면, "정확히 한 명"과만
+    // 시간이 겹치는 자리를 찾아 그 한 명을 내보내고(교환) 재귀적으로 그 사람이 갈 다른 자리를
+    // 찾아준다(연쇄 교환/ejection chain) — 그 사람도 자리가 없으면 다시 "정확히 한 명"과
+    // 겹치는 자리를 찾아 한 단계 더 내보내보는 식으로 최대 MAX_EJECTION_DEPTH단계까지
+    // 시도한다. 하루 이동 최대 2회 제한은 "미배정 회원 없음"과 동등하게 반드시 지켜야 하는
+    // 조건이므로, 모든 단계에서 항상 그대로 지킨다 — 그 제한 안에서 자리가 없으면(연쇄
+    // 교환까지 다 시도해도) 최종 미배정으로 남는다.
+    const MAX_EJECTION_DEPTH = 3;
+    const submittedIds = new Set(state.requests.map(r => r.memberId));
+    function currentlyAssignedMemberIds() {
+      const ids = new Set();
+      dayChains.forEach(chain => chain.forEach(n => ids.add(n.memberId)));
+      return ids;
+    }
+
+    // 회원(memberId)을 excludeDays에 없는 요일 중에 배정한다. 성공하면 커밋까지 마치고
+    // true를, 실패하면 아무것도 바꾸지 않고 false를 돌려준다.
+    function tryPlaceMember(memberId, excludeDays, depth) {
+      if (depth > MAX_EJECTION_DEPTH) return false;
+      if (performance.now() > REPAIR_DEADLINE) return false;
+      // 이미 배정받은 다른 요일은 후보에서 뺀다 — 안 그러면 그 요일의 기존(자기 자신) 세션이
+      // 그대로 남아있는 것을 "새로 옮겨 넣는 데 성공"한 것으로 잘못 판단하게 된다.
+      const alreadyUsedDays = assignedDaysByMember.get(memberId) || new Set();
+      const candidateDays = daysWithReqs.filter(day =>
+        !excludeDays.has(day) && !alreadyUsedDays.has(day) && reqsByDay.get(day).some(r => r.memberId === memberId)
+      );
+      for (const day of candidateDays) {
+        const chain0 = dayChains.get(day) || [];
+        const dayReqsForMember = reqsFor(memberId, day);
+        const candNodes = buildDayNodes(dayReqsForMember, () => 1);
+
+        // 1) 아무도 안 건드리고 바로 끼워넣을 수 있는 자리가 있는지 먼저 가볍게 훑는다
+        //    (전체 DP를 다시 돌리지 않고, 그 요일 체인에 직접 삽입만 시도해본다 — 회원·
+        //    신청이 많을 때 이 단계를 DP로 하면 너무 느려진다).
+        for (const cand of candNodes) {
+          let insertAt = 0;
+          while (insertAt < chain0.length && chain0[insertAt].startSlot < cand.startSlot) insertAt++;
+          let feasible = true;
+          if (insertAt > 0) {
+            const prev = chain0[insertAt - 1];
+            const prevEnd = prev.startSlot + durationToSlots(prev.duration);
+            if (cand.startSlot < prevEnd || (cand.startSlot - prevEnd) * SLOT_MIN < requiredGapMin2(prev.locationId, cand.locationId)) feasible = false;
+          }
+          if (feasible && insertAt < chain0.length) {
+            const next = chain0[insertAt];
+            if (next.startSlot < cand.end || (next.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, next.locationId)) feasible = false;
+          }
+          if (!feasible) continue;
+          const newNode = { memberId, day, startSlot: cand.startSlot, duration: cand.duration, locationId: cand.locationId, end: cand.end };
+          const newChain = chain0.slice();
+          newChain.splice(insertAt, 0, newNode);
+          if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) continue; // 하루 이동 최대 2회 제한
+          commit(day, newNode);
+          dayChains.set(day, newChain);
+          return true;
+        }
+
+        // 2) 안 되면, 이 회원의 후보 중 "치워야 할 사람이 정확히 한 명"뿐인 자리를 찾아 그
+        //    한 명을 내보내고, 그 사람이 갈 다른 자리를 재귀적으로 찾아준다. "치워야 할 한
+        //    명"은 시간이 직접 겹치는 회원뿐 아니라, 안 겹쳐도 앞뒤 이동 간격이 부족해 못
+        //    들어가게 막는 이웃(신소영처럼 빈 시간은 있지만 그 앞뒤 이동 시간이 안 나오는
+        //    경우)도 포함한다.
+        for (const cand of candNodes) {
+          const chain = dayChains.get(day) || [];
+          const overlapping = new Set();
+          chain.forEach(n => {
+            const nEnd = n.startSlot + durationToSlots(n.duration);
+            if (cand.startSlot < nEnd && n.startSlot < cand.end) overlapping.add(n.memberId);
+          });
+          let otherMemberId = null;
+          if (overlapping.size === 1) {
+            otherMemberId = [...overlapping][0];
+          } else if (overlapping.size === 0) {
+            const sorted = chain.slice().sort((a, b) => a.startSlot - b.startSlot);
+            let idx = 0;
+            while (idx < sorted.length && sorted[idx].startSlot < cand.startSlot) idx++;
+            const prevN = idx > 0 ? sorted[idx - 1] : null;
+            const nextN = idx < sorted.length ? sorted[idx] : null;
+            const prevBad = prevN && ((cand.startSlot - (prevN.startSlot + durationToSlots(prevN.duration))) * SLOT_MIN
+              < requiredGapMin2(prevN.locationId, cand.locationId));
+            const nextBad = nextN && ((nextN.startSlot - cand.end) * SLOT_MIN
+              < requiredGapMin2(cand.locationId, nextN.locationId));
+            if (prevBad && nextBad && prevN.memberId !== nextN.memberId) continue; // 양쪽 다른 두 명이 동시에 막으면 손대지 않는다
+            if (prevBad) otherMemberId = prevN.memberId;
+            else if (nextBad) otherMemberId = nextN.memberId;
+            else continue; // 겹치지도, 간격이 막히지도 않는데 못 들어간다면(주간 cap 등) 건드릴 대상이 없다
+          } else {
+            continue; // 2명 이상과 직접 겹치면 다루지 않는다
+          }
+          const otherNode = chain.find(n => n.memberId === otherMemberId);
+
+          const remainingChain = chain.filter(n => n.memberId !== otherMemberId);
+          let insertAt = 0;
+          while (insertAt < remainingChain.length && remainingChain[insertAt].startSlot < cand.startSlot) insertAt++;
+          let feasible = true;
+          if (insertAt > 0) {
+            const prev = remainingChain[insertAt - 1];
+            const prevEnd = prev.startSlot + durationToSlots(prev.duration);
+            const gapMin = (cand.startSlot - prevEnd) * SLOT_MIN;
+            if (gapMin < requiredGapMin2(prev.locationId, cand.locationId)) feasible = false;
+          }
+          if (feasible && insertAt < remainingChain.length) {
+            const next = remainingChain[insertAt];
+            const gapMin = (next.startSlot - cand.end) * SLOT_MIN;
+            if (gapMin < requiredGapMin2(cand.locationId, next.locationId)) feasible = false;
+          }
+          if (!feasible) continue;
+
+          const newNode = { memberId, day, startSlot: cand.startSlot, duration: cand.duration, locationId: cand.locationId, end: cand.end };
+          const newChain = remainingChain.slice();
+          newChain.splice(insertAt, 0, newNode);
+          if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) continue; // 하루 이동 최대 2회 제한
+
+          uncommit(day, otherNode);
+          commit(day, newNode);
+          dayChains.set(day, newChain);
+
+          if (tryPlaceMember(otherMemberId, new Set([...excludeDays, day]), depth + 1)) {
+            return true;
+          }
+          // otherMemberId를 옮길 데가 없으면(사슬이 여기서 끊기면) 원래대로 되돌린다.
+          uncommit(day, newNode);
+          commit(day, otherNode);
+          dayChains.set(day, chain);
+        }
+      }
+      return false;
+    }
+
+    function stillUnassignedIds() {
+      return state.members
+        .filter(m => !state.excludedMemberIds2.includes(m.id) && submittedIds.has(m.id))
+        .map(m => m.id)
+        .filter(id => !currentlyAssignedMemberIds().has(id));
+    }
+
+    // 연쇄 교환(ejection chain)까지 포함한 복구는 계산량이 꽤 크므로, 여러 요일 순서를
+    // 가볍게 비교해볼 때는(runRepair=false) 건너뛰고, 가장 좋아 보이는 순서 하나를 고른
+    // 뒤에만(runRepair=true) 실제로 돌린다 — generateSchedule2Async 참고.
+    if (runRepair) {
+      stillUnassignedIds().forEach(memberId => {
+        if (currentlyAssignedMemberIds().has(memberId)) return; // 앞선 시도로 이미 해결됐을 수 있음
+        tryPlaceMember(memberId, new Set(), 0);
+      });
+
+      // 4단계: 연쇄 교환(자리를 하나씩 맞바꾸는 것)까지 시도해도 남는 회원이 있으면, 그
+      // 회원이 가능한 요일 하나를 통째로 다시 짠다 — 그날 기존 배치를 그대로 지키지 않고,
+      // 이 회원에게 압도적인 가중치를 주어 "이 회원을 포함해 그날 최대한 많은 인원이
+      // 들어가도록" 처음부터 다시 최적화한다. 자리 하나만 바꿔서는 못 찾는, 여러 명을
+      // 동시에 재배치해야 하는 경우(신소영 사례처럼 지점별로 다시 묶어야 자리가 나는 경우)를
+      // 찾을 수 있다. 다시 짠 결과가 전체적으로 더 나빠지면(미배정이 늘거나, 미배정 수는
+      // 같은데 수업 수가 줄면) 그대로 되돌린다.
+      const REBUILD_TARGET_WEIGHT = 1e6;
+      function tryRebuildDayFor(memberId, day) {
+        const beforeUnassigned = stillUnassignedIds().length;
+        const existingChain = dayChains.get(day) || [];
+        existingChain.forEach(node => uncommit(day, node));
+        const nodes = buildDayNodes(reqsByDay.get(day), (mId, startSlot, locationId) => {
+          if (mId === memberId) return REBUILD_TARGET_WEIGHT;
+          return isEligibleForDay(mId, day) ? 1 : 0;
+        });
+        const newChain = runChainDP(nodes); // 하루 이동 최대 2회 제한은 여기서도 그대로 지킨다
+        if (!newChain.some(n => n.memberId === memberId)) {
+          existingChain.forEach(node => commit(day, node)); // 이 회원을 못 넣으면 의미가 없으니 되돌린다
+          dayChains.set(day, existingChain);
+          return false;
+        }
+        newChain.forEach(node => commit(day, node));
+        dayChains.set(day, newChain);
+        const afterUnassigned = stillUnassignedIds().length;
+        if (afterUnassigned < beforeUnassigned || (afterUnassigned === beforeUnassigned && newChain.length >= existingChain.length)) {
+          return true; // 미배정이 줄었거나, 최소한 나빠지지 않았으면 채택
+        }
+        // 전체적으로 나빠졌으면 되돌린다.
+        newChain.forEach(node => uncommit(day, node));
+        existingChain.forEach(node => commit(day, node));
+        dayChains.set(day, existingChain);
+        return false;
+      }
+
+      stillUnassignedIds().forEach(memberId => {
+        if (performance.now() > REPAIR_DEADLINE) return;
+        if (currentlyAssignedMemberIds().has(memberId)) return;
+        const candidateDays = daysWithReqs.filter(day => reqsByDay.get(day).some(r => r.memberId === memberId));
+        for (const day of candidateDays) {
+          if (tryRebuildDayFor(memberId, day)) break;
+        }
+      });
+
+      // 4.5단계: 여기까지는 "아직 한 번도 못 받은 회원"만 챙겼다 — 이미 1회를 받았지만 정원
+      // (등록 회원 최대 2회)에는 못 미치는 회원에게 2번째 자리를 추가로 더 끼워넣을 수 있는지는
+      // 아직 시도한 적이 없다. 이걸 건너뛰면 실제로는 더 넣을 수 있는데도 수업 총 건수가
+      // 낮게 멈춰버린다. tryPlaceMember는 "이 회원이 아직 안 쓴 요일"에 넣어주는 함수라
+      // 미배정 회원뿐 아니라 이런 회원에게도 그대로 쓸 수 있다. 한 명을 추가하면 그 여파로
+      // 다른 회원에게도 새 틈이 생길 수 있으므로, 더 이상 아무도 늘지 않을 때까지 반복한다.
+      let addedExtra = true;
+      let extraPassCount = 0;
+      while (addedExtra && extraPassCount < 5) {
+        addedExtra = false;
+        extraPassCount++;
+        state.members
+          .filter(m => !state.excludedMemberIds2.includes(m.id))
+          .map(m => m.id)
+          .filter(id => {
+            const count = assignedCountByMember.get(id) || 0;
+            return count > 0 && count < maxSessionsFor2(memberById(id));
+          })
+          .forEach(memberId => {
+            if (tryPlaceMember(memberId, new Set(), 0)) addedExtra = true;
+          });
+      }
+    }
+
+    // 5단계(runPolish): 미배정을 없앤 뒤에도, 요일별로 이동 횟수를 더 줄일 수 있는지 마지막
+    // 으로 확인한다. 그 요일의 기존 배치는 고정하지 않고, 그 요일에 배정 가능한 모든 회원
+    //으로 처음부터 다시 최적화해본다 — DP가 "인원 → 이동 횟수 → 이동 시간 → 빈 시간" 순으로
+    // 항상 최선을 고르므로, 인원 수를 그대로 유지하면서 이동이 더 적은 배치를 찾으면 그걸로
+    // 바꾼다. 요일 순서 후보를 비교하는 탐색 중에는 끄고(runPolish=false), 이미 선택된 후보
+    // 하나에만 마지막으로 적용한다 — 매 후보마다 적용하면 이 단계가 후보 간 순위 자체를
+    // 흔들어(어떤 후보는 이 단계로 인원이 줄고 다른 후보는 안 줄고) 오히려 더 나은 후보를
+    // 놓칠 수 있기 때문이다. 미배정 회원 수뿐 아니라 전체 수업 수(모든 요일 합)가 줄어도
+    // 되돌린다 — 이 요일만 보면 안 줄었어도 전체적으로는 손해일 수 있어서다.
+    if (runPolish) {
+      // 요일·회원·신청이 아주 많으면 아래 다듬기 단계들(특히 요일 전체 재섞기, 언덕 오르기)이
+      // O(신청 수^2) 규모라 시간이 크게 늘어날 수 있다. 그래서 전체에 시간 예산을 두고,
+      // 예산을 넘기면 그 시점까지 찾은 가장 좋은 결과로 바로 마무리한다 — 데이터가 아무리
+      // 많아져도 생성 버튼이 무한정 느려지지 않게 하기 위함이다.
+      const polishStart = performance.now();
+      const polishBudget = polishBudgetMs || 8000;
+      const POLISH_DEADLINE = polishStart + polishBudget;
+      // 다듬기 예산을 단계별로 미리 나눠둔다 — 그러지 않으면 뒤 단계(요일 전체 재섞기)가
+      // 시도 횟수 상한(200번)에 못 미쳐도 남은 시간을 전부 써버려서, 그 뒤에 오는 담금질
+      // 기법·언덕 오르기 단계에 시간이 하나도 안 남을 수 있다.
+      const STAGE6_DEADLINE = polishStart + polishBudget * 0.25;
+      const STAGE65_DEADLINE = polishStart + polishBudget * 0.55;
+      const SA_DEADLINE = polishStart + polishBudget * 0.8;
+      daysWithReqs.forEach(day => {
+        const beforeUnassignedCount = stillUnassignedIds().length;
+        const beforeTotalSessions = Array.from(dayChains.values()).reduce((sum, c) => sum + c.length, 0);
+        const existingChain = dayChains.get(day) || [];
+        existingChain.forEach(node => uncommit(day, node));
+        const nodes = buildDayNodes(reqsByDay.get(day), (mId, startSlot, locationId) =>
+          isEligibleForDay(mId, day) ? 1 : 0
+        );
+        const newChain = runChainDP(nodes);
+        newChain.forEach(node => commit(day, node));
+        dayChains.set(day, newChain);
+        const afterTotalSessions = Array.from(dayChains.values()).reduce((sum, c) => sum + c.length, 0);
+        const worse = stillUnassignedIds().length > beforeUnassignedCount || afterTotalSessions < beforeTotalSessions;
+        if (worse) {
+          newChain.forEach(node => uncommit(day, node));
+          existingChain.forEach(node => commit(day, node));
+          dayChains.set(day, existingChain);
+        }
+      });
+      // 요일 하나만 다시 짜서는 "다른 요일로 회원을 옮기는" 재배치를 찾을 수 없다(그 요일에
+      // 없던 회원은애초에 후보에 안 잡히므로). 그래서 요일을 두 개씩 짝지어(전부 몇 안 되므로
+      // 모든 조합을 다 본다) 두 요일을 동시에 비운 뒤 순서를 양쪽 다(A먼저·B먼저) 시도해
+      // 다시 짜본다 — 이러면 한쪽 요일의 회원이 다른 쪽 요일로 넘어가는 재배치도 찾을 수
+      // 있다. 두 요일 이동 횟수 합이 실제로 줄어들 때만 채택하고, 미배정이 늘거나 두 요일의
+      // 수업 수 합이 줄면 항상 되돌린다.
+      // 지터 없이 두 순서(A먼저·B먼저)만 시도하면, 가중치가 완전히 동점인 두 후보(예: 두
+      // 회원 다 그 자리를 채울 수 있고 인원 수·거리도 그 요일만 보면 차이가 없는 경우) 중
+      // 어느 쪽을 넣을지는 항상 신청 배열 순서로만 결정론적으로 정해진다 — "이 요일엔 회원1,
+      // 저 요일엔 회원2"가 서로 바뀌어야 두 요일 합산 이동이 주는 경우(신혜진·김가현처럼
+      // 둘 다 월·금 모두 가능한데 어느 요일에 누가 들어가느냐로 이동 횟수가 갈리는 경우)를
+      // 이 결정론적 동점 처리로는 절대 못 찾는다. 그래서 순서 2가지 외에도 지터를 준 여러
+      // 조합을 추가로 시도해 동점을 다르게 풀어본다.
+      const stage6RandomFn = mulberry32(445566 + seedOffset);
+      stage6:
+      for (let i = 0; i < daysWithReqs.length && performance.now() < STAGE6_DEADLINE; i++) {
+        for (let j = i + 1; j < daysWithReqs.length; j++) {
+          if (performance.now() >= STAGE6_DEADLINE) break stage6;
+          const dayA = daysWithReqs[i], dayB = daysWithReqs[j];
+          const existingA = dayChains.get(dayA) || [];
+          const existingB = dayChains.get(dayB) || [];
+          const beforeUnassignedCount = stillUnassignedIds().length;
+          const beforeTotalSessions = Array.from(dayChains.values()).reduce((sum, c) => sum + c.length, 0);
+          const beforePairTravel = totalTravelCount(existingA) + totalTravelCount(existingB);
+
+          // 기존 배치는 여기서 딱 한 번만 커밋 해제한다 — attemptOrder를 여러 번 호출하면서
+          // 매번 이걸 다시 해제하면, 이미 해제된 회원을 또 해제하게 되어 배정 카운트가
+          // 음수로 내려간다("이미 그 요일에 배정됨" 기록이 사라져 같은 요일에 또 배정
+          // 가능하다고 잘못 판단하게 되는 심각한 버그였다 — 화/수요일에 같은 회원이 두 번
+          // 배정되던 문제의 원인).
+          existingA.forEach(node => uncommit(dayA, node));
+          existingB.forEach(node => uncommit(dayB, node));
+          dayChains.set(dayA, []);
+          dayChains.set(dayB, []);
+
+          // unassigned/totalSessions 계산은 dayChains를 직접 읽으므로(currentlyAssignedMemberIds
+          // 참고), 시도 중에는 dayChains도 후보 체인으로 잠깐 채워둬야 정확히 계산되고, 시도가
+          // 끝나면 커밋 해제와 함께 dayChains도 다시 비워 다음 시도가 항상 같은 빈 상태에서
+          // 시작하도록 한다.
+          function attemptOrder(firstDay, secondDay, jitterFn) {
+            const firstNodes = buildDayNodes(reqsByDay.get(firstDay), (mId) => isEligibleForDay(mId, firstDay) ? 1 : 0, jitterFn);
+            const firstChain = runChainDP(firstNodes);
+            firstChain.forEach(node => commit(firstDay, node));
+            dayChains.set(firstDay, firstChain);
+            const secondNodes = buildDayNodes(reqsByDay.get(secondDay), (mId) => isEligibleForDay(mId, secondDay) ? 1 : 0, jitterFn);
+            const secondChain = runChainDP(secondNodes);
+            secondChain.forEach(node => commit(secondDay, node));
+            dayChains.set(secondDay, secondChain);
+            const outcome = {
+              unassigned: stillUnassignedIds().length,
+              totalSessions: Array.from(dayChains.values()).reduce((sum, c) => sum + c.length, 0),
+              pairTravel: totalTravelCount(firstChain) + totalTravelCount(secondChain),
+              chainA: firstDay === dayA ? firstChain : secondChain,
+              chainB: firstDay === dayA ? secondChain : firstChain
+            };
+            firstChain.forEach(node => uncommit(firstDay, node));
+            secondChain.forEach(node => uncommit(secondDay, node));
+            dayChains.set(firstDay, []);
+            dayChains.set(secondDay, []);
+            return outcome;
+          }
+
+          const attempts = [attemptOrder(dayA, dayB, null), attemptOrder(dayB, dayA, null)];
+          for (let k = 0; k < 8 && performance.now() < STAGE6_DEADLINE; k++) {
+            attempts.push(attemptOrder(dayA, dayB, stage6RandomFn));
+            attempts.push(attemptOrder(dayB, dayA, stage6RandomFn));
+          }
+
+          let bestOption = null;
+          attempts.forEach(opt => {
+            if (opt.unassigned > beforeUnassignedCount) return;
+            if (opt.totalSessions < beforeTotalSessions) return;
+            if (opt.pairTravel >= beforePairTravel) return; // 개선되지 않으면 굳이 바꾸지 않는다
+            if (!bestOption || opt.pairTravel < bestOption.pairTravel) bestOption = opt;
+          });
+
+          if (bestOption) {
+            bestOption.chainA.forEach(node => commit(dayA, node));
+            bestOption.chainB.forEach(node => commit(dayB, node));
+            dayChains.set(dayA, bestOption.chainA);
+            dayChains.set(dayB, bestOption.chainB);
+          } else {
+            existingA.forEach(node => commit(dayA, node));
+            existingB.forEach(node => commit(dayB, node));
+            dayChains.set(dayA, existingA);
+            dayChains.set(dayB, existingB);
+          }
+        }
+      }
+
+      // 요일 하나·요일 둘을 다시 짜는 것만으로는 3개 이상의 요일이 얽힌 재배치(예: A의
+      // 회원이 B로, B의 회원이 C로 옮겨가야 전체가 좋아지는 경우)를 못 찾을 수 있다. 그래서
+      // 마지막으로, 이미 "미배정 없음·이 수업 수"가 가능하다는 걸 알고 있는 상태에서, 요일
+      // 전체를 통째로 여러 다른 순서로 다시 짜보며(무작위 셔플을 여러 번) 그 조건(미배정 수
+      // 이하·수업 수 이상)을 만족하면서 총 이동 횟수가 더 적은 배치를 찾으면 그걸로 바꾼다.
+      // (신청이 아주 많으면 한 번 다시 짜는 데도 시간이 걸리므로, 시도 횟수를 최대 80번으로
+      // 두되 시간 예산을 넘기면 그 전에 멈춘다.)
+      const baselineUnassigned = stillUnassignedIds().length;
+      const baselineSessions = Array.from(dayChains.values()).reduce((sum, c) => sum + c.length, 0);
+      const baselineTravel = Array.from(dayChains.values()).reduce((sum, c) => sum + totalTravelCount(c), 0);
+      let bestSnapshot = { unassigned: baselineUnassigned, sessions: baselineSessions, travel: baselineTravel, chains: new Map(dayChains) };
+
+      const polishRandomFn = mulberry32(778899 + seedOffset);
+      for (let attempt = 0; attempt < 200 && performance.now() < STAGE65_DEADLINE; attempt++) {
+        dayChains.forEach((chain, day) => chain.forEach(node => uncommit(day, node)));
+        shuffled(daysWithReqs, polishRandomFn).forEach(day => {
+          // 지터를 줘서, 매 시도마다 동점 처리가 달라지게 한다 — 요일 순서만 바꿔서는 항상
+          // 시간순으로만 동점이 풀려 "누가 2회를 받는지" 조합이 거의 안 바뀌는 문제가 있었다.
+          // 여기서도 지점 뭉치기 보너스를 함께 준다.
+          const dominantLoc = dominantLocationFor(day);
+          const nodes = buildDayNodes(reqsByDay.get(day), (mId, startSlot, locationId) => {
+            if (!isEligibleForDay(mId, day)) return 0;
+            return locationId === dominantLoc ? 1.02 : 1;
+          }, () => polishRandomFn());
+          const chain = runChainDP(nodes);
+          chain.forEach(node => commit(day, node));
+          dayChains.set(day, chain);
+        });
+        const attemptUnassigned = stillUnassignedIds().length;
+        const attemptSessions = Array.from(dayChains.values()).reduce((sum, c) => sum + c.length, 0);
+        const attemptTravel = Array.from(dayChains.values()).reduce((sum, c) => sum + totalTravelCount(c), 0);
+        if (attemptUnassigned <= bestSnapshot.unassigned && attemptSessions >= bestSnapshot.sessions && attemptTravel < bestSnapshot.travel) {
+          bestSnapshot = { unassigned: attemptUnassigned, sessions: attemptSessions, travel: attemptTravel, chains: new Map(dayChains) };
+        }
+      }
+
+      dayChains.forEach((chain, day) => chain.forEach(node => uncommit(day, node)));
+      bestSnapshot.chains.forEach((chain, day) => {
+        chain.forEach(node => commit(day, node));
+        dayChains.set(day, chain);
+      });
+
+      // 요일 단위로 다시 짜는 방식(1~6단계)은 결국 "그 요일에 이미 후보로 잡힌 사람들
+      // 중에서" 최선을 고르는 것이라, "이 회원의 세션을 아예 다른 요일로 옮기면 두 요일
+      // 모두 이동이 줄어드는" 재배치는 찾지 못할 수 있다. 그래서 이미 배정된 세션 하나하나를
+      // 골라 그 회원의 다른 가능한 (요일·시각·지점)으로 옮기거나 서로 다른 요일의 두 회원
+      // 자리를 맞바꾸는 헬퍼들을 아래에 정의해둔다 — 담금질 기법(7단계)과 마지막 순수
+      // 언덕 오르기(8단계)가 이 헬퍼들을 공유해서 쓴다.
+      // 한 요일 체인의 "진짜 빈 시간"(이동에 필요한 시간을 넘어서는 여분의 간격) 합. 이동
+      // 횟수가 같다면 이 값이 더 적은 쪽을 우선한다 — schedule2TotalIdleMinutes와 같은
+      // 계산이지만 하루치 체인 하나만 받는다(재배치·맞바꾸기가 매번 요일 하나·둘만 건드리므로).
+      function dayIdleMinutes(chain) {
+        const sorted = [...chain].sort((a, b) => a.startSlot - b.startSlot);
+        let idle = 0;
+        for (let i = 1; i < sorted.length; i++) {
+          const prev = sorted[i - 1], cur = sorted[i];
+          const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;
+          idle += Math.max(0, gapMin - requiredGapMin2(prev.locationId, cur.locationId));
+        }
+        return idle;
+      }
+      // (travelA, idleA)가 (travelB, idleB)보다 나은지 — 이동 횟수를 먼저 보고, 같으면 빈
+      // 시간이 더 적은 쪽을 우선한다.
+      function isTravelIdleBetter(travelA, idleA, travelB, idleB) {
+        if (travelA !== travelB) return travelA < travelB;
+        return idleA < idleB;
+      }
+
+      function tryRelocateSession(node) {
+        const memberId = node.memberId;
+        const currentDay = node.day;
+        const currentChainWithout = (dayChains.get(currentDay) || []).filter(n => n !== node);
+        const beforeCurrentDayTravel = totalTravelCount(dayChains.get(currentDay) || []);
+        const beforeCurrentDayIdle = dayIdleMinutes(dayChains.get(currentDay) || []);
+        const currentDayWithoutTravel = totalTravelCount(currentChainWithout); // 후보마다 매번 다시 구하지 않도록 한 번만 계산
+        const currentDayWithoutIdle = dayIdleMinutes(currentChainWithout);
+        let bestMove = null; // { sameDay, targetDay, newTargetChain, deltaTravel, deltaIdle }
+
+        daysWithReqs.forEach(day => {
+          if (day !== currentDay) {
+            // 이 회원이 그 요일에 이미 다른 세션을 갖고 있으면(있을 리 없지만 안전하게) 건너뛴다.
+            if ((dayChains.get(day) || []).some(n => n.memberId === memberId)) return;
+          }
+          const dayReqsForMember = reqsFor(memberId, day);
+          if (dayReqsForMember.length === 0) return;
+          const candNodes = buildDayNodes(dayReqsForMember, () => 1);
+          const baseChain = day === currentDay ? currentChainWithout : (dayChains.get(day) || []);
+          const beforeTargetDayTravel = day === currentDay ? 0 : totalTravelCount(baseChain); // 후보 훑기 전 한 번만
+          const beforeTargetDayIdle = day === currentDay ? 0 : dayIdleMinutes(baseChain);
+          candNodes.forEach(cand => {
+            if (day === currentDay && cand.startSlot === node.startSlot && cand.locationId === node.locationId) return; // 원래 자리
+            let insertAt = 0;
+            while (insertAt < baseChain.length && baseChain[insertAt].startSlot < cand.startSlot) insertAt++;
+            let feasible = true;
+            if (insertAt > 0) {
+              const prev = baseChain[insertAt - 1];
+              const prevEnd = prev.startSlot + durationToSlots(prev.duration);
+              if (cand.startSlot < prevEnd || (cand.startSlot - prevEnd) * SLOT_MIN < requiredGapMin2(prev.locationId, cand.locationId)) feasible = false;
+            }
+            if (feasible && insertAt < baseChain.length) {
+              const next = baseChain[insertAt];
+              if (next.startSlot < cand.end || (next.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, next.locationId)) feasible = false;
+            }
+            if (!feasible) return;
+            const newNode = { memberId, day, startSlot: cand.startSlot, duration: cand.duration, locationId: cand.locationId, end: cand.end };
+            const newChain = baseChain.slice();
+            newChain.splice(insertAt, 0, newNode);
+            if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) return;
+
+            let deltaTravel, deltaIdle;
+            if (day === currentDay) {
+              deltaTravel = totalTravelCount(newChain) - beforeCurrentDayTravel;
+              deltaIdle = dayIdleMinutes(newChain) - beforeCurrentDayIdle;
+            } else {
+              deltaTravel = (currentDayWithoutTravel + totalTravelCount(newChain)) - (beforeCurrentDayTravel + beforeTargetDayTravel);
+              deltaIdle = (currentDayWithoutIdle + dayIdleMinutes(newChain)) - (beforeCurrentDayIdle + beforeTargetDayIdle);
+            }
+            // 이동이 늘면 절대 받아들이지 않고, 이동이 그대로면 빈 시간이 줄 때만 받아들인다.
+            const improves = deltaTravel < 0 || (deltaTravel === 0 && deltaIdle < 0);
+            if (improves && (!bestMove || isTravelIdleBetter(deltaTravel, deltaIdle, bestMove.deltaTravel, bestMove.deltaIdle))) {
+              bestMove = { sameDay: day === currentDay, targetDay: day, newTargetChain: newChain, deltaTravel, deltaIdle };
+            }
+          });
+        });
+
+        if (!bestMove) return false;
+        uncommit(currentDay, node);
+        if (bestMove.sameDay) {
+          dayChains.set(currentDay, bestMove.newTargetChain);
+        } else {
+          dayChains.set(currentDay, currentChainWithout);
+          dayChains.set(bestMove.targetDay, bestMove.newTargetChain);
+        }
+        const addedNode = bestMove.newTargetChain.find(n => n.memberId === memberId);
+        commit(bestMove.targetDay, addedNode);
+        return true;
+      }
+
+      // 자리 하나를 옮기는 것만으로는 못 푸는 경우(두 회원이 서로 상대방의 자리를 원하는
+      // 경우)를 위해, 서로 다른 요일에 배정된 두 회원의 자리를 통째로 맞바꾸는 것도 시도한다
+      // — 각자 상대방의 (요일·시각)에 실제로 신청이 있고 그 지점도 다닐 수 있어야 하며,
+      // 맞바꾼 뒤 두 요일 각각의 간격·이동 제한을 모두 만족해야 한다.
+      function insertFeasible(chainWithout, cand) {
+        let insertAt = 0;
+        while (insertAt < chainWithout.length && chainWithout[insertAt].startSlot < cand.startSlot) insertAt++;
+        if (insertAt > 0) {
+          const prev = chainWithout[insertAt - 1];
+          const prevEnd = prev.startSlot + durationToSlots(prev.duration);
+          if (cand.startSlot < prevEnd || (cand.startSlot - prevEnd) * SLOT_MIN < requiredGapMin2(prev.locationId, cand.locationId)) return null;
+        }
+        if (insertAt < chainWithout.length) {
+          const next = chainWithout[insertAt];
+          if (next.startSlot < cand.end || (next.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, next.locationId)) return null;
+        }
+        const newChain = chainWithout.slice();
+        newChain.splice(insertAt, 0, cand);
+        if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) return null;
+        return newChain;
+      }
+
+      // "회원|요일|시작슬롯"가 실제 신청 목록에 있는지 매번 배열을 훑지 않고 바로 확인하기
+      // 위한 조회용 집합 — 맞바꾸기는 모든 세션 쌍을 다 검사하므로(O(세션 수^2)) 이 조회가
+      // 느리면 회원·신청이 많을 때 전체가 크게 느려진다.
+      const reqKeySet = new Set(eligibleReqs.map(r => r.memberId + "|" + r.day + "|" + r.startSlot));
+
+      function tryCrossDaySwap(node1, node2) {
+        if (node1.day === node2.day || node1.memberId === node2.memberId) return false;
+        const day1 = node1.day, day2 = node2.day, member1 = node1.memberId, member2 = node2.memberId;
+        if (!reqKeySet.has(member1 + "|" + day2 + "|" + node2.startSlot)) return false;
+        if (!reqKeySet.has(member2 + "|" + day1 + "|" + node1.startSlot)) return false;
+        if (!candidateLocationsForRequest(reqAt(member1, day2, node2.startSlot)).includes(node2.locationId)) return false;
+        if (!candidateLocationsForRequest(reqAt(member2, day1, node1.startSlot)).includes(node1.locationId)) return false;
+        // 회원당 1일 최대 1회 — 등록 회원은 원래 2회를 배정받으므로, member1이 day2에(그
+        // 자리를 넘겨줄 node2 말고) 이미 별도로 다른 세션을 갖고 있을 수 있다(반대도 마찬가지).
+        // 이 경우 자리를 바꾸면 그 요일에 같은 회원이 두 번 배정되므로 반드시 막아야 한다.
+        if ((dayChains.get(day2) || []).some(n => n.memberId === member1)) return false;
+        if ((dayChains.get(day1) || []).some(n => n.memberId === member2)) return false;
+
+        const dur1 = sessionDurationFor2(memberById(member1));
+        const dur2 = sessionDurationFor2(memberById(member2));
+        const newInDay2 = { memberId: member1, day: day2, startSlot: node2.startSlot, duration: dur1, locationId: node2.locationId, end: node2.startSlot + durationToSlots(dur1) };
+        const newInDay1 = { memberId: member2, day: day1, startSlot: node1.startSlot, duration: dur2, locationId: node1.locationId, end: node1.startSlot + durationToSlots(dur2) };
+
+        const chain1 = insertFeasible((dayChains.get(day1) || []).filter(n => n !== node1), newInDay1);
+        if (!chain1) return false;
+        const chain2 = insertFeasible((dayChains.get(day2) || []).filter(n => n !== node2), newInDay2);
+        if (!chain2) return false;
+
+        const beforeTravel = totalTravelCount(dayChains.get(day1) || []) + totalTravelCount(dayChains.get(day2) || []);
+        const afterTravel = totalTravelCount(chain1) + totalTravelCount(chain2);
+        const beforeIdle = dayIdleMinutes(dayChains.get(day1) || []) + dayIdleMinutes(dayChains.get(day2) || []);
+        const afterIdle = dayIdleMinutes(chain1) + dayIdleMinutes(chain2);
+        // 이동이 늘면 받아들이지 않고, 이동이 그대로면 빈 시간이 줄 때만 받아들인다.
+        if (afterTravel > beforeTravel) return false;
+        if (afterTravel === beforeTravel && afterIdle >= beforeIdle) return false;
+
+        uncommit(day1, node1);
+        uncommit(day2, node2);
+        commit(day1, newInDay1);
+        commit(day2, newInDay2);
+        dayChains.set(day1, chain1);
+        dayChains.set(day2, chain2);
+        return true;
+      }
+
+      // 7단계: 지금까지의 단계(1~6단계)는 전부 "그 이동만으로 당장 더 나빠지면 절대
+      // 받아들이지 않는" 방식이다. 그런데 사람이 손으로 짠 것처럼 "요일별로 지점을 뭉치는"
+      // 배치는, 가끔 특정 회원 한두 명을 일단 더 안 좋아 보이는 자리로 옮겨야만(즉 이동 횟수가
+      // 잠깐 늘어나야만) 그 다음에 전체가 훨씬 좋아지는 경로가 열리는 경우가 있다 — 언덕
+      // 오르기만으로는 이런 "일단 내려갔다 다시 올라가는" 경로를 절대 찾지 못하고 국소
+      // 최적점에 갇힌다. 이를 풀기 위해 담금질 기법(simulated annealing)을 쓴다: 무작위로
+      // 회원 한 명(의 세션 하나)을 골라 무작위로 다른 (요일·시각·지점)으로 옮겨보거나, 무작위
+      // 두 회원의 자리를 맞바꿔보고, 그 결과가 나빠지더라도 "온도"에 비례한 확률로 일단
+      // 받아들인다. 온도는 반복할수록 점점 낮아지므로(식힌다), 처음엔 넓게 헤매다가 점점
+      // 개선만 받아들이는 언덕 오르기에 가까워진다. 지금까지 본 것 중 가장 좋은(이동 적음 →
+      // 빈 시간 적음) 배치는 별도로 기억해뒀다가 끝나면 그걸로 되돌린다. 세션을 추가·삭제하지
+      // 않고 이미 배정된 세션의 자리만 바꾸므로, 미배정 수·전체 수업 수는 이 단계 내내
+      // 절대 바뀌지 않는다(0순위·2순위 목표는 항상 그대로 유지됨).
+      {
+        function saTotalTravel() {
+          let sum = 0;
+          dayChains.forEach(chain => { sum += totalTravelCount(chain); });
+          return sum;
+        }
+        function saTotalIdle() {
+          let sum = 0;
+          dayChains.forEach(chain => { sum += dayIdleMinutes(chain); });
+          return sum;
+        }
+        // 이동 1번의 "무게"를 빈 시간 240분(4시간)과 같게 쳐서 비용을 하나의 숫자로 합친다 —
+        // 이동이 훨씬 더 중요하지만, 너무 크게 잡으면 온도 스케일과 안 맞아 이동이 늘어나는
+        // 이동은 사실상 전부 거부돼버려 담금질의 의미(가끔 나빠지는 이동도 받아들이기)가
+        // 없어진다.
+        const SA_TRAVEL_WEIGHT = 240;
+
+        function pickRandomNode(randomFn) {
+          const all = Array.from(dayChains.values()).flat();
+          if (all.length === 0) return null;
+          return all[Math.floor(randomFn() * all.length)];
+        }
+
+        function saProposeRelocate(randomFn) {
+          const node = pickRandomNode(randomFn);
+          if (!node) return null;
+          const memberId = node.memberId, currentDay = node.day;
+          const currentChainWithout = (dayChains.get(currentDay) || []).filter(n => n !== node);
+
+          const options = [];
+          daysWithReqs.forEach(day => {
+            if (day !== currentDay && (dayChains.get(day) || []).some(n => n.memberId === memberId)) return;
+            reqsFor(memberId, day).forEach(r => options.push({ day, startSlot: r.startSlot, req: r }));
+          });
+          if (options.length === 0) return null;
+          const picked = options[Math.floor(randomFn() * options.length)];
+          const locOptions = candidateLocationsForRequest(picked.req);
+          if (locOptions.length === 0) return null;
+          const locationId = locOptions[Math.floor(randomFn() * locOptions.length)];
+          if (picked.day === currentDay && picked.startSlot === node.startSlot && locationId === node.locationId) return null;
+
+          const duration = sessionDurationFor2(memberById(memberId));
+          const cand = { memberId, day: picked.day, startSlot: picked.startSlot, duration, locationId, end: picked.startSlot + durationToSlots(duration) };
+          const baseChain = picked.day === currentDay ? currentChainWithout : (dayChains.get(picked.day) || []);
+          const newChain = insertFeasible(baseChain, cand);
+          if (!newChain) return null;
+
+          let deltaTravel, deltaIdle;
+          if (picked.day === currentDay) {
+            deltaTravel = totalTravelCount(newChain) - totalTravelCount(dayChains.get(currentDay) || []);
+            deltaIdle = dayIdleMinutes(newChain) - dayIdleMinutes(dayChains.get(currentDay) || []);
+          } else {
+            const beforeCur = dayChains.get(currentDay) || [];
+            const beforeTgt = dayChains.get(picked.day) || [];
+            deltaTravel = (totalTravelCount(currentChainWithout) + totalTravelCount(newChain)) - (totalTravelCount(beforeCur) + totalTravelCount(beforeTgt));
+            deltaIdle = (dayIdleMinutes(currentChainWithout) + dayIdleMinutes(newChain)) - (dayIdleMinutes(beforeCur) + dayIdleMinutes(beforeTgt));
+          }
+          const cost = deltaTravel * SA_TRAVEL_WEIGHT + deltaIdle;
+
+          return {
+            cost,
+            apply: () => {
+              uncommit(currentDay, node);
+              if (picked.day === currentDay) {
+                dayChains.set(currentDay, newChain);
+              } else {
+                dayChains.set(currentDay, currentChainWithout);
+                dayChains.set(picked.day, newChain);
+              }
+              const addedNode = newChain.find(n => n.memberId === memberId && n.startSlot === picked.startSlot && n.locationId === locationId);
+              commit(picked.day, addedNode);
+            }
+          };
+        }
+
+        function saProposeSwap(randomFn) {
+          const n1 = pickRandomNode(randomFn);
+          const n2 = pickRandomNode(randomFn);
+          if (!n1 || !n2 || n1 === n2 || n1.day === n2.day || n1.memberId === n2.memberId) return null;
+          const day1 = n1.day, day2 = n2.day, member1 = n1.memberId, member2 = n2.memberId;
+          if (!reqKeySet.has(member1 + "|" + day2 + "|" + n2.startSlot)) return null;
+          if (!reqKeySet.has(member2 + "|" + day1 + "|" + n1.startSlot)) return null;
+          if (!candidateLocationsForRequest(reqAt(member1, day2, n2.startSlot)).includes(n2.locationId)) return null;
+          if (!candidateLocationsForRequest(reqAt(member2, day1, n1.startSlot)).includes(n1.locationId)) return null;
+          // 회원당 1일 최대 1회 — member1이 day2에 이미 다른 세션을 갖고 있거나(반대도
+          // 마찬가지) 놓치면, 자리를 바꾼 뒤 그 요일에 같은 회원이 두 번 배정될 수 있다.
+          if ((dayChains.get(day2) || []).some(n => n.memberId === member1)) return null;
+          if ((dayChains.get(day1) || []).some(n => n.memberId === member2)) return null;
+
+          const dur1 = sessionDurationFor2(memberById(member1));
+          const dur2 = sessionDurationFor2(memberById(member2));
+          const newInDay2 = { memberId: member1, day: day2, startSlot: n2.startSlot, duration: dur1, locationId: n2.locationId, end: n2.startSlot + durationToSlots(dur1) };
+          const newInDay1 = { memberId: member2, day: day1, startSlot: n1.startSlot, duration: dur2, locationId: n1.locationId, end: n1.startSlot + durationToSlots(dur2) };
+
+          const chain1 = insertFeasible((dayChains.get(day1) || []).filter(n => n !== n1), newInDay1);
+          if (!chain1) return null;
+          const chain2 = insertFeasible((dayChains.get(day2) || []).filter(n => n !== n2), newInDay2);
+          if (!chain2) return null;
+
+          const beforeTravel = totalTravelCount(dayChains.get(day1) || []) + totalTravelCount(dayChains.get(day2) || []);
+          const afterTravel = totalTravelCount(chain1) + totalTravelCount(chain2);
+          const beforeIdle = dayIdleMinutes(dayChains.get(day1) || []) + dayIdleMinutes(dayChains.get(day2) || []);
+          const afterIdle = dayIdleMinutes(chain1) + dayIdleMinutes(chain2);
+          const cost = (afterTravel - beforeTravel) * SA_TRAVEL_WEIGHT + (afterIdle - beforeIdle);
+
+          return {
+            cost,
+            apply: () => {
+              uncommit(day1, n1);
+              uncommit(day2, n2);
+              commit(day1, newInDay1);
+              commit(day2, newInDay2);
+              dayChains.set(day1, chain1);
+              dayChains.set(day2, chain2);
+            }
+          };
+        }
+
+        const saRandomFn = mulberry32(552233 + seedOffset);
+        let temperature = 200;
+        const COOLING_RATE = 0.999;
+        let bestSnapshotSA = new Map(dayChains);
+        let bestTravelSA = saTotalTravel();
+        let bestIdleSA = saTotalIdle();
+        let iter = 0;
+        while (performance.now() < SA_DEADLINE) {
+          iter++;
+          const proposal = saRandomFn() < 0.35 ? saProposeSwap(saRandomFn) : saProposeRelocate(saRandomFn);
+          if (proposal) {
+            const accept = proposal.cost <= 0 || saRandomFn() < Math.exp(-proposal.cost / temperature);
+            if (accept) {
+              proposal.apply();
+              const curTravel = saTotalTravel();
+              const curIdle = saTotalIdle();
+              if (curTravel < bestTravelSA || (curTravel === bestTravelSA && curIdle < bestIdleSA)) {
+                bestTravelSA = curTravel;
+                bestIdleSA = curIdle;
+                bestSnapshotSA = new Map(dayChains);
+              }
+            }
+          }
+          temperature = Math.max(1, temperature * COOLING_RATE);
+        }
+        dayChains.forEach((chain, day) => chain.forEach(node => uncommit(day, node)));
+        bestSnapshotSA.forEach((chain, day) => {
+          chain.forEach(node => commit(day, node));
+          dayChains.set(day, chain);
+        });
+      }
+
+      // 8단계: 담금질 기법이 넓게 찾아둔 배치를, 마지막으로 다시 한번 순수 언덕 오르기(항상
+      // 개선만 받아들임)로 다듬어 조금이라도 남은 개선을 마저 챙긴다.
+      const relocateRandomFn = mulberry32(334455 + seedOffset);
+      let improvedInPass = true;
+      let passCount = 0;
+      while (improvedInPass && passCount < 30 && performance.now() < POLISH_DEADLINE) {
+        improvedInPass = false;
+        passCount++;
+        const flatNodes = shuffled(Array.from(dayChains.values()).flat(), relocateRandomFn);
+        flatNodes.forEach(node => {
+          if (performance.now() >= POLISH_DEADLINE) return;
+          // dayChains가 이전 이동으로 바뀌었을 수 있으니, 이 노드가 여전히 배정되어 있는지 확인한다.
+          const stillThere = (dayChains.get(node.day) || []).includes(node);
+          if (!stillThere) return;
+          if (tryRelocateSession(node)) improvedInPass = true;
+        });
+        if (performance.now() >= POLISH_DEADLINE) break;
+        // 맞바꾸기: 모든 (서로 다른 요일의) 세션 쌍을 무작위 순서로 훑으며 시도한다.
+        const flatNodes2 = shuffled(Array.from(dayChains.values()).flat(), relocateRandomFn);
+        outer:
+        for (let i = 0; i < flatNodes2.length; i++) {
+          for (let k = i + 1; k < flatNodes2.length; k++) {
+            if (performance.now() >= POLISH_DEADLINE) break outer;
+            const n1 = flatNodes2[i], n2 = flatNodes2[k];
+            const n1There = (dayChains.get(n1.day) || []).includes(n1);
+            const n2There = (dayChains.get(n2.day) || []).includes(n2);
+            if (!n1There || !n2There) continue;
+            if (tryCrossDaySwap(n1, n2)) improvedInPass = true;
+          }
+        }
+      }
+
+      // 9단계: 지금까지의 담금질·언덕 오르기는 "자리를 완전히 다른 (요일·시각·지점)으로
+      // 옮기는" 이동만 다뤘다 — 같은 지점 안에서 시작 시각만 당기면 없앨 수 있는 사소한
+      // 빈 시간(예: 상암점 세션 두 개가 붙을 수 있는데 뒤 세션이 굳이 20분 늦게 시작하는
+      // 경우)은 그 자체로는 "다른 자리로 옮기기" 후보가 아니어서 놓칠 수 있다. 그래서
+      // 마지막으로 각 요일 체인을 이른 시각 쪽으로 눌러 붙인다 — 순서·지점은 그대로 두고
+      // 각 세션의 시작 시각만, 그 회원이 실제로 그 시각에도 신청이 있었다는 전제 하에
+      // 앞으로 당길 수 있는 만큼 당긴다. 지점 순서가 안 바뀌므로 이동 횟수는 절대 안
+      // 바뀌고, 빈 시간만 줄어들거나 그대로다.
+      daysWithReqs.forEach(day => {
+        const chain = (dayChains.get(day) || []).slice().sort((a, b) => a.startSlot - b.startSlot);
+        for (let idx = 1; idx < chain.length; idx++) {
+          const prev = chain[idx - 1];
+          const node = chain[idx];
+          const minStart = prev.startSlot + durationToSlots(prev.duration) + durationToSlots(requiredGapMin2(prev.locationId, node.locationId));
+          if (node.startSlot <= minStart) continue;
+          const earlierReqs = reqsFor(node.memberId, day).filter(r => r.startSlot >= minStart && r.startSlot < node.startSlot);
+          if (earlierReqs.length === 0) continue;
+          const earliestSlot = Math.min(...earlierReqs.map(r => r.startSlot));
+          node.startSlot = earliestSlot;
+          node.end = earliestSlot + durationToSlots(node.duration);
+        }
+        dayChains.set(day, chain);
+      });
+    }
+
+    const assigned = [];
+    dayChains.forEach(chain => assigned.push(...chain));
+    // 가능 시간(신청)을 아예 제출하지 않은 회원은 배정 대상이 아니었으므로 "미배정"에 넣지
+    // 않는다 — 신청은 했지만 자리를 못 받은 회원만 미배정으로 표시한다.
+    const eligibleMemberIds = state.members
+      .filter(m => !state.excludedMemberIds2.includes(m.id) && submittedIds.has(m.id))
+      .map(m => m.id);
+    const assignedMemberIds = new Set(assigned.map(r => r.memberId));
+    const unassignedMembers = eligibleMemberIds
+      .filter(id => !assignedMemberIds.has(id))
+      .map(memberById)
+      .filter(Boolean);
+
+    return { assigned, unassignedMembers };
+  }
+
+  // 시드가 있는 간단한 의사난수 생성기 — 매번 다른 배열 셔플을 만들되, 필요하면 재현 가능하게.
+  function mulberry32(seed) {
+    return function () {
+      seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function shuffled(arr, randomFn) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(randomFn() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  // result가 better보다 더 나은 결과인지 비교한다: 미배정 회원 수(적을수록) → 수업 수(많을수록)
+  // → 이동 횟수(적을수록) → 총 이동 시간(적을수록) 순.
+  function isSchedule2ResultBetter(a, b) {
+    if (a.unassignedMembers.length !== b.unassignedMembers.length) {
+      return a.unassignedMembers.length < b.unassignedMembers.length;
+    }
+    if (a.assigned.length !== b.assigned.length) return a.assigned.length > b.assigned.length;
+    const travelCountA = totalTravelCount(a.assigned), travelCountB = totalTravelCount(b.assigned);
+    if (travelCountA !== travelCountB) return travelCountA < travelCountB;
+    const travelMinA = totalTravelMinutes(a.assigned), travelMinB = totalTravelMinutes(b.assigned);
+    if (travelMinA !== travelMinB) return travelMinA < travelMinB;
+    return schedule2TotalIdleMinutes(a.assigned) < schedule2TotalIdleMinutes(b.assigned);
+  }
+
+  // 다듬기(5~9단계, 특히 담금질 기법)는 "미배정 수·수업 수는 그대로 둔 채 이동·빈 시간만
+  // 줄이는" 국소 탐색이라, 다듬은 뒤 결과가 실제로 얼마나 좋아지는지는 다듬기 전 배치의
+  // 구조(누가 어느 요일에 배정됐는지)에 따라 달라진다 — 다듬기 전 지표(미배정·수업 수·이동
+  // 횟수)가 완전히 같은 두 요일 순서라도, 한쪽만 다듬으면 이동이 더 줄어드는 경우가 있다
+  // (실제로 수동으로 짠 스케줄이 이 지표까지는 같은데 이동을 1번 더 줄인 사례로 확인됨).
+  // 그래서 다듬기 전 지표가 가장 좋은 순서 "하나"만 고르지 않고, 그 순서와 완전히 동점인
+  // 다른 요일 순서도 함께 모아 각각 다듬어본 뒤, 실제로 다듬은 결과끼리 비교해 가장 좋은
+  // 것을 택한다. 동점이 아주 많을 수 있으므로(무작위 순서 400개 중 다수가 같은 지표에
+  // 도달하는 경우가 흔하다), 서로 다른 배치(신청 서명이 다른 것)만 최대 개수까지만 추려
+  // 다듬는다 — 그래야 다듬기 시간 예산이 후보 수만큼 무한정 쪼개지지 않는다.
+  function schedule2CoarseKey(result) {
+    return result.unassignedMembers.length + "|" + result.assigned.length + "|" + totalTravelCount(result.assigned);
+  }
+  function schedule2Signature(result) {
+    return result.assigned.map(r => r.memberId + "|" + r.day + "|" + r.startSlot + "|" + r.locationId).sort().join(",");
+  }
+  const MAX_POLISH_CANDIDATES = 3; // 다듬기 전 동점인 요일 순서 중 최대 이만큼만 서로 다른 시작점으로 쓴다
+  // 담금질 기법은 시드가 다르면 완전히 다른 경로를 헤매므로, 재시작 횟수 자체가 "3명 이상이
+  // 요일을 넘나들며 동시에 자리를 맞바꿔야만 나오는 조합"을 찾을 확률을 좌우한다. 기존
+  // 4회·24초는 이런 조합을 우연히 밟기엔 다소 부족해 보여, 재시작·예산을 늘렸다(각 시도
+  // 자체의 로직은 그대로 두고 "몇 번 더 시도해보는가"만 늘린 것이라 회귀 위험이 낮다).
+  const MAX_POLISH_ATTEMPTS = 20; // 요일 순서(위)와 담금질 시드 재시작을 합쳐 최대 이만큼만 다듬어본다
+  const TOTAL_POLISH_BUDGET_MS = 120000;
+  const MIN_POLISH_BUDGET_MS = 6000; // 시도가 여럿이어도 담금질이 의미 있으려면 한 시도당 최소한 이 정도는 필요하다
+
+  // 여러 요일 순서를 다 시도해보는 동안(특히 회원·신청이 많으면 한 조합에도 시간이 좀
+  // 걸릴 수 있어) 화면이 멈춘 것처럼 보이지 않도록, onProgress가 있으면 조합 하나를 끝낼
+  // 때마다 진행률을 알리고 화면을 다시 그릴 틈(yieldToUI)을 준다.
+  async function generateSchedule2Async(onProgress) {
+    const eligibleReqs = state.requests.filter(isEligibleRequest2);
+    const reqsByDay = new Map();
+    DAYS.forEach((_, d) => reqsByDay.set(d, []));
+    eligibleReqs.forEach(r => reqsByDay.get(r.day).push(r));
+    const daysWithReqs = Array.from(reqsByDay.keys()).filter(d => reqsByDay.get(d).length > 0);
+
+    const memberCountOf = day => new Set(reqsByDay.get(day).map(r => r.memberId)).size;
+    const leastFirst = daysWithReqs.slice().sort((a, b) => memberCountOf(a) - memberCountOf(b));
+    const mostFirst = daysWithReqs.slice().sort((a, b) => memberCountOf(b) - memberCountOf(a));
+    const ascending = daysWithReqs.slice().sort((a, b) => a - b);
+    const descending = daysWithReqs.slice().sort((a, b) => b - a);
+    const dayOrdersToTry = [leastFirst, mostFirst, ascending, descending];
+    const randomFn = mulberry32(20260823);
+    for (let i = 0; i < 400; i++) dayOrdersToTry.push(shuffled(daysWithReqs, randomFn));
+
+    // 회원·신청이 아주 많으면 요일 순서 후보 하나를 시도하는 데도 시간이 걸리므로(복구
+    // 단계 포함), 전체 탐색에 시간 예산을 둔다 — 예산을 넘기면 그때까지 찾은 가장 좋은
+    // 순서로 넘어간다. 평가한 결과는 전부 기억해둔다 — 다듬기 전 동점 후보를 나중에
+    // 다시 골라내야 하므로(아래 참고).
+    const SEARCH_DEADLINE = performance.now() + 12000;
+    let best = null, bestOrder = null;
+    const evaluated = [];
+    for (let i = 0; i < dayOrdersToTry.length; i++) {
+      const result = runSchedule2Pipeline(eligibleReqs, reqsByDay, daysWithReqs, dayOrdersToTry[i], true, false);
+      evaluated.push({ order: dayOrdersToTry[i], result });
+      if (!best || isSchedule2ResultBetter(result, best)) {
+        best = result;
+        bestOrder = dayOrdersToTry[i];
+      }
+      if (onProgress) {
+        onProgress((i + 1) / (dayOrdersToTry.length + 1) * 0.55);
+        await yieldToUI();
+      }
+      if (performance.now() >= SEARCH_DEADLINE) break;
+    }
+    if (!bestOrder) return { assigned: [], unassignedMembers: [] };
+
+    // 다듬기 전 지표(미배정·수업 수·이동 횟수)가 최선과 완전히 같은 다른 요일 순서를 모은다
+    // (서로 다른 배치만, 최대 MAX_POLISH_CANDIDATES개까지) — 다듬기(특히 담금질 기법)가
+    // 실제로 얼마나 이동을 더 줄이는지는 순서마다 다를 수 있어서다.
+    const bestKey = schedule2CoarseKey(best);
+    const seenSignatures = new Set();
+    const polishCandidates = [];
+    for (const { order, result } of evaluated) {
+      if (schedule2CoarseKey(result) !== bestKey) continue;
+      const sig = schedule2Signature(result);
+      if (seenSignatures.has(sig)) continue;
+      seenSignatures.add(sig);
+      polishCandidates.push(order);
+      if (polishCandidates.length >= MAX_POLISH_CANDIDATES) break;
+    }
+    if (polishCandidates.length === 0) polishCandidates.push(bestOrder);
+
+    // 요일 순서 후보만으로는 부족하다 — 담금질 기법은 시드가 고정돼 있으면 매번 정확히 같은
+    // 무작위 경로만 훑어보므로, 사람이 손으로 짠 배치처럼 3명 이상이 요일을 넘나들며 동시에
+    // 자리를 맞바꿔야만 나오는 조합은 그 경로를 우연히 밟지 못하면 몇 번을 다시 생성해도
+    // 계속 같은 결과에 머문다(실제로 이 문제로 확인됨). 그래서 각 요일 순서 후보를 서로 다른
+    // 시드로 여러 번 재시작해서 다듬어본다 — 먼저 후보마다 한 번씩(seedOffset 0)을 채우고,
+    // 그러고도 MAX_POLISH_ATTEMPTS에 못 미치면 후보를 돌아가며 시드를 바꿔 재시작을 추가한다.
+    const attempts = [];
+    for (let round = 0; attempts.length < MAX_POLISH_ATTEMPTS; round++) {
+      for (const order of polishCandidates) {
+        attempts.push({ order, seedOffset: round * 97711 });
+        if (attempts.length >= MAX_POLISH_ATTEMPTS) break;
+      }
+    }
+
+    // 시도 개수만큼 다듬기 시간 예산을 나누되(최소 예산은 보장), 각 시도를 다듬은 뒤
+    // 서로 비교해 실제로 가장 좋은 결과를 택한다.
+    const perAttemptBudget = Math.max(MIN_POLISH_BUDGET_MS, Math.floor(TOTAL_POLISH_BUDGET_MS / attempts.length));
+    let polished = null;
+    for (let i = 0; i < attempts.length; i++) {
+      const attempt = runSchedule2Pipeline(
+        eligibleReqs, reqsByDay, daysWithReqs, attempts[i].order, true, true, perAttemptBudget, attempts[i].seedOffset);
+      if (!polished || isSchedule2ResultBetter(attempt, polished)) polished = attempt;
+      if (onProgress) {
+        onProgress(0.55 + (i + 1) / attempts.length * 0.45);
+        await yieldToUI();
+      }
+    }
+    return polished;
+  }
+
+  function schedule2ToBlocks(assigned) {
+    const confirmedIds = new Set((schedule2Result && schedule2Result.confirmedIds) || []);
+    return assigned.map(r => {
+      const m = memberById(r.memberId);
+      const loc = locationById(r.locationId);
+      const label = m ? m.name + ((m.category || "상담") === "상담" ? " (상담)" : "") : "?";
+      const isConfirmed = confirmedIds.has(r.id);
+      return {
+        day: r.day,
+        startSlot: r.startSlot,
+        duration: r.duration,
+        label,
+        loc: loc ? loc.name : "",
+        sublabel: slotLabel(r.startSlot) + "~" + endLabel(r.startSlot, r.duration),
+        color: m ? memberColor(m.id) : BLOCK_COLOR,
+        confirmed: isConfirmed,
+        onClick: isConfirmed
+          ? () => unconfirmSchedule2Session(r.id)
+          : () => confirmSchedule2Session(r.id)
+      };
+    });
+  }
+
+  // "수업 스케줄 생성1" 후보 카드의 확정/확정취소와 동일한 동작을, 후보가 하나뿐인
+  // 스케줄 생성2 결과(schedule2Result)에 대해 제공한다.
+  function confirmSchedule2Session(reqId) {
+    if (!confirm("스케줄을 확정하시겠습니까?")) return;
+    if (!Array.isArray(schedule2Result.confirmedIds)) schedule2Result.confirmedIds = [];
+    if (!schedule2Result.confirmedIds.includes(reqId)) schedule2Result.confirmedIds.push(reqId);
+    saveState();
+    renderSchedule2Result();
+    showToast("스케줄이 확정되었습니다", "success");
+  }
+
+  function unconfirmSchedule2Session(reqId) {
+    if (!confirm("확정된 스케줄을 취소하시겠습니까?")) return;
+    schedule2Result.confirmedIds = (schedule2Result.confirmedIds || []).filter(id => id !== reqId);
+    saveState();
+    renderSchedule2Result();
+    showToast("스케줄 확정이 취소되었습니다", "info");
+  }
+
+  // 같은 요일 안에서 연속된 두 세션 사이, 지점이 달라 실제로 이동이 필요한 구간만 표시한다
+  // (쉬는 시간 없음이 규칙이므로 같은 지점이면 표시할 것이 없다).
+  function schedule2ToTravelBlocks(assigned) {
+    const byDay = new Map();
+    assigned.forEach(r => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    const travelBlocks = [];
+    byDay.forEach(reqs => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1], cur = sorted[i];
+        const startSlot = prev.startSlot + durationToSlots(prev.duration);
+        const mins = travelMinutes(prev.locationId, cur.locationId);
+        if (mins > 0) {
+          travelBlocks.push({ day: prev.day, startSlot, duration: mins, label: "이동 " + mins + "분", type: "travel" });
+        }
+      }
+    });
+    return travelBlocks;
+  }
+
+  // 같은 요일 안에서 연속된 두 세션 사이, 이동 블록이 차지하는 구간을 뺀 나머지
+  // "진짜 빈 시간"을 회색 배경의 공강 블록으로 그리드에 표시하기 위한 좌표를 만든다.
+  // (이동 블록과 겹치거나 빈틈이 생기지 않도록, 이동 블록 렌더링과 동일한 반올림을 쓴다.)
+  function schedule2ToIdleBlocks(assigned) {
+    const byDay = new Map();
+    assigned.forEach(r => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    const idleBlocks = [];
+    byDay.forEach(reqs => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1], cur = sorted[i];
+        const travelSlots = Math.round(travelMinutes(prev.locationId, cur.locationId) / SLOT_MIN);
+        const idleStartSlot = prev.startSlot + durationToSlots(prev.duration) + travelSlots;
+        const idleEndSlot = cur.startSlot;
+        if (idleEndSlot > idleStartSlot) {
+          const mins = (idleEndSlot - idleStartSlot) * SLOT_MIN;
+          idleBlocks.push({ day: prev.day, startSlot: idleStartSlot, duration: mins, label: "공강 " + mins + "분", type: "break" });
+        }
+      }
+    });
+    return idleBlocks;
+  }
+
+  // 같은 요일 안에서 연속된 두 세션 사이 간격 중, 이동에 실제로 필요한 시간을 넘어서는
+  // "진짜 빈 시간"만 합산한다 — 이동으로 이미 설명되는 구간은 공강으로 치지 않는다.
+  function schedule2TotalIdleMinutes(assigned) {
+    let idle = 0;
+    const byDay = new Map();
+    assigned.forEach(r => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    byDay.forEach(reqs => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1], cur = sorted[i];
+        const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;
+        const needMin = requiredGapMin2(prev.locationId, cur.locationId);
+        idle += Math.max(0, gapMin - needMin);
+      }
+    });
+    return idle;
+  }
+
+  // 분을 "2.5시간"처럼 시간 단위 배지 텍스트로 바꾼다 — 정시면 정수로, 아니면 소수 첫째
+  // 자리까지만 보여준다.
+  function formatHoursLabel(minutes) {
+    const hours = Math.round((minutes / 60) * 10) / 10;
+    const text = Number.isInteger(hours) ? String(hours) : hours.toFixed(1);
+    return text + "시간";
+  }
+
+  const generateBtn2El = document.getElementById("generateBtn2");
+  const generateBtn2LabelEl = document.getElementById("generateBtn2Label");
+  const generateHint2El = document.getElementById("generateHint2");
+  const candidates2El = document.getElementById("candidates2");
+  const generateProgressWrap2El = document.getElementById("generateProgressWrap2");
+  const generateProgressFill2El = document.getElementById("generateProgressFill2");
+  const generateProgressText2El = document.getElementById("generateProgressText2");
+
+  function renderSchedule2Result() {
+    candidates2El.innerHTML = "";
+    if (!schedule2Result) return;
+
+    const card = document.createElement("div");
+    card.className = "candidate-card";
+
+    const stats = document.createElement("div");
+    stats.className = "candidate-stats";
+    const pill1 = document.createElement("span");
+    pill1.className = "stat-pill";
+    if (schedule2Result.unassignedMembers.length > 0) {
+      pill1.classList.add("stat-pill-danger");
+      pill1.textContent = "미배정 " + schedule2Result.unassignedMembers.length + "명";
+    } else {
+      pill1.append("미배정 ");
+      const none = document.createElement("span");
+      none.className = "stat-pill-muted";
+      none.textContent = "없음";
+      pill1.appendChild(none);
+    }
+    stats.appendChild(pill1);
+    const pill2 = document.createElement("span");
+    pill2.className = "stat-pill";
+    pill2.textContent = "수업 " + schedule2Result.assigned.length + "건";
+    stats.appendChild(pill2);
+    const pill3 = document.createElement("span");
+    pill3.className = "stat-pill";
+    pill3.textContent = "이동 " + totalTravelCount(schedule2Result.assigned) + "번";
+    stats.appendChild(pill3);
+    const pill4 = document.createElement("span");
+    pill4.className = "stat-pill";
+    pill4.textContent = "공강 " + formatHoursLabel(schedule2TotalIdleMinutes(schedule2Result.assigned));
+    stats.appendChild(pill4);
+    card.appendChild(stats);
+
+    const gridWrap = document.createElement("div");
+    gridWrap.className = "grid-scroll";
+    const gridEl = document.createElement("div");
+    gridEl.className = "cal-grid";
+    gridWrap.appendChild(gridEl);
+    card.appendChild(gridWrap);
+
+    const gridRange = businessHoursGridRange();
+    renderGrid(gridEl, availableCells, {
+      blocks: schedule2ToBlocks(schedule2Result.assigned),
+      travelBlocks: schedule2ToTravelBlocks(schedule2Result.assigned).concat(schedule2ToIdleBlocks(schedule2Result.assigned)),
+      rangeStartSlot: gridRange.rangeStartSlot,
+      rangeEndSlot: gridRange.rangeEndSlot
+    });
+
+    if (schedule2Result.unassignedMembers.length > 0) {
+      const box = document.createElement("div");
+      box.className = "unassigned-box unassigned-box-danger";
+      box.innerHTML = "<b>미배정 회원 (" + schedule2Result.unassignedMembers.length + "명)</b> · " +
+        schedule2Result.unassignedMembers.map(m => m.name).join(", ");
+      card.appendChild(box);
+    }
+
+    candidates2El.appendChild(card);
+  }
+
+  generateBtn2El.addEventListener("click", async () => {
+    if (state.locations.length === 0) {
+      generateHint2El.textContent = "먼저 설정 페이지에서 지점을 등록해주세요.";
+      return;
+    }
+    if (availableCells.size === 0) {
+      generateHint2El.textContent = "먼저 설정 페이지에서 근무 가능 시간을 설정해주세요.";
+      return;
+    }
+    if (state.requests.length === 0) {
+      generateHint2El.textContent = "먼저 회원 스케줄 추가 페이지에서 가능 시간을 등록해주세요.";
+      return;
+    }
+    generateHint2El.textContent = "";
+
+    generateBtn2El.disabled = true;
+    generateBtn2El.classList.add("loading");
+    generateBtn2LabelEl.textContent = "후보 생성 중...";
+    generateProgressWrap2El.style.display = "";
+    generateProgressFill2El.style.width = "0%";
+    generateProgressText2El.textContent = "0%";
+    generateProgressWrap2El.setAttribute("aria-valuenow", "0");
+
+    try {
+      schedule2Result = await generateSchedule2Async(progress => {
+        const pct = Math.round(progress * 100);
+        generateProgressFill2El.style.width = pct + "%";
+        generateProgressText2El.textContent = pct + "%";
+        generateProgressWrap2El.setAttribute("aria-valuenow", String(pct));
+      });
+      requestsChangedSinceGenerate2 = false;
+      renderSchedule2Result();
+      saveState();
+      showToast("후보가 생성되었습니다", "success");
+    } catch (err) {
+      console.error(err);
+      generateHint2El.textContent = "후보 생성 중 오류가 발생했습니다. 다시 시도해주세요.";
+      showToast("후보 생성에 실패했습니다", "danger");
+    } finally {
+      generateBtn2El.disabled = false;
+      generateBtn2El.classList.remove("loading");
+      generateBtn2LabelEl.textContent = "후보 생성하기";
+      generateProgressWrap2El.style.display = "none";
+    }
+  });
+
   const candidateRulesBlockEl = document.getElementById("candidateRulesBlock");
   const candidateRulesToggleEl = document.getElementById("candidateRulesToggle");
   candidateRulesToggleEl.addEventListener("click", () => {
     const collapsed = candidateRulesBlockEl.classList.toggle("collapsed");
     candidateRulesToggleEl.setAttribute("aria-expanded", String(!collapsed));
+  });
+
+  const candidateRulesBlock2El = document.getElementById("candidateRulesBlock2");
+  const candidateRulesToggle2El = document.getElementById("candidateRulesToggle2");
+  candidateRulesToggle2El.addEventListener("click", () => {
+    const collapsed = candidateRulesBlock2El.classList.toggle("collapsed");
+    candidateRulesToggle2El.setAttribute("aria-expanded", String(!collapsed));
   });
 
   const generateProgressWrapEl = document.getElementById("generateProgressWrap");
@@ -4252,6 +6099,7 @@
   const pageEls = {
     settings: document.getElementById("pageSettings"),
     schedule: document.getElementById("pageSchedule"),
+    schedule2: document.getElementById("pageSchedule2"),
     members: document.getElementById("pageMembers"),
     memberSchedule: document.getElementById("pageMemberSchedule")
   };
@@ -4283,6 +6131,15 @@
         generateHintEl.textContent = "신청 시간이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
       }
     }
+    if (pageId === "schedule2" && requestsChangedSinceGenerate2) {
+      requestsChangedSinceGenerate2 = false;
+      if (schedule2Result) {
+        schedule2Result = null;
+        renderSchedule2Result();
+        saveState();
+        generateHint2El.textContent = "신청 시간이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
+      }
+    }
     saveState();
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -4308,6 +6165,7 @@
     renderRequestList();
     priorityMapoDoubleCheckboxEl.checked = state.priorityMapoDouble;
     if (candidates.length) renderCandidates();
+    if (schedule2Result) renderSchedule2Result();
     goToPage(currentPage);
   }
 

@@ -21,7 +21,8 @@
     <button type="button" class="nav-item" data-page="settings">기본 설정</button>
     <button type="button" class="nav-item" data-page="members">회원관리</button>
     <button type="button" class="nav-item" data-page="memberSchedule">회원 스케줄 추가</button>
-    <button type="button" class="nav-item" data-page="schedule">수업 스케줄 생성</button>
+    <button type="button" class="nav-item" data-page="schedule">수업 스케줄 생성1</button>
+    <button type="button" class="nav-item" data-page="schedule2">수업 스케줄 생성2</button>
   </nav>
 
   <main class="app-main">
@@ -94,7 +95,7 @@
               <li>2회 배정 회원에 선택된 회원은 1회 배정된 뒤, 다른 회원의 2번째 수업보다 그 회원의 2번째 수업을 먼저 배정합니다. (상담 회원·1회 제한 회원은 대상에서 제외됩니다)</li>
               <li>마포점 우선 2회 배정을 체크하면, 마포점 회원의 2번째 수업을 다른 지점 회원의 2번째 수업보다 먼저 배정합니다.</li>
               <li>하루 이동은 최소화하며, 이동할 경우 최대 2회까지로 제한합니다.</li>
-              <li>이동시간, 휴식시간을 제외한 빈 시간은 없도록 합니다. (단, 빈 시간을 허용해서 수업의 횟수가 늘어난다면 10분까지 허용합니다.)</li>
+              <li>이동시간을 제외한 빈 시간은 없도록 합니다. (단, 빈 시간을 허용해서 수업의 횟수가 늘어난다면 10분까지 허용합니다.)</li>
               <li>각 회원은 최대한 1회 이상의 스케줄을 가질 수 있도록 합니다.</li>
               <li>인원을 최대화하도록 배정합니다.
                 <ul>
@@ -191,6 +192,81 @@
           -->
 
           <div class="candidates" id="candidates"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PAGE: 스케줄생성2 (새 후보 생성 알고리즘: 등록 60분·상담 30분, 쉬는 시간 없음, 후보 1개) -->
+    <section class="card page" id="pageSchedule2">
+      <div class="card-head">
+        <div>
+          <h2>수업 스케줄 생성2</h2>
+          <p class="card-desc">겹치지 않는 스케줄 후보 1개를 생성하세요.</p>
+        </div>
+      </div>
+
+      <div class="settings-sections">
+        <div class="settings-section">
+          <div class="candidate-rules-block collapsed" id="candidateRulesBlock2">
+            <button type="button" class="candidate-rules-title" id="candidateRulesToggle2" aria-expanded="false">
+              후보 조건
+              <span class="toggle-arrow" id="candidateRulesArrow2">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                  <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </span>
+            </button>
+            <ul class="candidate-rules-list" id="candidateRulesList2">
+              <li>정해진 스케줄은 다른 스케줄과 겹칠 수 없습니다.</li>
+              <li>스케줄과 이동시간은 겹칠 수 없습니다.</li>
+              <li>등록 회원은 60분, 상담 회원은 30분 수업으로 계산합니다.</li>
+              <li>각 회원은 1일 최대 1회의 스케줄을 가질 수 있습니다.</li>
+              <li>각 회원은 최대 2회까지의 스케줄을 가질 수 있습니다. (상담 회원의 경우 최대 1회까지)</li>
+              <li>1회 제한 회원에 선택된 회원은 스케줄이 최대 1회까지 배정됩니다.</li>
+              <li>쉬는 시간 없이, 이동 시간을 제외한 빈 시간이 최소화되도록 배정합니다.</li>
+              <li>후보는 1개만 생성됩니다.</li>
+            </ul>
+          </div>
+
+          <div class="day-start-block-row">
+            <div class="day-start-block" id="excludedBlock2">
+              <p class="day-start-title" id="excludedTitle2">미배정 회원 <span class="optional-tag">(선택사항)</span></p>
+              <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 제외됩니다.</p>
+              <div class="chip-row" id="excludedChipRow2">
+                <div class="ms once-limit-add" id="excludedMs2">
+                  <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="excludedControl2" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="excludedTitle2">+ 추가</button>
+                  <div class="ms-dropdown" id="excludedDropdown2" role="listbox"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="day-start-block" id="onceLimitBlock2">
+              <p class="day-start-title" id="onceLimitTitle2">1회 제한 회원 <span class="optional-tag">(선택사항)</span></p>
+              <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 최대 1회까지 배정됩니다. 상담회원도 동일하게 최대 1회까지 배정됩니다.</p>
+              <div class="chip-row" id="onceLimitChipRow2">
+                <div class="ms once-limit-add" id="onceLimitMs2">
+                  <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="onceLimitControl2" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="onceLimitTitle2">+ 추가</button>
+                  <div class="ms-dropdown" id="onceLimitDropdown2" role="listbox"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="generate-row">
+            <button type="button" class="btn btn-primary btn-lg" id="generateBtn2">
+              <span class="btn-spinner" id="generateBtn2Spinner" aria-hidden="true"></span>
+              <span id="generateBtn2Label">후보 생성하기</span>
+            </button>
+          </div>
+          <div class="generate-progress" id="generateProgressWrap2" style="display:none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtn2Label">
+            <div class="generate-progress-track">
+              <div class="generate-progress-fill" id="generateProgressFill2"></div>
+            </div>
+            <span class="generate-progress-text" id="generateProgressText2">0%</span>
+          </div>
+          <p class="generate-hint" id="generateHint2"></p>
+
+          <div class="candidates" id="candidates2"></div>
         </div>
       </div>
     </section>
@@ -319,15 +395,17 @@
           <li>시간은 오후 기준 시각이며, 숫자를 이어 쓰면 각각 정시로 등록됩니다. (예: 7 → 19:00, 730 → 19:30, 5678 → 17:00·18:00·19:00·20:00)</li>
           <li>숫자 사이에 물결(~)을 넣으면 그 사이 매시가 전부 등록됩니다. (예: 3~6 → 3456과 동일)</li>
           <li>시간 끝에 물결을 붙이면 그 시각부터 마감 시간까지 전부 가능한 것으로 등록됩니다. (예: 6630~ → 18:00, 그리고 18:30부터 마감까지)</li>
+          <li>이름 뒤에 x만 쓰면 그 회원의 기존 가능 시간을 모두 삭제합니다(등록 안 한 것처럼 초기화). (예: 홍길동 x)</li>
         </ul>
       </div>
       <div class="schedule-example">
         <p class="schedule-example-title">예시)</p>
         <ul class="schedule-example-list">
           <li>홍길동 월화수5678</li>
-          <li>김철수 화목금5530</li>
-          <li>이영희 월화6630~ 금1~</li>
-          <li>박공원 수목3~6</li>
+          <li>홍길동 화목금5530</li>
+          <li>홍길동 월화6630~ 금1~</li>
+          <li>홍길동 수목3~6</li>
+          <li>홍길동 x</li>
         </ul>
       </div>
       <textarea id="bulkImportTextarea" class="bulk-import-textarea" rows="14"></textarea>
