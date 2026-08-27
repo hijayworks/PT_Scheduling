@@ -1,5 +1,7 @@
 node_modules/
 .DS_Store
+.idea/
+.playwright-mcp/
 
 # 실제 회원 개인정보(이름·스케줄)가 담긴 파일 — 저장소에는 올리지 않음
 member.text

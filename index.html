@@ -21,9 +21,7 @@
     <button type="button" class="nav-item" data-page="settings">기본 설정</button>
     <button type="button" class="nav-item" data-page="members">회원관리</button>
     <button type="button" class="nav-item" data-page="memberSchedule">회원 스케줄 추가</button>
-    <button type="button" class="nav-item" data-page="schedule">수업 스케줄 생성1</button>
-    <button type="button" class="nav-item" data-page="schedule2">수업 스케줄 생성2</button>
-    <button type="button" class="nav-item" data-page="schedule3">수업 스케줄 생성3</button>
+    <button type="button" class="nav-item" data-page="schedule3">수업 스케줄 생성</button>
   </nav>
 
   <main class="app-main">
@@ -66,181 +64,11 @@
       </div>
     </section>
 
-    <!-- PAGE: 스케줄생성 (후보 생성) -->
-    <section class="card page" id="pageSchedule">
-      <div class="card-head">
-        <div>
-          <h2>스케줄 생성</h2>
-          <p class="card-desc">겹치지 않는 스케줄 후보를 생성하세요.</p>
-        </div>
-      </div>
-
-      <div class="settings-sections">
-        <div class="settings-section">
-          <div class="candidate-rules-block collapsed" id="candidateRulesBlock">
-            <button type="button" class="candidate-rules-title" id="candidateRulesToggle" aria-expanded="false">
-              후보 조건
-              <span class="toggle-arrow" id="candidateRulesArrow">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                  <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
-                </svg>
-              </span>
-            </button>
-            <ul class="candidate-rules-list" id="candidateRulesList">
-              <li>정해진 스케줄은 다른 스케줄과 겹칠 수 없습니다.</li>
-              <li>스케줄과 이동시간은 겹칠 수 없습니다.</li>
-              <li>각 회원은 1일 최대 1회의 스케줄을 가질 수 있습니다.</li>
-              <li>각 회원은 최대 2회까지의 스케줄을 가질 수 있습니다. (상담 회원의 경우 최대 1회까지)</li>
-              <li>1회 제한 회원에 선택된 회원은 수업 스케줄 생성 시 스케줄이 최대 1회까지 배정됩니다.</li>
-              <li>하루 이동은 최소화하며, 이동할 경우 최대 2회까지로 제한합니다.</li>
-              <li>이동시간을 제외한 빈 시간은 없도록 합니다. (단, 빈 시간을 허용해서 수업의 횟수가 늘어난다면 10분까지 허용합니다.)</li>
-              <li>각 회원은 최대한 1회 이상의 스케줄을 가질 수 있도록 합니다.</li>
-              <li>인원을 최대화하도록 배정합니다.
-                <ul>
-                  <li>동점일 경우, 수업 횟수가 많은 쪽을 우선합니다.</li>
-                  <li>그마저 동점일 경우, 이동 횟수가 적은 쪽을 우선합니다.</li>
-                  <li>그마저 동점일 경우, 이동 시간이 적은 쪽을 우선합니다.</li>
-                  <li>그마저 동점일 경우, 총 이동시간과 빈 시간의 합이 적은 쪽을 우선합니다.</li>
-                </ul>
-              </li>
-            </ul>
-          </div>
-
-          <div class="day-start-block-row">
-            <div class="day-start-block" id="excludedBlock">
-              <p class="day-start-title" id="excludedTitle">미배정 회원 <span class="optional-tag">(선택사항)</span></p>
-              <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 제외됩니다.</p>
-              <div class="chip-row" id="excludedChipRow">
-                <div class="ms once-limit-add" id="excludedMs">
-                  <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="excludedControl" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="excludedTitle">+ 추가</button>
-                  <div class="ms-dropdown" id="excludedDropdown" role="listbox"></div>
-                </div>
-              </div>
-            </div>
-
-            <div class="day-start-block" id="onceLimitBlock">
-              <p class="day-start-title" id="onceLimitTitle">1회 제한 회원 <span class="optional-tag">(선택사항)</span></p>
-              <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 최대 1회까지 배정됩니다. 상담회원도 동일하게 최대 1회까지 배정됩니다.</p>
-              <div class="chip-row" id="onceLimitChipRow">
-                <div class="ms once-limit-add" id="onceLimitMs">
-                  <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="onceLimitControl" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="onceLimitTitle">+ 추가</button>
-                  <div class="ms-dropdown" id="onceLimitDropdown" role="listbox"></div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="generate-row">
-            <button type="button" class="btn btn-primary btn-lg" id="generateBtn">
-              <span class="btn-spinner" id="generateBtnSpinner" aria-hidden="true"></span>
-              <span id="generateBtnLabel">후보 생성하기</span>
-            </button>
-          </div>
-          <div class="generate-progress" id="generateProgressWrap" style="display:none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnLabel">
-            <div class="generate-progress-track">
-              <div class="generate-progress-fill" id="generateProgressFill"></div>
-            </div>
-            <span class="generate-progress-text" id="generateProgressText">0%</span>
-          </div>
-          <p class="generate-hint" id="generateHint"></p>
-
-          <!-- "수업 N건 이상 후보만 보기" 필터: 기능 자체를 잠시 끈다 (script.js의 관련 로직도 함께 주석 처리됨)
-          <div class="candidates-toolbar">
-            <div class="candidate-filter-wrap">
-              <label class="candidate-filter-row" for="minSessionFilterInput">
-                수업 <input type="number" id="minSessionFilterInput" min="1" step="1" value="1" />건 이상 후보만 보기
-              </label>
-              <p class="candidate-filter-hidden-count" id="candidateFilterHiddenCount"></p>
-            </div>
-          </div>
-          -->
-
-          <div class="candidates" id="candidates"></div>
-        </div>
-      </div>
-    </section>
-
-    <!-- PAGE: 스케줄생성2 (새 후보 생성 알고리즘: 등록 60분·상담 30분, 쉬는 시간 없음, 후보 1개) -->
-    <section class="card page" id="pageSchedule2">
-      <div class="card-head">
-        <div>
-          <h2>수업 스케줄 생성2</h2>
-          <p class="card-desc">겹치지 않는 스케줄 후보 1개를 생성하세요.</p>
-        </div>
-      </div>
-
-      <div class="settings-sections">
-        <div class="settings-section">
-          <div class="candidate-rules-block collapsed" id="candidateRulesBlock2">
-            <button type="button" class="candidate-rules-title" id="candidateRulesToggle2" aria-expanded="false">
-              후보 조건
-              <span class="toggle-arrow" id="candidateRulesArrow2">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-                  <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" />
-                </svg>
-              </span>
-            </button>
-            <ul class="candidate-rules-list" id="candidateRulesList2">
-              <li>정해진 스케줄은 다른 스케줄과 겹칠 수 없습니다.</li>
-              <li>스케줄과 이동시간은 겹칠 수 없습니다.</li>
-              <li>등록 회원은 60분, 상담 회원은 30분 수업으로 계산합니다.</li>
-              <li>각 회원은 1일 최대 1회의 스케줄을 가질 수 있습니다.</li>
-              <li>각 회원은 최대 2회까지의 스케줄을 가질 수 있습니다. (상담 회원의 경우 최대 1회까지)</li>
-              <li>1회 제한 회원에 선택된 회원은 스케줄이 최대 1회까지 배정됩니다.</li>
-              <li>쉬는 시간 없이, 이동 시간을 제외한 빈 시간이 최소화되도록 배정합니다.</li>
-              <li>후보는 1개만 생성됩니다.</li>
-            </ul>
-          </div>
-
-          <div class="day-start-block-row">
-            <div class="day-start-block" id="excludedBlock2">
-              <p class="day-start-title" id="excludedTitle2">미배정 회원 <span class="optional-tag">(선택사항)</span></p>
-              <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 제외됩니다.</p>
-              <div class="chip-row" id="excludedChipRow2">
-                <div class="ms once-limit-add" id="excludedMs2">
-                  <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="excludedControl2" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="excludedTitle2">+ 추가</button>
-                  <div class="ms-dropdown" id="excludedDropdown2" role="listbox"></div>
-                </div>
-              </div>
-            </div>
-
-            <div class="day-start-block" id="onceLimitBlock2">
-              <p class="day-start-title" id="onceLimitTitle2">1회 제한 회원 <span class="optional-tag">(선택사항)</span></p>
-              <p class="card-desc subsection-desc">선택한 회원은 후보 생성 시 최대 1회까지 배정됩니다. 상담회원도 동일하게 최대 1회까지 배정됩니다.</p>
-              <div class="chip-row" id="onceLimitChipRow2">
-                <div class="ms once-limit-add" id="onceLimitMs2">
-                  <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="onceLimitControl2" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="onceLimitTitle2">+ 추가</button>
-                  <div class="ms-dropdown" id="onceLimitDropdown2" role="listbox"></div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="generate-row">
-            <button type="button" class="btn btn-primary btn-lg" id="generateBtn2">
-              <span class="btn-spinner" id="generateBtn2Spinner" aria-hidden="true"></span>
-              <span id="generateBtn2Label">후보 생성하기</span>
-            </button>
-            <button type="button" class="btn btn-ghost" id="generateBtn2Cancel" style="display:none;">생성 취소</button>
-          </div>
-          <div class="generate-progress" id="generateProgressWrap2" style="display:none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtn2Label">
-            <div class="generate-progress-track">
-              <div class="generate-progress-fill" id="generateProgressFill2"></div>
-            </div>
-            <span class="generate-progress-text" id="generateProgressText2">0%</span>
-          </div>
-          <p class="generate-hint" id="generateHint2"></p>
-
-          <div class="candidates" id="candidates2"></div>
-        </div>
-      </div>
-    </section>
-
     <!-- PAGE: 스케줄생성3 (생성1·생성2 엔진을 그대로 재사용해 후보 3개를 한 화면에: A=생성2, B/C=생성1의 후보A/B) -->
     <section class="card page" id="pageSchedule3">
       <div class="card-head">
         <div>
-          <h2>수업 스케줄 생성3</h2>
+          <h2>수업 스케줄 생성</h2>
           <p class="card-desc">겹치지 않는 스케줄 후보 3개(후보A·B·C)를 한 화면에서 생성하세요.</p>
         </div>
       </div>
@@ -257,13 +85,15 @@
               </span>
             </button>
             <ul class="candidate-rules-list" id="candidateRulesList3">
-              <li>후보A는 "수업 스케줄 생성2"와 같은 방식(체인 DP + 다듬기)으로 만듭니다.</li>
-              <li>후보B·C는 "수업 스케줄 생성1"의 후보A(인원 최대)·후보B(수업 횟수 최대)와 같은 방식(그리디)으로 만듭니다.</li>
+              <li>후보A는 체인 DP + 다듬기 방식으로 만듭니다.</li>
+              <li>후보B·C는 그리디 방식으로 만듭니다. (후보B: 인원 최대 우선, 후보C: 수업 횟수 최대 우선)</li>
               <li>정해진 스케줄은 다른 스케줄과 겹칠 수 없습니다.</li>
               <li>스케줄과 이동시간은 겹칠 수 없습니다.</li>
               <li>각 회원은 1일 최대 1회의 스케줄을 가질 수 있습니다.</li>
               <li>각 회원은 최대 2회까지의 스케줄을 가질 수 있습니다. (상담 회원의 경우 최대 1회까지)</li>
               <li>1회 제한 회원에 선택된 회원은 스케줄이 최대 1회까지 배정됩니다.</li>
+              <li>하루 이동은 최소화하며, 이동할 경우 최대 2회까지로 제한합니다. (후보A·B·C 모두 동일하게 적용)</li>
+              <li>후보B·C는 이동시간을 제외한 빈 시간이 없도록 배정합니다. (단, 빈 시간을 허용해서 수업의 횟수가 늘어난다면 10분까지 허용합니다.)</li>
               <li>여기서 선택한 미배정 회원 · 1회 제한 회원 설정은 후보A·B·C 모두에 똑같이 적용됩니다.</li>
             </ul>
           </div>
@@ -292,18 +122,40 @@
             </div>
           </div>
 
-          <div class="generate-row">
-            <button type="button" class="btn btn-primary btn-lg" id="generateBtn3">
-              <span class="btn-spinner" id="generateBtn3Spinner" aria-hidden="true"></span>
-              <span id="generateBtn3Label">후보 생성하기</span>
-            </button>
-            <button type="button" class="btn btn-ghost" id="generateBtn3Cancel" style="display:none;">생성 취소</button>
-          </div>
-          <div class="generate-progress" id="generateProgressWrap3" style="display:none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtn3Label">
-            <div class="generate-progress-track">
-              <div class="generate-progress-fill" id="generateProgressFill3"></div>
+          <div class="day-start-block-row">
+            <div class="day-start-block">
+              <p class="day-start-title">후보A (체인 DP 방식)</p>
+              <div class="generate-row">
+                <button type="button" class="btn btn-primary btn-lg" id="generateBtnA3">
+                  <span class="btn-spinner" id="generateBtnA3Spinner" aria-hidden="true"></span>
+                  <span id="generateBtnA3Label">후보A 생성하기</span>
+                </button>
+                <button type="button" class="btn btn-ghost" id="generateBtnA3Cancel" style="display:none;">생성 취소</button>
+              </div>
+              <div class="generate-progress" id="generateProgressWrapA3" style="display:none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnA3Label">
+                <div class="generate-progress-track">
+                  <div class="generate-progress-fill" id="generateProgressFillA3"></div>
+                </div>
+                <span class="generate-progress-text" id="generateProgressTextA3">0%</span>
+              </div>
             </div>
-            <span class="generate-progress-text" id="generateProgressText3">0%</span>
+
+            <div class="day-start-block">
+              <p class="day-start-title">후보B·C (그리디 방식)</p>
+              <div class="generate-row">
+                <button type="button" class="btn btn-primary btn-lg" id="generateBtnBC3">
+                  <span class="btn-spinner" id="generateBtnBC3Spinner" aria-hidden="true"></span>
+                  <span id="generateBtnBC3Label">후보B·C 생성하기</span>
+                </button>
+                <button type="button" class="btn btn-ghost" id="generateBtnBC3Cancel" style="display:none;">생성 취소</button>
+              </div>
+              <div class="generate-progress" id="generateProgressWrapBC3" style="display:none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnBC3Label">
+                <div class="generate-progress-track">
+                  <div class="generate-progress-fill" id="generateProgressFillBC3"></div>
+                </div>
+                <span class="generate-progress-text" id="generateProgressTextBC3">0%</span>
+              </div>
+            </div>
           </div>
           <p class="generate-hint" id="generateHint3"></p>
 
@@ -318,6 +170,9 @@
         <div>
           <h2>회원관리</h2>
           <p class="card-desc">회원의 소속 지점과 메모를 관리하세요.</p>
+        </div>
+        <div class="card-head-actions">
+          <button type="button" id="memberBulkImportOpenBtn" class="btn btn-ghost btn-ghost-green">붙여넣기로 일괄 등록</button>
         </div>
       </div>
 
@@ -398,7 +253,7 @@
             </ul>
           </div>
 
-          <div class="request-summary" id="requestSummary">등록된 회원이 없습니다.</div>
+          <div class="request-summary" id="requestSummary">등록된 회원이 없습니다. <a href="#" class="request-summary-link" data-page="members">회원관리</a>에서 먼저 회원을 등록해 주세요.</div>
           <div class="member-tabs" id="memberTabs"></div>
           <div class="schedule-interactive" id="scheduleInteractive">
             <div class="range-add-row" id="rangeAddRow">
@@ -478,6 +333,50 @@
       <div class="modal-actions">
         <button type="button" class="btn btn-ghost" id="bulkImportBackBtn">일괄 수정</button>
         <button type="button" class="btn btn-primary" id="bulkImportApplyBtn">일괄 등록</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="memberBulkImportOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="memberBulkImportTitle">
+    <div class="modal-head">
+      <h3 id="memberBulkImportTitle">붙여넣기로 회원 일괄 등록</h3>
+      <button type="button" class="modal-close" id="memberBulkImportCloseBtn" aria-label="닫기">×</button>
+    </div>
+
+    <div class="modal-body" id="memberBulkImportStepInput">
+      <p class="card-desc subsection-desc">
+        한 줄에 회원 한 명씩, "지점 / 구분 / 이름" 형식으로 붙여넣으세요.
+      </p>
+      <div class="schedule-example">
+        <p class="schedule-example-title">작성 규칙)</p>
+        <ul class="schedule-example-list">
+          <li>지점, 구분, 이름을 슬래시(/)로 구분합니다.</li>
+          <li>지점을 여러 개 등록할 경우 쉼표(,)로 구분해서 씁니다. (예: 상암점, 여의도점, 마포점)</li>
+          <li>구분은 "상담" 또는 "등록" 중 하나여야 합니다.</li>
+        </ul>
+      </div>
+      <div class="schedule-example">
+        <p class="schedule-example-title">예시)</p>
+        <ul class="schedule-example-list">
+          <li>여의도점 / 등록 / 홍길동</li>
+          <li>상암점, 여의도점, 마포점 / 등록 / 홍길동</li>
+        </ul>
+      </div>
+      <textarea id="memberBulkImportTextarea" class="bulk-import-textarea" rows="14"></textarea>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="memberBulkImportCancelBtn">취소</button>
+        <button type="button" class="btn btn-primary" id="memberBulkImportPreviewBtn">미리보기</button>
+      </div>
+    </div>
+
+    <div class="modal-body" id="memberBulkImportStepPreview" style="display:none;">
+      <p class="card-desc subsection-desc" id="memberBulkImportPreviewSummary"></p>
+      <div id="memberBulkImportPreviewList" class="bulk-preview-list"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="memberBulkImportBackBtn">일괄 수정</button>
+        <button type="button" class="btn btn-primary" id="memberBulkImportApplyBtn">일괄 등록</button>
       </div>
     </div>
   </div>

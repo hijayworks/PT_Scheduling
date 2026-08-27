@@ -170,7 +170,7 @@ body {
   vertical-align: -2px;
   animation: btn-spin 0.7s linear infinite;
 }
-#generateBtn.loading .btn-spinner, #generateBtn2.loading .btn-spinner { display: inline-block; }
+#generateBtnA3.loading .btn-spinner, #generateBtnBC3.loading .btn-spinner { display: inline-block; }
 @keyframes btn-spin { to { transform: rotate(360deg); } }
 
 /* "후보 생성하기" 진행률 표시줄: 실제로 만든 조합 수 기준 진행률(0~100%)을 보여준다. */
@@ -334,9 +334,8 @@ body {
    맨 앞(고정된 자리)에 있으므로 위치가 바뀌지도 않고, 무엇을 추가하는 버튼인지도 바로 보인다. */
 .once-limit-add.ms { position: relative; flex: 0 0 auto; min-width: 0; }
 .once-limit-add .ms-dropdown { min-width: 200px; }
-.day-start-title { font-size: 13.5px; font-weight: 700; margin: 0 0 4px; }
+.day-start-title { font-size: 13.5px; font-weight: 700; margin: 0 0 10px; }
 .optional-tag { font-weight: 500; color: var(--text-mute); font-size: 12px; }
-
 .generate-row {
   display: flex;
   align-items: center;
@@ -344,47 +343,6 @@ body {
   justify-content: space-between;
   gap: 12px;
 }
-/* 후보 생성 자체에 영향을 주는 조건(위쪽 블록들)과 달리, 이 툴바는 이미 생성된 후보
-   중 화면에 보여줄 것만 고르는 표시 전용 필터라서 후보 목록 바로 위에 시각적으로
-   분리해 둔다 — 점선 구분선으로 위쪽 생성 조건들과 경계를 명확히 한다. */
-.candidates-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 14px;
-  margin-top: 6px;
-  border-top: 1px dashed var(--border);
-}
-.candidate-filter-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 2px;
-}
-.candidate-filter-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--text);
-}
-.candidate-filter-row input {
-  width: 56px;
-  height: 32px;
-  padding: 0 8px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  font-size: 13.5px;
-  font-family: inherit;
-  text-align: center;
-}
-.candidate-filter-hidden-count {
-  margin: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-mute);
-}
-
 /* Location list & travel matrix */
 .location-list {
   display: flex;
@@ -860,16 +818,6 @@ body {
 .ms-option.selected .ms-option-check { visibility: visible; }
 .ms-empty { padding: 8px 10px; font-size: 12.5px; color: var(--text-mute); }
 
-.pc-only-note {
-  font-size: 12.5px;
-  color: #92400e;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
-  border-radius: 8px;
-  padding: 8px 12px;
-  margin: 0 0 14px;
-}
-
 .schedule-example {
   margin: 0 0 14px;
   padding: 10px 14px;
@@ -889,6 +837,7 @@ body {
 }
 
 .request-summary { font-size: 13px; color: var(--text-mute); margin-bottom: 10px; font-weight: 600; }
+.request-summary-link { color: var(--primary); text-decoration: underline; cursor: pointer; }
 
 .member-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .member-tab {
@@ -1028,12 +977,27 @@ body {
   grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
   gap: 16px;
   margin-top: 18px;
+  container-type: inline-size;
+}
+/* 후보A·B가 한 줄을 채우고 후보C만 다음 줄에 혼자 남는 2열 구간에서는, 왼쪽에 붙어 빈
+   오른쪽 공간을 남기는 대신 후보B 밑(2번째 열)으로 옮겨 그리디 결과(후보B·C)를 오른쪽에
+   묶어 보여준다. 경계값은 minmax(400px,1fr) auto-fit가 2열로 계산되는 컨테이너 폭 구간
+   (400*2+16 ~ 400*3+32-1)과 맞춘 것이다. */
+@container (min-width: 816px) and (max-width: 1231px) {
+  .candidates > .candidate-card:last-child {
+    grid-column: 2;
+  }
 }
 .candidate-card {
   border: 2px solid var(--border);
   border-radius: 12px;
   padding: 14px;
   transition: border-color 0.15s, box-shadow 0.15s;
+}
+.candidate-card-placeholder { border-style: dashed; }
+.candidate-card-placeholder .candidate-title { color: var(--text-mute); }
+.candidate-card-placeholder-hint {
+  font-size: 12px; color: var(--text-mute); margin: 10px 0 0;
 }
 .candidate-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
 .candidate-title { font-size: 14.5px; font-weight: 800; margin: 0 0 2px; }

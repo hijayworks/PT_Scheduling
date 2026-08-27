@@ -20,11 +20,8 @@
   // 갖게 된다. 새 색상을 만들어내는 대신(색맹 검증이 안 됨), 같은 8색을 유지한 채 명도만
   // 단계적으로 어둡게 낮춰(글자는 항상 흰색이라 어둡게 할수록 대비는 오히려 좋아진다) 8명
   // 단위로 순환한다. 명도 차이는 색맹 유형(적록·청황 색약 등)과 무관하게 지각되므로 색맹
-  // 안전성은 그대로 유지된다. 단계를 3개(22%/40%, 24명 주기)로 뒀을 때는 두 가지 문제가
-  // 있었다 — ① 단계 간 차이가 작아 같은 색상(hue)의 인접 단계끼리 거의 같아 보였고,
-  // ② 24명을 넘으면 정확히 24명째마다 색상·단계가 완전히 똑같은 회원이 다시 나타났다(실제로
-  // 등록 순서가 24 차이 나는 두 회원이 완전히 같은 색으로 보이는 문제가 있었다). 그래서
-  // 단계를 5개로 늘리고 각 단계 간 간격도 넓혀(40명 주기) 두 문제를 함께 완화했다.
+  // 안전성은 그대로 유지된다. 단계 수(5개)와 간격은 인접 단계가 서로 구분되면서도 40명
+  // 주기 이내에서는 같은 색상·단계 조합이 반복되지 않도록 검증된 값이다.
   const MEMBER_COLOR_SHADE_STEPS = [0, 0.18, 0.33, 0.46, 0.58];
   function shadeColor(hex, darkenRatio) {
     if (!darkenRatio) return hex;
@@ -63,10 +60,13 @@
     const pair = DEFAULT_TRAVEL_PAIRS.find(([a, b]) => (a === nameA && b === nameB) || (a === nameB && b === nameA));
     return pair ? pair[2] : DEFAULT_TRAVEL_MIN;
   }
-  // 첫 실행 시 기본으로 채워둘 근무 가능 시간: 월~금 14:00~23:40 (토요일은 비워둠)
+  // 첫 실행 시, 그리고 개별 요일을 새로 켤 때 기본으로 채워둘 근무 가능 시간: 14:00~23:30
+  // (첫 실행 기본값은 월~금만 적용하고 토요일은 비워둠)
   const DEFAULT_BUSINESS_DAY_INDICES = [0, 1, 2, 3, 4]; // 월~금
-  const DEFAULT_BUSINESS_START_MIN = 14 * 60;   // 14:00
-  const DEFAULT_BUSINESS_END_MIN = 23 * 60 + 40; // 23:40 (마지막으로 시작 가능한 시각)
+  const DEFAULT_BUSINESS_START_MIN = 14 * 60;      // 14:00
+  const DEFAULT_BUSINESS_END_MIN = 23 * 60 + 30;   // 23:30
+  const DEFAULT_BUSINESS_START_SLOT = (DEFAULT_BUSINESS_START_MIN - START_MIN) / SLOT_MIN;
+  const DEFAULT_BUSINESS_END_SLOT = (DEFAULT_BUSINESS_END_MIN - START_MIN) / SLOT_MIN;
 
   /* ---------------- State ---------------- */
   let state = {
@@ -85,9 +85,12 @@
     excludedMemberIds3: []  // 스케줄 생성3에서 후보 생성 시 아예 제외할 회원 id 목록
   };
   let availableCells = new Set();
-  let candidates = [];          // computed candidates
-  let schedule2Result = null;   // "수업 스케줄 생성2"의 계산 결과 (후보 1개, { assigned, unassignedMembers })
-  let schedule3Result = { candidateA: null, candidateB: null, candidateC: null }; // "수업 스케줄 생성3": A=생성2 결과, B/C=생성1의 후보A/B
+  // "수업 스케줄 생성3"의 후보B(전략0, 인원 최대)·후보C(전략1, 수업 횟수 최대) 저장소.
+  // 옛 "수업 스케줄 생성1" 페이지가 쓰던 배열을 그대로 재사용한다 — regenerateCandidate/
+  // restorePreviousCandidate/candidateHistory/candidateUndoStack이 이 배열과 strategyIndex를
+  // 그대로 참조하므로, 생성1의 "재생성"·"이전 후보 다시보기" 기능을 생성3에 그대로 이식할 수 있다.
+  let candidates = [];
+  let schedule3Result = { candidateA: null }; // "수업 스케줄 생성3"의 후보A(체인 DP). 후보B/C는 candidates 배열 참고.
   // 회원 스케줄 추가(신청 시간 추가/삭제) 등 신청 데이터가 바뀌면 true로 표시해둔다.
   // "수업 스케줄 생성" 메뉴로 들어올 때 이 값이 true면, 최신 신청과 맞지 않는 옛 후보를 자동으로 비운다.
   let requestsChangedSinceGenerate = false;
@@ -130,9 +133,13 @@
   function currentOnceLimitIds() { return selectionOverride ? selectionOverride.onceLimitIds : state.onceLimitedMemberIds; }
   function currentExcludedIds2() { return selectionOverride ? selectionOverride.excludedIds : state.excludedMemberIds2; }
   function currentOnceLimitIds2() { return selectionOverride ? selectionOverride.onceLimitIds : state.onceLimitedMemberIds2; }
-  const PAGE_IDS = ["settings", "schedule", "schedule2", "schedule3", "members", "memberSchedule"];
-  // Pages from before the sidebar redesign ("requests"/"candidates"/"confirm") all live under "schedule" now.
-  const OLD_PAGE_TO_NEW = { settings: "settings", requests: "schedule", candidates: "schedule", confirm: "schedule" };
+  const PAGE_IDS = ["settings", "schedule3", "members", "memberSchedule"];
+  // Pages from before the sidebar redesign ("requests"/"candidates"/"confirm"), and "schedule"/"schedule2"
+  // from before those menus were removed, all live under "schedule3" now.
+  const OLD_PAGE_TO_NEW = {
+    settings: "settings", requests: "schedule3", candidates: "schedule3", confirm: "schedule3",
+    schedule: "schedule3", schedule2: "schedule3"
+  };
   let currentPage = "settings";
 
   /* ---------------- Utils ---------------- */
@@ -179,7 +186,6 @@
   function saveState() {
     state.availableCells = Array.from(availableCells);
     state.candidates = candidates;
-    state.schedule2Result = schedule2Result;
     state.schedule3Result = schedule3Result;
     state.currentPage = currentPage;
     state.startMinBase = START_MIN; // 슬롯 인덱스가 어느 시작 시각을 기준으로 저장됐는지 기록 (마이그레이션용)
@@ -268,8 +274,13 @@
         state.excludedMemberIds3 = parsed.excludedMemberIds3 || [];
         availableCells = new Set(parsed.availableCells || []);
         candidates = parsed.candidates || [];
-        schedule2Result = parsed.schedule2Result || null;
-        schedule3Result = parsed.schedule3Result || { candidateA: null, candidateB: null, candidateC: null };
+        schedule3Result = { candidateA: (parsed.schedule3Result && parsed.schedule3Result.candidateA) || null };
+        // "수업 스케줄 생성1"/"생성2" 메뉴 삭제 이전에 저장된 생성3 결과(schedule3Result.candidateB/C)를
+        // 새 저장소(candidates 배열)로 1회 이관한다 — candidates가 비어있을 때만(옛 candidates 값이
+        // 남아있다면 그건 이미 폐지된 생성1 페이지의 결과라 더 이상 의미가 없으므로 생성3 쪽을 우선한다).
+        if (parsed.schedule3Result && (parsed.schedule3Result.candidateB || parsed.schedule3Result.candidateC)) {
+          candidates = [parsed.schedule3Result.candidateB, parsed.schedule3Result.candidateC].filter(Boolean);
+        }
         if (PAGE_IDS.indexOf(parsed.currentPage) !== -1) {
           currentPage = parsed.currentPage;
         } else if (OLD_PAGE_TO_NEW[parsed.currentPage]) {
@@ -296,9 +307,7 @@
     }
     if (!hadSavedState && availableCells.size === 0) {
       DEFAULT_BUSINESS_DAY_INDICES.forEach(di => {
-        const startSlot = (DEFAULT_BUSINESS_START_MIN - START_MIN) / SLOT_MIN;
-        const endSlot = (DEFAULT_BUSINESS_END_MIN - START_MIN) / SLOT_MIN;
-        for (let s = startSlot; s < endSlot; s++) availableCells.add(cellKey(di, s));
+        for (let s = DEFAULT_BUSINESS_START_SLOT; s < DEFAULT_BUSINESS_END_SLOT; s++) availableCells.add(cellKey(di, s));
       });
     }
     // Migrate members saved under the old single-branch field (locationId) to the
@@ -372,6 +381,31 @@
   // 상담 회원은 이미 항상 최대 1회로 제한되므로(위 규칙), "1회 제한 회원" 목록에는 표시하지 않는다.
   function isOnceLimitEligible(member) {
     return !!member && (member.category || "상담") !== "상담";
+  }
+
+  // "회원 스케줄 추가" 페이지의 회원 탭과 같은 방식: 지점은 풀네임 대신 한 글자 배지(전체
+  // 이름은 title 툴팁)로, 그 뒤에 이름을 붙인다 — 지점 풀네임을 쓰면 칩이 너무 길어지기 때문.
+  // createMemberSelectionWidget(미배정/1회 제한 회원 위젯)이 공통으로 쓴다.
+  function appendOnceLimitMemberLabel(container, member) {
+    const loc = locationById(member.locationIds[0]);
+    if (loc) {
+      const badge = document.createElement("span");
+      badge.className = "tab-loc";
+      badge.textContent = loc.name.charAt(0);
+      badge.title = loc.name;
+      container.appendChild(badge);
+    }
+    const nameEl = document.createElement("span");
+    nameEl.textContent = member.name;
+    container.appendChild(nameEl);
+  }
+
+  // 지점 등록 순서로 먼저 묶고, 같은 지점 안에서는 이름을 가나다순으로 정렬한다.
+  function compareOnceLimitMembers(a, b) {
+    const locOrder = new Map(state.locations.map((l, i) => [l.id, i]));
+    const aIdx = locOrder.has(a.locationIds[0]) ? locOrder.get(a.locationIds[0]) : Infinity;
+    const bIdx = locOrder.has(b.locationIds[0]) ? locOrder.get(b.locationIds[0]) : Infinity;
+    return (aIdx - bIdx) || a.name.localeCompare(b.name, "ko");
   }
 
 
@@ -602,24 +636,16 @@
   let editingLocationId = null;
 
   // 기본 설정(근무 가능 시간·지점·이동 시간)이 바뀌면 이미 생성된 수업 스케줄 후보는 더 이상
-  // 유효하지 않을 수 있으므로 자동으로 비운다. 스케줄 생성2 결과도 같은 입력값에 의존하므로
-  // 함께 비운다.
+  // 유효하지 않을 수 있으므로 자동으로 비운다.
   function invalidateCandidates() {
-    const hasSchedule3Result = schedule3Result.candidateA || schedule3Result.candidateB || schedule3Result.candidateC;
-    if (candidates.length === 0 && !schedule2Result && !hasSchedule3Result) return;
+    const hasResult = candidates.length > 0 || !!schedule3Result.candidateA;
+    if (!hasResult) return;
     candidates = [];
-    generateHintEl.textContent = "";
-    renderCandidates();
-    if (schedule2Result) {
-      schedule2Result = null;
-      renderSchedule2Result();
-      generateHint2El.textContent = "기본 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-    }
-    if (hasSchedule3Result) {
-      schedule3Result = { candidateA: null, candidateB: null, candidateC: null };
-      renderSchedule3Result();
-      generateHint3El.textContent = "기본 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-    }
+    schedule3Result = { candidateA: null };
+    Object.keys(candidateHistory).forEach(k => delete candidateHistory[k]);
+    Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]);
+    renderSchedule3Result();
+    generateHint3El.textContent = "기본 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
     saveState();
     showToast("기본 설정이 변경되어 생성된 수업 스케줄 후보가 초기화되었습니다", "info");
   }
@@ -699,7 +725,7 @@
             showToast("지점 이름이 저장되었습니다", "success");
             invalidateCandidates();
           } else {
-            renderCandidates();
+            renderSchedule3Result();
           }
         }
         input.addEventListener("keydown", (e) => {
@@ -934,8 +960,8 @@
       const endSel = document.createElement("select");
       fillAvailabilityTimeSelect(startSel, "start");
       fillAvailabilityTimeSelect(endSel, "end");
-      startSel.value = String(range ? range.start : 0);
-      endSel.value = String(range ? range.end : SLOT_COUNT);
+      startSel.value = String(range ? range.start : DEFAULT_BUSINESS_START_SLOT);
+      endSel.value = String(range ? range.end : DEFAULT_BUSINESS_END_SLOT);
       startSel.disabled = !isOn;
       endSel.disabled = !isOn;
       timeWrap.appendChild(startSel);
@@ -1847,8 +1873,7 @@
     saveState();
     renderMemberTable();
     renderRequestList();
-    renderCandidates();
-    renderSchedule2Result();
+    renderSchedule3Result();
     showToast("'" + member.name + "' 회원이 삭제되었습니다", "danger");
   }
 
@@ -1888,10 +1913,6 @@
   }
 
   function renderMemberTable() {
-    renderOnceLimitUI();
-    renderExcludedUI();
-    renderOnceLimit2UI();
-    renderExcluded2UI();
     onceLimit3Widget.renderAll();
     excluded3Widget.renderAll();
     memberTableBodyEl.innerHTML = "";
@@ -2110,6 +2131,213 @@
     showToast("'" + name + "' 회원이 등록되었습니다", "success");
   });
 
+  /* ---------------- 회원관리: 붙여넣기로 일괄 등록 ---------------- */
+  // "지점 / 구분 / 이름" 형식(지점은 쉼표로 여러 개 가능)을 한 줄에 한 명씩 붙여넣으면
+  // 파싱해서 미리보기에서 확인·수정한 뒤 한 번에 회원으로 등록한다.
+  const memberBulkImportOverlayEl = document.getElementById("memberBulkImportOverlay");
+  const memberBulkImportOpenBtn = document.getElementById("memberBulkImportOpenBtn");
+  const memberBulkImportCloseBtn = document.getElementById("memberBulkImportCloseBtn");
+  const memberBulkImportCancelBtn = document.getElementById("memberBulkImportCancelBtn");
+  const memberBulkImportBackBtn = document.getElementById("memberBulkImportBackBtn");
+  const memberBulkImportPreviewBtn = document.getElementById("memberBulkImportPreviewBtn");
+  const memberBulkImportApplyBtn = document.getElementById("memberBulkImportApplyBtn");
+  const memberBulkImportTextareaEl = document.getElementById("memberBulkImportTextarea");
+  const memberBulkImportStepInputEl = document.getElementById("memberBulkImportStepInput");
+  const memberBulkImportStepPreviewEl = document.getElementById("memberBulkImportStepPreview");
+  const memberBulkImportPreviewSummaryEl = document.getElementById("memberBulkImportPreviewSummary");
+  const memberBulkImportPreviewListEl = document.getElementById("memberBulkImportPreviewList");
+
+  // { raw, locationIds, category, name, skip, errors }
+  let memberBulkImportRows = [];
+
+  function parseMemberBulkLine(line) {
+    const raw = line.trim();
+    if (!raw) return null;
+    const parts = raw.split("/").map(s => s.trim());
+    const row = { raw, locationIds: [], unmatchedLocationNames: [], category: "", name: "", skip: false, errors: [] };
+    if (parts.length !== 3) {
+      row.errors.push("형식이 맞지 않습니다. \"지점 / 구분 / 이름\" 형식으로 입력해주세요.");
+      return row;
+    }
+    const [locPart, catPart, namePart] = parts;
+    const locationNames = locPart.split(/[,，、]/).map(s => s.trim()).filter(Boolean);
+    if (locationNames.length === 0) row.errors.push("지점을 입력해주세요.");
+    locationNames.forEach(n => {
+      const loc = state.locations.find(l => l.name === n);
+      if (loc) row.locationIds.push(loc.id);
+      else row.unmatchedLocationNames.push(n);
+    });
+    if (row.unmatchedLocationNames.length > 0) {
+      row.errors.push("등록되지 않은 지점: " + row.unmatchedLocationNames.join(", "));
+    }
+    row.category = catPart;
+    if (!CATEGORY_OPTIONS.includes(catPart)) {
+      row.errors.push("회원 구분은 " + CATEGORY_OPTIONS.join("/") + " 중 하나여야 합니다: \"" + catPart + "\"");
+    }
+    row.name = namePart;
+    if (!namePart) row.errors.push("이름을 입력해주세요.");
+    return row;
+  }
+
+  function openMemberBulkImportModal() {
+    memberBulkImportTextareaEl.value = "";
+    memberBulkImportStepInputEl.style.display = "";
+    memberBulkImportStepPreviewEl.style.display = "none";
+    memberBulkImportOverlayEl.classList.add("open");
+    setTimeout(() => memberBulkImportTextareaEl.focus(), 0);
+  }
+
+  function closeMemberBulkImportModal() {
+    memberBulkImportOverlayEl.classList.remove("open");
+  }
+
+  memberBulkImportOpenBtn.addEventListener("click", openMemberBulkImportModal);
+  memberBulkImportCloseBtn.addEventListener("click", closeMemberBulkImportModal);
+  memberBulkImportCancelBtn.addEventListener("click", closeMemberBulkImportModal);
+  memberBulkImportOverlayEl.addEventListener("click", (e) => {
+    if (e.target === memberBulkImportOverlayEl) closeMemberBulkImportModal();
+  });
+  memberBulkImportBackBtn.addEventListener("click", () => {
+    memberBulkImportStepInputEl.style.display = "";
+    memberBulkImportStepPreviewEl.style.display = "none";
+  });
+
+  function memberBulkRowIsDuplicate(row) {
+    return state.members.some(m => m.name === row.name && m.locationIds.some(id => row.locationIds.includes(id)));
+  }
+
+  function renderMemberBulkImportPreview() {
+    memberBulkImportPreviewListEl.innerHTML = "";
+    let willAdd = 0, willSkip = 0, willError = 0;
+
+    memberBulkImportRows.forEach(row => {
+      const hasError = row.errors.length > 0;
+      const duplicate = !hasError && memberBulkRowIsDuplicate(row);
+      if (hasError) willError++;
+      else if (row.skip) willSkip++;
+      else willAdd++;
+
+      const rowEl = document.createElement("div");
+      rowEl.className = "bulk-preview-row" + (row.skip || hasError ? " skip" : "");
+
+      const head = document.createElement("div");
+      head.className = "bulk-preview-row-head";
+
+      const nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.value = row.name;
+      nameInput.className = "bulk-preview-name";
+      nameInput.style.cssText = "border:1px solid var(--border);border-radius:8px;height:32px;padding:0 8px;width:120px;font-family:inherit;";
+      nameInput.addEventListener("input", () => {
+        row.name = nameInput.value.trim();
+        renderMemberBulkImportPreview();
+      });
+      head.appendChild(nameInput);
+
+      const catSelect = document.createElement("select");
+      CATEGORY_OPTIONS.forEach(opt => {
+        const o = document.createElement("option");
+        o.value = opt;
+        o.textContent = opt;
+        catSelect.appendChild(o);
+      });
+      if (CATEGORY_OPTIONS.includes(row.category)) catSelect.value = row.category;
+      catSelect.addEventListener("change", () => {
+        row.category = catSelect.value;
+        row.errors = row.errors.filter(e => !e.startsWith("회원 구분은"));
+        renderMemberBulkImportPreview();
+      });
+      head.appendChild(catSelect);
+
+      const skipLabel = document.createElement("label");
+      skipLabel.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:12.5px;color:var(--text-mute);margin-left:auto;";
+      const skipCheckbox = document.createElement("input");
+      skipCheckbox.type = "checkbox";
+      skipCheckbox.checked = row.skip;
+      skipCheckbox.disabled = hasError;
+      skipCheckbox.addEventListener("change", () => {
+        row.skip = skipCheckbox.checked;
+        renderMemberBulkImportPreview();
+      });
+      skipLabel.appendChild(skipCheckbox);
+      skipLabel.appendChild(document.createTextNode("건너뛰기"));
+      head.appendChild(skipLabel);
+
+      rowEl.appendChild(head);
+
+      const locWrap = document.createElement("div");
+      locWrap.className = "bulk-preview-new-fields";
+      state.locations.forEach(loc => {
+        const label = document.createElement("label");
+        label.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:12.5px;";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = row.locationIds.includes(loc.id);
+        cb.addEventListener("change", () => {
+          if (cb.checked) row.locationIds.push(loc.id);
+          else row.locationIds = row.locationIds.filter(id => id !== loc.id);
+          if (row.locationIds.length > 0) row.errors = row.errors.filter(e => !e.startsWith("지점을") && !e.startsWith("등록되지 않은 지점"));
+          renderMemberBulkImportPreview();
+        });
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(loc.name));
+        locWrap.appendChild(label);
+      });
+      rowEl.appendChild(locWrap);
+
+      if (hasError) {
+        const err = document.createElement("p");
+        err.className = "bulk-preview-note error";
+        err.textContent = row.errors.join(" ");
+        rowEl.appendChild(err);
+      } else if (duplicate) {
+        const note = document.createElement("p");
+        note.className = "bulk-preview-note warning";
+        note.textContent = "같은 지점에 동명 회원이 이미 있습니다. 그대로 등록하면 별도 회원으로 추가됩니다.";
+        rowEl.appendChild(note);
+      }
+
+      memberBulkImportPreviewListEl.appendChild(rowEl);
+    });
+
+    const parts = [willAdd + "명 등록"];
+    if (willSkip > 0) parts.push(willSkip + "명 건너뜀");
+    if (willError > 0) parts.push(willError + "명 형식 오류");
+    memberBulkImportPreviewSummaryEl.textContent = parts.join(" · ");
+    memberBulkImportApplyBtn.disabled = willAdd === 0;
+  }
+
+  memberBulkImportPreviewBtn.addEventListener("click", () => {
+    const lines = memberBulkImportTextareaEl.value.split("\n").map(parseMemberBulkLine).filter(Boolean);
+    if (lines.length === 0) {
+      alert("붙여넣은 내용이 없습니다.");
+      return;
+    }
+    memberBulkImportRows = lines;
+    memberBulkImportStepInputEl.style.display = "none";
+    memberBulkImportStepPreviewEl.style.display = "";
+    renderMemberBulkImportPreview();
+  });
+
+  memberBulkImportApplyBtn.addEventListener("click", () => {
+    const toAdd = memberBulkImportRows.filter(row => row.errors.length === 0 && !row.skip);
+    if (toAdd.length === 0) return;
+    toAdd.forEach(row => {
+      state.members.unshift({
+        id: uid("m"),
+        name: row.name,
+        locationIds: row.locationIds.slice(),
+        category: row.category,
+        memo: ""
+      });
+    });
+    saveState();
+    renderMemberTable();
+    renderRequestList();
+    closeMemberBulkImportModal();
+    showToast(toAdd.length + "명의 회원이 등록되었습니다", "success");
+  });
+
   /* ---------------- Requests page: desired-time entry ---------------- */
   // 요일 하나에 대해 [startSlot, endSlot] 범위 안에서 만들 수 있는 모든 후보(회원 구분별
   // 확보 시간만큼)의 시작 시각(10분 간격)을 희망 시간으로 등록한다. endSlot은 "마지막으로
@@ -2241,7 +2469,22 @@
     scheduleChipRowEl.innerHTML = "";
 
     if (state.members.length === 0) {
-      requestSummaryEl.textContent = "등록된 회원이 없습니다.";
+      requestSummaryEl.innerHTML = "";
+      requestSummaryEl.append(
+        "등록된 회원이 없습니다. ",
+        (() => {
+          const link = document.createElement("a");
+          link.href = "#";
+          link.className = "request-summary-link";
+          link.textContent = "회원관리";
+          link.addEventListener("click", e => {
+            e.preventDefault();
+            goToPage("members");
+          });
+          return link;
+        })(),
+        "에서 먼저 회원을 등록해 주세요."
+      );
       requestSummaryEl.style.display = "";
       scheduleInteractiveEl.style.display = "none";
       return;
@@ -2385,7 +2628,7 @@
     }
   }
 
-  /* ---------------- Candidates page ---------------- */
+  /* ---------------- 후보 계산 보조 함수 ---------------- */
   function requestCells(req) {
     const cells = [];
     const slots = durationToSlots(req.duration);
@@ -3147,7 +3390,7 @@
     {
       title: "후보B - 수업 횟수 최대",
       desc: "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.",
-      options: { sessionCountFirst: true, strengthenSearch: "sessions" },
+      options: { sessionCountFirst: true, strengthenSearch: "sessions", maxUnassigned: 1 },
       sort: defaultSort
     }
   ];
@@ -3165,23 +3408,15 @@
   // 기준을 오히려 후퇴시킬 수 있다(실제로 28건 → 27건으로 줄어드는 문제가 있었다). 세 값을
   // 모두, 선언한 순서 그대로 비교해 이런 후퇴를 막는다.
   function strengthenCandidate(baseline, sorted, eligibleIds, allMemberIds, options, pinned, primary) {
-    function score(cand) {
-      const count = new Set(cand.assigned.map(r => r.memberId)).size;
-      const sessions = cand.assigned.length;
-      const travel = totalTravelCount(cand.assigned);
-      return primary === "sessions" ? [sessions, count, travel] : [count, sessions, travel];
-    }
-    function isBetter(a, b) {
-      if (a[0] !== b[0]) return a[0] > b[0];
-      if (a[1] !== b[1]) return a[1] > b[1];
-      return a[2] < b[2];
-    }
+    // score/isBetter는 candidateSearchScore/isCandidateWorse와 같은 기준(options.maxUnassigned
+    // 포함)을 써야 한다 — 여기서만 따로 계산하면 후보B의 "미배정 1명까지 허용" 상한이 이
+    // 사전 강화 단계에서는 무시된 채 수업 건수만으로 골라버릴 수 있다.
     let best = baseline;
-    let bestScore = score(best);
+    let bestScore = candidateSearchScore(best, primary, options.maxUnassigned);
     function consider(opts) {
       const attempt = buildCandidate(baseline.title, baseline.desc, sorted, eligibleIds, allMemberIds, opts, pinned);
-      const attemptScore = score(attempt);
-      if (isBetter(attemptScore, bestScore)) {
+      const attemptScore = candidateSearchScore(attempt, primary, options.maxUnassigned);
+      if (isCandidateWorse(bestScore, attemptScore)) {
         best = attempt; bestScore = attemptScore;
       }
     }
@@ -3223,11 +3458,11 @@
   // 최대 6명까지만 시도해 미배정이 많은 경우에도 시간이 무한정 늘어나지 않게 한다.
   function repairUnassigned(baseline, sorted, eligibleIds, allMemberIds, options, pinned, primary) {
     let best = baseline;
-    let bestScore = candidateSearchScore(best, primary);
+    let bestScore = candidateSearchScore(best, primary, options.maxUnassigned);
     function tryForce(ids) {
       const forcedOptions = Object.assign({}, options, { forceOnceMemberIds: ids });
       const attempt = buildCandidate(baseline.title, baseline.desc, sorted, eligibleIds, allMemberIds, forcedOptions, pinned);
-      const attemptScore = candidateSearchScore(attempt, primary);
+      const attemptScore = candidateSearchScore(attempt, primary, options.maxUnassigned);
       if (!isCandidateWorse(attemptScore, bestScore)) {
         best = attempt;
         bestScore = attemptScore;
@@ -3281,16 +3516,24 @@
   // 때 더 나은 조합을 찾을 때(generateCandidates)와, 재생성 시 지금보다 못한 결과로 후퇴하지
   // 않게 막을 때(regenerateCandidate) 공통으로 쓴다 — 항상 그 후보 자신의 primary로 비교해야
   // 한다.
-  function candidateSearchScore(cand, primary) {
+  // maxUnassigned가 주어지면(후보B의 "미배정 1명까지 허용") 그 상한을 지키는지 여부를 다른 무엇
+  // 보다도 먼저 비교한다 — 안 그러면 "수업 건수 최대화"가 항상 이겨서, 상한을 어기고서라도
+  // 수업 건수가 더 많은 조합을 골라버려(예: 미배정 2명) 후보 설명이 내세우는 상한이 지켜지지
+  // 않는다(실제로 이 문제가 있었다). 상한을 지키는 조합이 아예 없을 때만(둘 다 위반) 그 아래
+  // 기준으로 비교한다.
+  function candidateSearchScore(cand, primary, maxUnassigned) {
     const count = new Set(cand.assigned.map(r => r.memberId)).size;
     const sessions = cand.assigned.length;
     const travel = totalTravelCount(cand.assigned);
-    return primary === "sessions" ? [sessions, count, travel] : [count, sessions, travel];
+    const capOk = (typeof maxUnassigned === "number" && cand.unassignedMembers.length > maxUnassigned) ? 0 : 1;
+    const base = primary === "sessions" ? [sessions, count, travel] : [count, sessions, travel];
+    return [capOk, base[0], base[1], base[2]];
   }
   function isCandidateWorse(a, b) {
     if (a[0] !== b[0]) return a[0] < b[0];
     if (a[1] !== b[1]) return a[1] < b[1];
-    return a[2] > b[2];
+    if (a[2] !== b[2]) return a[2] < b[2];
+    return a[3] > b[3];
   }
   // strategyIndex의 STRATEGIES 정의에서 primary("count" 기본 / "sessions")를 읽어온다.
   // options가 함수(후보I/J)면 strengthenSearch를 쓰지 않으므로 항상 기본값이다.
@@ -3298,6 +3541,12 @@
     const options = STRATEGIES[strategyIndex].options;
     const strategyOptions = typeof options === "function" ? {} : options;
     return strategyOptions.strengthenSearch === "sessions" ? "sessions" : "count";
+  }
+  // strategyIndex의 STRATEGIES 정의에서 maxUnassigned(미배정 허용 상한, 없으면 null)를 읽어온다.
+  function strategyMaxUnassigned(strategyIndex) {
+    const options = STRATEGIES[strategyIndex].options;
+    const strategyOptions = typeof options === "function" ? {} : options;
+    return typeof strategyOptions.maxUnassigned === "number" ? strategyOptions.maxUnassigned : null;
   }
 
   // 시드 기반 의사난수: 초기 생성 시에도 여러 조합을 탐색해 그중 최선을 보여주되, 같은
@@ -3367,12 +3616,11 @@
   }
   // "후보 생성하기" 시 전략당 추가로 시도해볼 조합 수. generateCandidatesAsync는 모든 전략의
   // 시도 결과를 하나의 공용 풀에 합치고(아래 pool 관련 주석 참고) 각 후보는 자기 기준으로 그
-  // 풀 전체에서 최선을 고르므로, 표시되는 전략 수가 줄 때마다(원래 6개 → 후보C/G 삭제로 4개 →
-  // 후보I/J 삭제로 2개) 전략당 시도 수를 그만큼 늘려야 풀 전체 크기(=탐색 다양성)가 줄어들지
-  // 않는다 — 안 늘리면 후보A("인원 최대화")가 삭제된 전략들의 시도에서 빌려오던, 미배정 0명
-  // 조합을 더는 찾지 못해 같은 데이터로도 미배정이 생기는 회귀가 생긴다. 원래 6 × (50+1) ≈
-  // 2 × (153+1)로 총 시도 수를 맞춘다.
-  const INITIAL_SEARCH_ATTEMPTS = 153;
+  // 풀 전체에서 최선을 고른다. 153회로는 실제 데이터에서 찾을 수 있는 조합(예: 미배정 0명을
+  // 지키면서 수업 28건)을 못 찾고 26건에 머무는 경우가 있었고, 실측 결과 600회는 넘어야 그
+  // 조합을 안정적으로 찾았다 — 여유를 두어 1000회로 늘렸다(약 10분 소요, 생성3는 페이지를
+  // 이동해도 백그라운드에서 계속 진행되므로 결과를 기다리는 동안 다른 메뉴를 써도 된다).
+  const INITIAL_SEARCH_ATTEMPTS = 1000;
   // "다음 후보" 시 전략당 추가로 시도해볼 조합 수. regenerateCandidate는 (generateCandidatesAsync와
   // 달리) searchStrategyPool로 그 전략 하나만의 풀을 새로 만들어 쓰므로 다른 전략 수의 영향을
   // 받지 않는다 — 초기 생성과 다른 값을 쓸 수 있도록 별도로 둔 것뿐이다.
@@ -3442,11 +3690,12 @@
       const strategyOptions = strategy.options;
       const myWeeklyCap = (strategyOptions && typeof strategyOptions !== "function" && typeof strategyOptions.maxTravelsPerWeek === "number")
         ? strategyOptions.maxTravelsPerWeek : null;
+      const myMaxUnassigned = strategyMaxUnassigned(idx);
       let best = null;
       let bestScore = null;
       pool.forEach(cand => {
         if (myWeeklyCap != null && totalTravelCount(cand.assigned) > myWeeklyCap) return;
-        const score = candidateSearchScore(cand, myPrimary);
+        const score = candidateSearchScore(cand, myPrimary, myMaxUnassigned);
         if (!best || isCandidateWorse(bestScore, score)) { best = cand; bestScore = score; }
       });
       return Object.assign({}, best, { title: strategy.title, desc: strategy.desc, strategyIndex: idx });
@@ -3500,21 +3749,22 @@
     // 비교는 이 전략 자신의 primary로 해야 한다 — 그래야 후보B가 "다음 후보"를 눌러도
     // 인원 기준으로 강제되지 않고, 자기가 내세우는 수업 건수 우선 트레이드오프를 유지한다.
     const myPrimary = strategyPrimary(strategyIndex);
+    const myMaxUnassigned = strategyMaxUnassigned(strategyIndex);
     const pool = await searchStrategyPool(
       strategyIndex, eligible, eligibleIds, allMemberIds, pinned, REGENERATE_SEARCH_ATTEMPTS, Math.random, onProgress);
     let baseline = pool[0];
-    let baselineScore = candidateSearchScore(baseline, myPrimary);
+    let baselineScore = candidateSearchScore(baseline, myPrimary, myMaxUnassigned);
     pool.forEach(cand => {
-      const score = candidateSearchScore(cand, myPrimary);
+      const score = candidateSearchScore(cand, myPrimary, myMaxUnassigned);
       if (isCandidateWorse(baselineScore, score)) { baseline = cand; baselineScore = score; }
     });
     // floorCand: baseline과 prevCand 중 더 나은 쪽. "새로운 조합을 못 찾았을 때"도 이 값으로
     // 돌아가야지, baseline으로 그냥 되돌리면 prevCand보다 못한 결과가 화면에 나타날 수 있다
     // (아래 !newCand 분기 참고) — "다음 후보"를 반복 클릭했을 때 수업 건수가 오르내리며
     // 들쭉날쭉해 보이는 문제가 바로 이 지점에서 나고 있었다.
-    const floorCand = (prevCand && isCandidateWorse(baselineScore, candidateSearchScore(prevCand, myPrimary)))
+    const floorCand = (prevCand && isCandidateWorse(baselineScore, candidateSearchScore(prevCand, myPrimary, myMaxUnassigned)))
       ? prevCand : baseline;
-    const floorScore = candidateSearchScore(floorCand, myPrimary);
+    const floorScore = candidateSearchScore(floorCand, myPrimary, myMaxUnassigned);
 
     // 방금 만든 풀(pool) 안에서, 아직 못 본 조합 중 최소 허용선(floor) 이상인 것 중 가장 좋은
     // 것을 고른다 — 별도로 다시 시도하지 않고 이미 계산해둔 (attempts+1)개를 그대로 훑으므로,
@@ -3523,7 +3773,7 @@
     let newCand = null;
     let newScore = null;
     pool.forEach(cand => {
-      const score = candidateSearchScore(cand, myPrimary);
+      const score = candidateSearchScore(cand, myPrimary, myMaxUnassigned);
       if (isCandidateWorse(score, floorScore)) return; // 최소 허용선보다 못하면 버린다
       const sig = candidateSignature(cand);
       if (seen.has(sig)) return;
@@ -3543,7 +3793,7 @@
       }
       candidates[strategyIndex] = newCand;
       saveState();
-      renderCandidates();
+      renderSchedule3Result();
       showToast("더 나은 조합을 찾지 못해 다시 탐색합니다", "info");
       return;
     }
@@ -3555,7 +3805,7 @@
     }
     candidates[strategyIndex] = newCand;
     saveState();
-    renderCandidates();
+    renderSchedule3Result();
     showToast("후보가 재생성되었습니다", "success");
   }
 
@@ -3566,15 +3816,14 @@
     if (!stack || stack.length === 0) return;
     candidates[strategyIndex] = stack.pop();
     saveState();
-    renderCandidates();
+    renderSchedule3Result();
     showToast("이전 후보로 되돌아갔습니다", "info");
   }
 
   // 후보 카드의 일정 하나를 확정한다: 재생성해도 이 일정은 고정되고 나머지만 다시 배정된다.
-  // onDone: 확정/확정취소 뒤 다시 그릴 함수. 기본은 페이지 1(renderCandidates)이지만,
-  // 페이지 3의 후보B/C처럼 같은 candidate 모양을 다른 화면에서 보여줄 때는 그 화면의 렌더
-  // 함수를 넘겨 받는다.
-  function confirmCandidateSession(candidate, reqId, onDone = renderCandidates) {
+  // onDone: 확정/확정취소 뒤 다시 그릴 함수. 생성3의 후보B/C 카드에서 항상 renderSchedule3Result를
+  // 명시적으로 넘겨받아 쓴다.
+  function confirmCandidateSession(candidate, reqId, onDone = renderSchedule3Result) {
     if (!confirm("스케줄을 확정하시겠습니까?")) return;
     if (!Array.isArray(candidate.confirmedIds)) candidate.confirmedIds = [];
     if (!candidate.confirmedIds.includes(reqId)) candidate.confirmedIds.push(reqId);
@@ -3584,7 +3833,7 @@
   }
 
   // 확정된 일정을 다시 눌러 확정을 취소한다.
-  function unconfirmCandidateSession(candidate, reqId, onDone = renderCandidates) {
+  function unconfirmCandidateSession(candidate, reqId, onDone = renderSchedule3Result) {
     if (!confirm("확정된 스케줄을 취소하시겠습니까?")) return;
     candidate.confirmedIds = (candidate.confirmedIds || []).filter(id => id !== reqId);
     saveState();
@@ -3592,7 +3841,7 @@
     showToast("스케줄 확정이 취소되었습니다", "info");
   }
 
-  function candidateToBlocks(candidate, onDone = renderCandidates) {
+  function candidateToBlocks(candidate, onDone = renderSchedule3Result) {
     const confirmedIds = new Set(candidate.confirmedIds || []);
     return candidate.assigned.map(r => {
       const m = memberById(r.memberId);
@@ -3644,558 +3893,6 @@
     return travelBlocks;
   }
 
-  const candidatesEl = document.getElementById("candidates");
-  const generateHintEl = document.getElementById("generateHint");
-  // "수업 N건 이상 후보만 보기" 필터: 기능 자체를 잠시 끈다 (index.html의 candidates-toolbar도 함께 주석 처리됨)
-  // const minSessionFilterInputEl = document.getElementById("minSessionFilterInput");
-  // const candidateFilterHiddenCountEl = document.getElementById("candidateFilterHiddenCount");
-  // minSessionFilterInputEl.addEventListener("input", () => {
-  //   if (minSessionFilterInputEl.value === "" || parseInt(minSessionFilterInputEl.value, 10) < 1) {
-  //     minSessionFilterInputEl.value = "1";
-  //   }
-  //   renderCandidates();
-  // });
-
-  // 한 번 설정해두고 매번 열어보지 않아도 되도록, 현재 걸려있는 "1회 제한 회원"은 칩으로 항상
-  // 보여주고(× 로 제거), "+ 추가" 버튼을 눌렀을 때만 아직 추가되지 않은 회원 목록을 드롭다운으로 띄운다.
-  const onceLimitMsEl = document.getElementById("onceLimitMs");
-  const onceLimitControlEl = document.getElementById("onceLimitControl");
-  const onceLimitChipRowEl = document.getElementById("onceLimitChipRow");
-  const onceLimitDropdownEl = document.getElementById("onceLimitDropdown");
-  let onceLimitDropdownOpen = false;
-
-  // "회원 스케줄 추가" 페이지의 회원 탭과 같은 방식: 지점은 풀네임 대신 한 글자 배지(전체
-  // 이름은 title 툴팁)로, 그 뒤에 이름을 붙인다 — 지점 풀네임을 쓰면 칩이 너무 길어지기 때문.
-  function appendOnceLimitMemberLabel(container, member) {
-    const loc = locationById(member.locationIds[0]);
-    if (loc) {
-      const badge = document.createElement("span");
-      badge.className = "tab-loc";
-      badge.textContent = loc.name.charAt(0);
-      badge.title = loc.name;
-      container.appendChild(badge);
-    }
-    const nameEl = document.createElement("span");
-    nameEl.textContent = member.name;
-    container.appendChild(nameEl);
-  }
-
-  function onOnceLimitChanged() {
-    // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 후보가 있으면 즉시 비운다.
-    if (candidates.length > 0) {
-      candidates = [];
-      renderCandidates();
-      generateHintEl.textContent = "1회 제한 회원 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-    } else {
-      requestsChangedSinceGenerate = true;
-    }
-    saveState();
-    renderOnceLimitChips();
-    renderOnceLimitDropdown();
-  }
-
-  function addOnceLimitMember(memberId) {
-    if (state.onceLimitedMemberIds.includes(memberId)) return;
-    if (state.excludedMemberIds.includes(memberId)) {
-      alert("미배정 회원에 추가되어 있는 회원입니다.\n미배정 회원에서 삭제 후 다시 추가해 주세요.");
-      return;
-    }
-    state.onceLimitedMemberIds = state.onceLimitedMemberIds.concat(memberId);
-    onOnceLimitChanged();
-  }
-
-  function removeOnceLimitMember(memberId) {
-    state.onceLimitedMemberIds = state.onceLimitedMemberIds.filter(id => id !== memberId);
-    onOnceLimitChanged();
-  }
-
-  // 지점 등록 순서로 먼저 묶고, 같은 지점 안에서는 이름을 가나다순으로 정렬한다.
-  function compareOnceLimitMembers(a, b) {
-    const locOrder = new Map(state.locations.map((l, i) => [l.id, i]));
-    const aIdx = locOrder.has(a.locationIds[0]) ? locOrder.get(a.locationIds[0]) : Infinity;
-    const bIdx = locOrder.has(b.locationIds[0]) ? locOrder.get(b.locationIds[0]) : Infinity;
-    return (aIdx - bIdx) || a.name.localeCompare(b.name, "ko");
-  }
-
-  function renderOnceLimitChips() {
-    onceLimitChipRowEl.innerHTML = "";
-    // "+ 추가" 버튼은 회원 칩이 몇 개든 항상 목록 맨 앞(같은 자리)에 오도록 매번 다시 붙인다.
-    onceLimitChipRowEl.appendChild(onceLimitMsEl);
-    const selectedMembers = state.onceLimitedMemberIds
-      .map(id => memberById(id))
-      .filter(isOnceLimitEligible)
-      .sort(compareOnceLimitMembers);
-    if (selectedMembers.length === 0) {
-      const placeholder = document.createElement("span");
-      placeholder.className = "ms-placeholder";
-      placeholder.textContent = "설정된 회원 없음";
-      onceLimitChipRowEl.appendChild(placeholder);
-      return;
-    }
-    selectedMembers.forEach(m => {
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      appendOnceLimitMemberLabel(chip, m);
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.textContent = "×";
-      removeBtn.title = "제거";
-      removeBtn.addEventListener("click", () => removeOnceLimitMember(m.id));
-      chip.appendChild(removeBtn);
-      onceLimitChipRowEl.appendChild(chip);
-    });
-  }
-
-  function renderOnceLimitDropdown() {
-    onceLimitDropdownEl.innerHTML = "";
-    const eligibleMembers = state.members.filter(isOnceLimitEligible);
-    const addable = eligibleMembers
-      .filter(m => !state.onceLimitedMemberIds.includes(m.id))
-      .sort(compareOnceLimitMembers);
-    if (eligibleMembers.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "ms-empty";
-      empty.textContent = "등록 회원이 없습니다. (상담 회원은 이미 항상 1회로 제한됩니다)";
-      onceLimitDropdownEl.appendChild(empty);
-      return;
-    }
-    if (addable.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "ms-empty";
-      empty.textContent = "모든 회원이 이미 추가되어 있습니다.";
-      onceLimitDropdownEl.appendChild(empty);
-      return;
-    }
-    addable.forEach(m => {
-      const item = document.createElement("div");
-      item.className = "ms-option";
-      item.setAttribute("role", "option");
-      appendOnceLimitMemberLabel(item, m);
-      item.addEventListener("click", (e) => {
-        e.stopPropagation();
-        addOnceLimitMember(m.id);
-      });
-      onceLimitDropdownEl.appendChild(item);
-    });
-  }
-
-  function openOnceLimitDropdown() {
-    if (!state.members.some(isOnceLimitEligible)) return;
-    onceLimitDropdownOpen = true;
-    onceLimitMsEl.classList.add("open");
-    onceLimitControlEl.setAttribute("aria-expanded", "true");
-  }
-
-  function closeOnceLimitDropdown() {
-    onceLimitDropdownOpen = false;
-    onceLimitMsEl.classList.remove("open");
-    onceLimitControlEl.setAttribute("aria-expanded", "false");
-  }
-
-  onceLimitControlEl.addEventListener("click", () => {
-    if (onceLimitDropdownOpen) closeOnceLimitDropdown();
-    else openOnceLimitDropdown();
-  });
-
-  function renderOnceLimitUI() {
-    state.onceLimitedMemberIds = state.onceLimitedMemberIds.filter(id => isOnceLimitEligible(memberById(id)));
-    renderOnceLimitChips();
-    renderOnceLimitDropdown();
-  }
-
-  document.addEventListener("click", (e) => {
-    if (onceLimitDropdownOpen && !onceLimitMsEl.contains(e.target)) closeOnceLimitDropdown();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && onceLimitDropdownOpen) closeOnceLimitDropdown();
-  });
-
-  // "미배정 회원": 선택한 회원은 후보 생성에서 아예 제외한다(1회 제한 회원과 같은 칩+드롭다운
-  // UI를 그대로 따른다). 구분과 무관하게 모든 회원이 대상이다.
-  const excludedMsEl = document.getElementById("excludedMs");
-  const excludedControlEl = document.getElementById("excludedControl");
-  const excludedChipRowEl = document.getElementById("excludedChipRow");
-  const excludedDropdownEl = document.getElementById("excludedDropdown");
-  let excludedDropdownOpen = false;
-
-  function onExcludedChanged() {
-    // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 후보가 있으면 즉시 비운다.
-    if (candidates.length > 0) {
-      candidates = [];
-      renderCandidates();
-      generateHintEl.textContent = "미배정 회원 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-    } else {
-      requestsChangedSinceGenerate = true;
-    }
-    saveState();
-    renderExcludedChips();
-    renderExcludedDropdown();
-  }
-
-  function addExcludedMember(memberId) {
-    if (state.excludedMemberIds.includes(memberId)) return;
-    if (state.onceLimitedMemberIds.includes(memberId)) {
-      alert("1회 제한 회원에 추가되어 있는 회원입니다.\n1회 제한 회원에서 삭제 후 다시 추가해 주세요.");
-      return;
-    }
-    state.excludedMemberIds = state.excludedMemberIds.concat(memberId);
-    onExcludedChanged();
-  }
-
-  function removeExcludedMember(memberId) {
-    state.excludedMemberIds = state.excludedMemberIds.filter(id => id !== memberId);
-    onExcludedChanged();
-  }
-
-  function renderExcludedChips() {
-    excludedChipRowEl.innerHTML = "";
-    // "+ 추가" 버튼은 회원 칩이 몇 개든 항상 목록 맨 앞(같은 자리)에 오도록 매번 다시 붙인다.
-    excludedChipRowEl.appendChild(excludedMsEl);
-    const selectedMembers = state.excludedMemberIds
-      .map(id => memberById(id))
-      .filter(Boolean)
-      .sort(compareOnceLimitMembers);
-    if (selectedMembers.length === 0) {
-      const placeholder = document.createElement("span");
-      placeholder.className = "ms-placeholder";
-      placeholder.textContent = "설정된 회원 없음";
-      excludedChipRowEl.appendChild(placeholder);
-      return;
-    }
-    selectedMembers.forEach(m => {
-      const chip = document.createElement("span");
-      chip.className = "chip chip-excluded";
-      appendOnceLimitMemberLabel(chip, m);
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.textContent = "×";
-      removeBtn.title = "제거";
-      removeBtn.addEventListener("click", () => removeExcludedMember(m.id));
-      chip.appendChild(removeBtn);
-      excludedChipRowEl.appendChild(chip);
-    });
-  }
-
-  function renderExcludedDropdown() {
-    excludedDropdownEl.innerHTML = "";
-    const addable = state.members
-      .filter(m => !state.excludedMemberIds.includes(m.id))
-      .sort(compareOnceLimitMembers);
-    if (state.members.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "ms-empty";
-      empty.textContent = "등록된 회원이 없습니다.";
-      excludedDropdownEl.appendChild(empty);
-      return;
-    }
-    if (addable.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "ms-empty";
-      empty.textContent = "모든 회원이 이미 추가되어 있습니다.";
-      excludedDropdownEl.appendChild(empty);
-      return;
-    }
-    addable.forEach(m => {
-      const item = document.createElement("div");
-      item.className = "ms-option";
-      item.setAttribute("role", "option");
-      appendOnceLimitMemberLabel(item, m);
-      item.addEventListener("click", (e) => {
-        e.stopPropagation();
-        addExcludedMember(m.id);
-      });
-      excludedDropdownEl.appendChild(item);
-    });
-  }
-
-  function openExcludedDropdown() {
-    if (state.members.length === 0) return;
-    excludedDropdownOpen = true;
-    excludedMsEl.classList.add("open");
-    excludedControlEl.setAttribute("aria-expanded", "true");
-  }
-
-  function closeExcludedDropdown() {
-    excludedDropdownOpen = false;
-    excludedMsEl.classList.remove("open");
-    excludedControlEl.setAttribute("aria-expanded", "false");
-  }
-
-  excludedControlEl.addEventListener("click", () => {
-    if (excludedDropdownOpen) closeExcludedDropdown();
-    else openExcludedDropdown();
-  });
-
-  function renderExcludedUI() {
-    state.excludedMemberIds = state.excludedMemberIds.filter(id => !!memberById(id));
-    renderExcludedChips();
-    renderExcludedDropdown();
-  }
-
-  document.addEventListener("click", (e) => {
-    if (excludedDropdownOpen && !excludedMsEl.contains(e.target)) closeExcludedDropdown();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && excludedDropdownOpen) closeExcludedDropdown();
-  });
-
-  /* ---------------- "수업 스케줄 생성2" 전용: 미배정 회원 · 1회 제한 회원 ----------------
-     기존 스케줄 생성(schedule)과는 별개의 상태(onceLimitedMemberIds2 / excludedMemberIds2)로
-     관리한다. 이 설정이 바뀌면 이미 생성된 스케줄 생성2 결과가 더 이상 유효하지 않을 수 있으므로,
-     아래 onOnceLimit2Changed/onExcluded2Changed에서 그 결과를 초기화한다. */
-
-  const onceLimit2MsEl = document.getElementById("onceLimitMs2");
-  const onceLimit2ControlEl = document.getElementById("onceLimitControl2");
-  const onceLimit2ChipRowEl = document.getElementById("onceLimitChipRow2");
-  const onceLimit2DropdownEl = document.getElementById("onceLimitDropdown2");
-  let onceLimit2DropdownOpen = false;
-
-  // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 결과가 있으면 즉시 비운다.
-  function onOnceLimit2Changed() {
-    if (schedule2Result) {
-      schedule2Result = null;
-      renderSchedule2Result();
-      generateHint2El.textContent = "1회 제한 회원 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-    } else {
-      requestsChangedSinceGenerate2 = true;
-    }
-    saveState();
-    renderOnceLimit2Chips();
-    renderOnceLimit2Dropdown();
-  }
-
-  function addOnceLimit2Member(memberId) {
-    if (state.onceLimitedMemberIds2.includes(memberId)) return;
-    if (state.excludedMemberIds2.includes(memberId)) {
-      alert("미배정 회원에 추가되어 있는 회원입니다.\n미배정 회원에서 삭제 후 다시 추가해 주세요.");
-      return;
-    }
-    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.concat(memberId);
-    onOnceLimit2Changed();
-  }
-
-  function removeOnceLimit2Member(memberId) {
-    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.filter(id => id !== memberId);
-    onOnceLimit2Changed();
-  }
-
-  function renderOnceLimit2Chips() {
-    onceLimit2ChipRowEl.innerHTML = "";
-    onceLimit2ChipRowEl.appendChild(onceLimit2MsEl);
-    const selectedMembers = state.onceLimitedMemberIds2
-      .map(id => memberById(id))
-      .filter(isOnceLimitEligible)
-      .sort(compareOnceLimitMembers);
-    if (selectedMembers.length === 0) {
-      const placeholder = document.createElement("span");
-      placeholder.className = "ms-placeholder";
-      placeholder.textContent = "설정된 회원 없음";
-      onceLimit2ChipRowEl.appendChild(placeholder);
-      return;
-    }
-    selectedMembers.forEach(m => {
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      appendOnceLimitMemberLabel(chip, m);
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.textContent = "×";
-      removeBtn.title = "제거";
-      removeBtn.addEventListener("click", () => removeOnceLimit2Member(m.id));
-      chip.appendChild(removeBtn);
-      onceLimit2ChipRowEl.appendChild(chip);
-    });
-  }
-
-  function renderOnceLimit2Dropdown() {
-    onceLimit2DropdownEl.innerHTML = "";
-    const eligibleMembers = state.members.filter(isOnceLimitEligible);
-    const addable = eligibleMembers
-      .filter(m => !state.onceLimitedMemberIds2.includes(m.id))
-      .sort(compareOnceLimitMembers);
-    if (eligibleMembers.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "ms-empty";
-      empty.textContent = "등록 회원이 없습니다. (상담 회원은 이미 항상 1회로 제한됩니다)";
-      onceLimit2DropdownEl.appendChild(empty);
-      return;
-    }
-    if (addable.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "ms-empty";
-      empty.textContent = "모든 회원이 이미 추가되어 있습니다.";
-      onceLimit2DropdownEl.appendChild(empty);
-      return;
-    }
-    addable.forEach(m => {
-      const item = document.createElement("div");
-      item.className = "ms-option";
-      item.setAttribute("role", "option");
-      appendOnceLimitMemberLabel(item, m);
-      item.addEventListener("click", (e) => {
-        e.stopPropagation();
-        addOnceLimit2Member(m.id);
-      });
-      onceLimit2DropdownEl.appendChild(item);
-    });
-  }
-
-  function openOnceLimit2Dropdown() {
-    if (!state.members.some(isOnceLimitEligible)) return;
-    onceLimit2DropdownOpen = true;
-    onceLimit2MsEl.classList.add("open");
-    onceLimit2ControlEl.setAttribute("aria-expanded", "true");
-  }
-
-  function closeOnceLimit2Dropdown() {
-    onceLimit2DropdownOpen = false;
-    onceLimit2MsEl.classList.remove("open");
-    onceLimit2ControlEl.setAttribute("aria-expanded", "false");
-  }
-
-  onceLimit2ControlEl.addEventListener("click", () => {
-    if (onceLimit2DropdownOpen) closeOnceLimit2Dropdown();
-    else openOnceLimit2Dropdown();
-  });
-
-  function renderOnceLimit2UI() {
-    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.filter(id => isOnceLimitEligible(memberById(id)));
-    renderOnceLimit2Chips();
-    renderOnceLimit2Dropdown();
-  }
-
-  document.addEventListener("click", (e) => {
-    if (onceLimit2DropdownOpen && !onceLimit2MsEl.contains(e.target)) closeOnceLimit2Dropdown();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && onceLimit2DropdownOpen) closeOnceLimit2Dropdown();
-  });
-
-  const excluded2MsEl = document.getElementById("excludedMs2");
-  const excluded2ControlEl = document.getElementById("excludedControl2");
-  const excluded2ChipRowEl = document.getElementById("excludedChipRow2");
-  const excluded2DropdownEl = document.getElementById("excludedDropdown2");
-  let excluded2DropdownOpen = false;
-
-  // 이 옵션은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 결과가 있으면 즉시 비운다.
-  function onExcluded2Changed() {
-    if (schedule2Result) {
-      schedule2Result = null;
-      renderSchedule2Result();
-      generateHint2El.textContent = "미배정 회원 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-    } else {
-      requestsChangedSinceGenerate2 = true;
-    }
-    saveState();
-    renderExcluded2Chips();
-    renderExcluded2Dropdown();
-  }
-
-  function addExcluded2Member(memberId) {
-    if (state.excludedMemberIds2.includes(memberId)) return;
-    if (state.onceLimitedMemberIds2.includes(memberId)) {
-      alert("1회 제한 회원에 추가되어 있는 회원입니다.\n1회 제한 회원에서 삭제 후 다시 추가해 주세요.");
-      return;
-    }
-    state.excludedMemberIds2 = state.excludedMemberIds2.concat(memberId);
-    onExcluded2Changed();
-  }
-
-  function removeExcluded2Member(memberId) {
-    state.excludedMemberIds2 = state.excludedMemberIds2.filter(id => id !== memberId);
-    onExcluded2Changed();
-  }
-
-  function renderExcluded2Chips() {
-    excluded2ChipRowEl.innerHTML = "";
-    excluded2ChipRowEl.appendChild(excluded2MsEl);
-    const selectedMembers = state.excludedMemberIds2
-      .map(id => memberById(id))
-      .filter(Boolean)
-      .sort(compareOnceLimitMembers);
-    if (selectedMembers.length === 0) {
-      const placeholder = document.createElement("span");
-      placeholder.className = "ms-placeholder";
-      placeholder.textContent = "설정된 회원 없음";
-      excluded2ChipRowEl.appendChild(placeholder);
-      return;
-    }
-    selectedMembers.forEach(m => {
-      const chip = document.createElement("span");
-      chip.className = "chip chip-excluded";
-      appendOnceLimitMemberLabel(chip, m);
-      const removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.textContent = "×";
-      removeBtn.title = "제거";
-      removeBtn.addEventListener("click", () => removeExcluded2Member(m.id));
-      chip.appendChild(removeBtn);
-      excluded2ChipRowEl.appendChild(chip);
-    });
-  }
-
-  function renderExcluded2Dropdown() {
-    excluded2DropdownEl.innerHTML = "";
-    const addable = state.members
-      .filter(m => !state.excludedMemberIds2.includes(m.id))
-      .sort(compareOnceLimitMembers);
-    if (state.members.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "ms-empty";
-      empty.textContent = "등록된 회원이 없습니다.";
-      excluded2DropdownEl.appendChild(empty);
-      return;
-    }
-    if (addable.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "ms-empty";
-      empty.textContent = "모든 회원이 이미 추가되어 있습니다.";
-      excluded2DropdownEl.appendChild(empty);
-      return;
-    }
-    addable.forEach(m => {
-      const item = document.createElement("div");
-      item.className = "ms-option";
-      item.setAttribute("role", "option");
-      appendOnceLimitMemberLabel(item, m);
-      item.addEventListener("click", (e) => {
-        e.stopPropagation();
-        addExcluded2Member(m.id);
-      });
-      excluded2DropdownEl.appendChild(item);
-    });
-  }
-
-  function openExcluded2Dropdown() {
-    if (state.members.length === 0) return;
-    excluded2DropdownOpen = true;
-    excluded2MsEl.classList.add("open");
-    excluded2ControlEl.setAttribute("aria-expanded", "true");
-  }
-
-  function closeExcluded2Dropdown() {
-    excluded2DropdownOpen = false;
-    excluded2MsEl.classList.remove("open");
-    excluded2ControlEl.setAttribute("aria-expanded", "false");
-  }
-
-  excluded2ControlEl.addEventListener("click", () => {
-    if (excluded2DropdownOpen) closeExcluded2Dropdown();
-    else openExcluded2Dropdown();
-  });
-
-  function renderExcluded2UI() {
-    state.excludedMemberIds2 = state.excludedMemberIds2.filter(id => !!memberById(id));
-    renderExcluded2Chips();
-    renderExcluded2Dropdown();
-  }
-
-  document.addEventListener("click", (e) => {
-    if (excluded2DropdownOpen && !excluded2MsEl.contains(e.target)) closeExcluded2Dropdown();
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && excluded2DropdownOpen) closeExcluded2Dropdown();
-  });
 
   /* ---------------- "수업 스케줄 생성2": 새 후보 생성 알고리즘 ----------------
      기존 "수업 스케줄 생성1"(greedyAssign 등)과는 완전히 별개의, 훨씬 단순한 그리디
@@ -4480,7 +4177,7 @@
     // 시간이 겹치는 자리를 찾아 그 한 명을 내보내고(교환) 재귀적으로 그 사람이 갈 다른 자리를
     // 찾아준다(연쇄 교환/ejection chain) — 그 사람도 자리가 없으면 다시 "정확히 한 명"과
     // 겹치는 자리를 찾아 한 단계 더 내보내보는 식으로 최대 MAX_EJECTION_DEPTH단계까지
-    // 시도한다. 하루 이동 최대 2회 제한은 "미배정 회원 없음"과 동등하게 반드시 지켜야 하는
+    // 시도한다. 하루 이동 최대 MAX_TRAVELS_PER_DAY회 제한은 "미배정 회원 없음"과 동등하게 반드시 지켜야 하는
     // 조건이므로, 모든 단계에서 항상 그대로 지킨다 — 그 제한 안에서 자리가 없으면(연쇄
     // 교환까지 다 시도해도) 최종 미배정으로 남는다.
     const MAX_EJECTION_DEPTH = 3;
@@ -4531,7 +4228,7 @@
           const newNode = { id: cand.id, memberId, day, startSlot: cand.startSlot, duration: cand.duration, locationId: cand.locationId, end: cand.end };
           const newChain = chain0.slice();
           newChain.splice(insertAt, 0, newNode);
-          if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) continue; // 하루 이동 최대 2회 제한
+          if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) continue; // 하루 이동 최대 MAX_TRAVELS_PER_DAY회 제한
           commit(day, newNode);
           dayChains.set(day, newChain);
           return true;
@@ -4591,7 +4288,7 @@
           const newNode = { id: cand.id, memberId, day, startSlot: cand.startSlot, duration: cand.duration, locationId: cand.locationId, end: cand.end };
           const newChain = remainingChain.slice();
           newChain.splice(insertAt, 0, newNode);
-          if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) continue; // 하루 이동 최대 2회 제한
+          if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) continue; // 하루 이동 최대 MAX_TRAVELS_PER_DAY회 제한
 
           uncommit(day, otherNode);
           commit(day, newNode);
@@ -4642,7 +4339,7 @@
           if (mId === memberId) return REBUILD_TARGET_WEIGHT;
           return isEligibleForDay(mId, day) ? 1 : 0;
         });
-        const newChain = runChainDP(nodes); // 하루 이동 최대 2회 제한은 여기서도 그대로 지킨다
+        const newChain = runChainDP(nodes); // 하루 이동 최대 MAX_TRAVELS_PER_DAY회 제한은 여기서도 그대로 지킨다
         if (!newChain.some(n => n.memberId === memberId)) {
           existingChain.forEach(node => commit(day, node)); // 이 회원을 못 넣으면 의미가 없으니 되돌린다
           dayChains.set(day, existingChain);
@@ -5653,9 +5350,8 @@
     return polished;
   }
 
-  // result/onDone: 기본은 페이지 2 자신(schedule2Result/renderSchedule2Result)이지만, 페이지 3의
-  // 후보A처럼 같은 모양의 다른 결과 객체를 다른 화면에서 보여줄 때는 그 결과와 렌더 함수를 넘겨 받는다.
-  function schedule2ToBlocks(assigned, { result = schedule2Result, onDone = renderSchedule2Result } = {}) {
+  // result/onDone: 생성3의 후보A 카드에서 항상 그 결과 객체와 renderSchedule3Result를 명시적으로 넘겨받아 쓴다.
+  function schedule2ToBlocks(assigned, { result, onDone } = {}) {
     const confirmedIds = new Set((result && result.confirmedIds) || []);
     return assigned.map(r => {
       const m = memberById(r.memberId);
@@ -5678,9 +5374,9 @@
     });
   }
 
-  // "수업 스케줄 생성1" 후보 카드의 확정/확정취소와 동일한 동작을, 후보가 하나뿐인
-  // 스케줄 생성2 결과(schedule2Result)에 대해 제공한다.
-  function confirmSchedule2Session(reqId, result = schedule2Result, onDone = renderSchedule2Result) {
+  // 후보B/C 카드의 확정/확정취소(confirmCandidateSession)와 동일한 동작을, 체인 DP 결과
+  // 모양(schedule2ToBlocks가 만드는 블록)에 대해 제공한다.
+  function confirmSchedule2Session(reqId, result, onDone) {
     if (!confirm("스케줄을 확정하시겠습니까?")) return;
     if (!Array.isArray(result.confirmedIds)) result.confirmedIds = [];
     if (!result.confirmedIds.includes(reqId)) result.confirmedIds.push(reqId);
@@ -5689,7 +5385,7 @@
     showToast("스케줄이 확정되었습니다", "success");
   }
 
-  function unconfirmSchedule2Session(reqId, result = schedule2Result, onDone = renderSchedule2Result) {
+  function unconfirmSchedule2Session(reqId, result, onDone) {
     if (!confirm("확정된 스케줄을 취소하시겠습니까?")) return;
     result.confirmedIds = (result.confirmedIds || []).filter(id => id !== reqId);
     saveState();
@@ -5774,385 +5470,10 @@
     return Math.round(minutes) + "분";
   }
 
-  const generateBtn2El = document.getElementById("generateBtn2");
-  const generateBtn2LabelEl = document.getElementById("generateBtn2Label");
-  const generateBtn2CancelEl = document.getElementById("generateBtn2Cancel");
-  const generateHint2El = document.getElementById("generateHint2");
-  const candidates2El = document.getElementById("candidates2");
-  const generateProgressWrap2El = document.getElementById("generateProgressWrap2");
-  const generateProgressFill2El = document.getElementById("generateProgressFill2");
-  const generateProgressText2El = document.getElementById("generateProgressText2");
-
-  function renderSchedule2Result() {
-    candidates2El.innerHTML = "";
-    if (!schedule2Result) return;
-
-    const card = document.createElement("div");
-    card.className = "candidate-card";
-
-    const stats = document.createElement("div");
-    stats.className = "candidate-stats";
-    const pill1 = document.createElement("span");
-    pill1.className = "stat-pill";
-    if (schedule2Result.unassignedMembers.length > 0) {
-      pill1.classList.add("stat-pill-danger");
-      pill1.textContent = "미배정 " + schedule2Result.unassignedMembers.length + "명";
-    } else {
-      pill1.append("미배정 ");
-      const none = document.createElement("span");
-      none.className = "stat-pill-muted";
-      none.textContent = "없음";
-      pill1.appendChild(none);
-    }
-    stats.appendChild(pill1);
-    const pill2 = document.createElement("span");
-    pill2.className = "stat-pill";
-    pill2.textContent = "수업 " + schedule2Result.assigned.length + "건";
-    stats.appendChild(pill2);
-    const pill3 = document.createElement("span");
-    pill3.className = "stat-pill";
-    pill3.textContent = "이동 " + totalTravelCount(schedule2Result.assigned) + "번";
-    stats.appendChild(pill3);
-    const pill4 = document.createElement("span");
-    pill4.className = "stat-pill stat-pill-idle";
-    pill4.textContent = "공강 " + formatMinutesLabel(schedule2TotalIdleMinutes(schedule2Result.assigned));
-    stats.appendChild(pill4);
-    card.appendChild(stats);
-
-    const gridWrap = document.createElement("div");
-    gridWrap.className = "grid-scroll";
-    const gridEl = document.createElement("div");
-    gridEl.className = "cal-grid";
-    gridWrap.appendChild(gridEl);
-    card.appendChild(gridWrap);
-
-    const gridRange = businessHoursGridRange();
-    renderGrid(gridEl, availableCells, {
-      blocks: schedule2ToBlocks(schedule2Result.assigned),
-      travelBlocks: schedule2ToTravelBlocks(schedule2Result.assigned).concat(schedule2ToIdleBlocks(schedule2Result.assigned)),
-      rangeStartSlot: gridRange.rangeStartSlot,
-      rangeEndSlot: gridRange.rangeEndSlot
-    });
-
-    if (schedule2Result.unassignedMembers.length > 0) {
-      const box = document.createElement("div");
-      box.className = "unassigned-box unassigned-box-danger";
-      box.innerHTML = "<b>미배정 회원 (" + schedule2Result.unassignedMembers.length + "명)</b> · " +
-        schedule2Result.unassignedMembers.map(m => m.name).join(", ");
-      card.appendChild(box);
-    }
-
-    candidates2El.appendChild(card);
-  }
-
-  generateBtn2El.addEventListener("click", async () => {
-    if (generationInProgress) {
-      showToast("다른 후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
-      return;
-    }
-    if (state.locations.length === 0) {
-      generateHint2El.textContent = "먼저 설정 페이지에서 지점을 등록해주세요.";
-      return;
-    }
-    if (availableCells.size === 0) {
-      generateHint2El.textContent = "먼저 설정 페이지에서 근무 가능 시간을 설정해주세요.";
-      return;
-    }
-    if (state.requests.length === 0) {
-      generateHint2El.textContent = "먼저 회원 스케줄 추가 페이지에서 가능 시간을 등록해주세요.";
-      return;
-    }
-    generateHint2El.textContent = "";
-    generationInProgress = true;
-    generationCancelRequested = false;
-
-    // 다듬기 단계(담금질 기법 등)는 반복 횟수가 아니라 시간 예산으로 멈추므로, 데이터가
-    // 그대로여도 그 순간의 CPU 여유에 따라 매번 결과가 미세하게 달라질 수 있다. 데이터가
-    // 바뀌지 않은 채 재생성한 경우(schedule2Result가 아직 남아있다는 것 자체가 그 증거 —
-    // 데이터가 바뀌면 invalidateCandidates나 requestsChangedSinceGenerate2 처리에서 즉시
-    // null로 비운다) 새 결과가 기존보다 못하면 우연히 더 좋았던 이전 결과를 잃지 않도록
-    // 그대로 지킨다.
-    const prevResult = schedule2Result;
-
-    generateBtn2El.disabled = true;
-    generateBtn2El.classList.add("loading");
-    generateBtn2LabelEl.textContent = "후보 생성 중...";
-    generateProgressWrap2El.style.display = "";
-    generateProgressFill2El.style.width = "0%";
-    generateProgressText2El.textContent = "0%";
-    generateProgressWrap2El.setAttribute("aria-valuenow", "0");
-    generateBtn2CancelEl.style.display = "";
-    generateBtn2CancelEl.disabled = false;
-    generateBtn2CancelEl.textContent = "생성 취소";
-
-    try {
-      const newResult = await generateSchedule2Async(progress => {
-        const pct = Math.round(progress * 100);
-        generateProgressFill2El.style.width = pct + "%";
-        generateProgressText2El.textContent = pct + "%";
-        generateProgressWrap2El.setAttribute("aria-valuenow", String(pct));
-      });
-      requestsChangedSinceGenerate2 = false;
-      if (prevResult && !isSchedule2ResultBetter(newResult, prevResult)) {
-        schedule2Result = prevResult;
-        renderSchedule2Result();
-        saveState();
-        showToast("새로 생성한 후보가 기존 결과보다 낫지 않아 이전 결과를 유지했습니다", "info");
-      } else {
-        schedule2Result = newResult;
-        renderSchedule2Result();
-        saveState();
-        showToast("후보가 생성되었습니다", "success");
-      }
-    } catch (err) {
-      if (err instanceof GenerationCancelledError) {
-        showToast("후보 생성을 취소했습니다", "info");
-      } else {
-        console.error(err);
-        generateHint2El.textContent = "후보 생성 중 오류가 발생했습니다. 다시 시도해주세요.";
-        showToast("후보 생성에 실패했습니다", "danger");
-      }
-    } finally {
-      generateBtn2El.disabled = false;
-      generateBtn2El.classList.remove("loading");
-      generateBtn2LabelEl.textContent = "후보 생성하기";
-      generateProgressWrap2El.style.display = "none";
-      generateBtn2CancelEl.style.display = "none";
-      generationInProgress = false;
-      generationCancelRequested = false;
-    }
-  });
-
-  generateBtn2CancelEl.addEventListener("click", () => {
-    generationCancelRequested = true;
-    generateBtn2CancelEl.disabled = true;
-    generateBtn2CancelEl.textContent = "취소하는 중...";
-  });
-
-  const candidateRulesBlockEl = document.getElementById("candidateRulesBlock");
-  const candidateRulesToggleEl = document.getElementById("candidateRulesToggle");
-  candidateRulesToggleEl.addEventListener("click", () => {
-    const collapsed = candidateRulesBlockEl.classList.toggle("collapsed");
-    candidateRulesToggleEl.setAttribute("aria-expanded", String(!collapsed));
-  });
-
-  const candidateRulesBlock2El = document.getElementById("candidateRulesBlock2");
-  const candidateRulesToggle2El = document.getElementById("candidateRulesToggle2");
-  candidateRulesToggle2El.addEventListener("click", () => {
-    const collapsed = candidateRulesBlock2El.classList.toggle("collapsed");
-    candidateRulesToggle2El.setAttribute("aria-expanded", String(!collapsed));
-  });
-
-  const generateProgressWrapEl = document.getElementById("generateProgressWrap");
-  const generateProgressFillEl = document.getElementById("generateProgressFill");
-  const generateProgressTextEl = document.getElementById("generateProgressText");
-
-  document.getElementById("generateBtn").addEventListener("click", async () => {
-    if (generationInProgress) {
-      showToast("다른 후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
-      return;
-    }
-    if (state.locations.length === 0) {
-      generateHintEl.textContent = "먼저 설정 페이지에서 지점을 등록해주세요.";
-      return;
-    }
-    if (availableCells.size === 0) {
-      generateHintEl.textContent = "먼저 설정 페이지에서 근무 가능 시간을 설정해주세요.";
-      return;
-    }
-    if (state.requests.length === 0) {
-      generateHintEl.textContent = "먼저 회원 스케줄 추가 페이지에서 가능 시간을 등록해주세요.";
-      return;
-    }
-    generateHintEl.textContent = "";
-    generationInProgress = true;
-
-    const generateBtnEl = document.getElementById("generateBtn");
-    const generateBtnLabelEl = document.getElementById("generateBtnLabel");
-    generateBtnEl.disabled = true;
-    generateBtnEl.classList.add("loading");
-    generateBtnLabelEl.textContent = "후보 생성 중...";
-    generateProgressWrapEl.style.display = "";
-    generateProgressFillEl.style.width = "0%";
-    generateProgressTextEl.textContent = "0%";
-    generateProgressWrapEl.setAttribute("aria-valuenow", "0");
-
-    try {
-      // generateCandidatesAsync는 계산 중간중간 화면을 다시 그릴 틈을 주면서(await) 진행률을
-      // 콜백으로 알려준다 — 그 진행률로 진행바를 실시간으로 채운다.
-      candidates = await generateCandidatesAsync(progress => {
-        const pct = Math.round(progress * 100);
-        generateProgressFillEl.style.width = pct + "%";
-        generateProgressTextEl.textContent = pct + "%";
-        generateProgressWrapEl.setAttribute("aria-valuenow", String(pct));
-      });
-      Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]); // 새로 생성하면 이전 후보 이력도 초기화
-      // candidateHistory 초기화는 이 페이지("다음 후보 보기") 전용 세션 기록이므로 여기서 한다 —
-      // generateCandidatesAsync 안에 두면 생성3(스케줄생성2·1 엔진을 재사용)이 이 함수를 호출할 때도
-      // 함께 실행돼, 생성1의 "이미 본 조합" 기록을 생성3의 결과로 덮어써 버리는 문제가 있었다.
-      candidates.forEach((cand, idx) => { candidateHistory[idx] = new Set([candidateSignature(cand)]); });
-      requestsChangedSinceGenerate = false;
-      renderCandidates();
-      saveState();
-      showToast("후보가 생성되었습니다", "success");
-    } catch (err) {
-      console.error(err);
-      generateHintEl.textContent = "후보 생성 중 오류가 발생했습니다. 다시 시도해주세요.";
-      showToast("후보 생성에 실패했습니다", "danger");
-    } finally {
-      generateBtnEl.disabled = false;
-      generateBtnEl.classList.remove("loading");
-      generateBtnLabelEl.textContent = "후보 생성하기";
-      generateProgressWrapEl.style.display = "none";
-      generationInProgress = false;
-    }
-  });
-
-  function renderCandidates() {
-    candidatesEl.innerHTML = "";
-
-    // "수업 N건 이상 후보만 보기" 필터: 기능 자체를 잠시 끈다 (관련 DOM·이벤트 리스너도 함께 주석 처리됨).
-    // const minSessions = Math.max(1, parseInt(minSessionFilterInputEl.value, 10) || 1);
-    // const visibleCandidates = candidates.filter(cand => cand.assigned.length >= minSessions);
-    // const hiddenCount = candidates.length - visibleCandidates.length;
-    // candidateFilterHiddenCountEl.textContent = hiddenCount > 0 ? hiddenCount + "개 숨김" : "";
-    // if (candidates.length > 0 && visibleCandidates.length === 0) {
-    //   const empty = document.createElement("p");
-    //   empty.className = "generate-hint";
-    //   empty.textContent = "수업 " + minSessions + "건 이상인 후보가 없습니다.";
-    //   candidatesEl.appendChild(empty);
-    // }
-    const visibleCandidates = candidates;
-
-    visibleCandidates.forEach((cand) => {
-      const card = document.createElement("div");
-      card.className = "candidate-card";
-
-      const head = document.createElement("div");
-      head.className = "candidate-card-head";
-
-      if (cand.title) {
-        const title = document.createElement("h3");
-        title.className = "candidate-title";
-        title.textContent = cand.title;
-        head.appendChild(title);
-      }
-
-      const actions = document.createElement("div");
-      actions.className = "candidate-card-actions";
-
-      const undoStackForThis = candidateUndoStack[cand.strategyIndex] || [];
-      const undoBtn = document.createElement("button");
-      undoBtn.type = "button";
-      undoBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
-      undoBtn.textContent = "↩ 이전 후보";
-      undoBtn.title = "재생성하기 전의 후보로 되돌아갑니다.";
-      undoBtn.disabled = undoStackForThis.length === 0;
-      undoBtn.addEventListener("click", () => {
-        restorePreviousCandidate(cand.strategyIndex);
-      });
-      actions.appendChild(undoBtn);
-
-      const regenBtn = document.createElement("button");
-      regenBtn.type = "button";
-      regenBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
-      regenBtn.textContent = "↻ 다음 후보";
-      regenBtn.title = "이 후보만 같은 전략 안에서 다시 계산합니다.";
-      regenBtn.disabled = !hasRegenerableEligible(cand.strategyIndex);
-      regenBtn.addEventListener("click", async () => {
-        // "다음 후보"도 전략 하나만 계산하는 데 최대 100여 회 조합을 시도하느라 몇 초씩 걸릴
-        // 수 있어서, 계산하는 동안 버튼을 잠그고 진행률을 보여준다. 성공하면 renderCandidates()가
-        // 카드를 통째로 새로 그리므로 이 버튼 자체도 교체되지만, confirm()에서 취소하는 등
-        // 다시 그리지 않고 그냥 끝나는 경우를 위해 finally에서 원래 상태로 되돌려둔다.
-        regenBtn.disabled = true;
-        undoBtn.disabled = true;
-        try {
-          await regenerateCandidate(cand.strategyIndex, progress => {
-            regenBtn.textContent = "재생성 중... " + Math.round(progress * 100) + "%";
-          });
-        } finally {
-          regenBtn.textContent = "↻ 다음 후보";
-          regenBtn.disabled = !hasRegenerableEligible(cand.strategyIndex);
-          undoBtn.disabled = (candidateUndoStack[cand.strategyIndex] || []).length === 0;
-        }
-      });
-      actions.appendChild(regenBtn);
-      head.appendChild(actions);
-
-      card.appendChild(head);
-
-      if (cand.desc) {
-        const desc = document.createElement("p");
-        desc.className = "candidate-desc";
-        desc.textContent = cand.desc;
-        card.appendChild(desc);
-      }
-
-      const stats = document.createElement("div");
-      stats.className = "candidate-stats";
-      const pill1 = document.createElement("span");
-      pill1.className = "stat-pill";
-      if (cand.unassignedMembers.length > 0) {
-        pill1.classList.add("stat-pill-danger");
-        pill1.textContent = "미배정 " + cand.unassignedMembers.length + "명";
-      } else {
-        pill1.append("미배정 ");
-        const none = document.createElement("span");
-        none.className = "stat-pill-muted";
-        none.textContent = "없음";
-        pill1.appendChild(none);
-      }
-      stats.appendChild(pill1);
-      const pill2 = document.createElement("span");
-      pill2.className = "stat-pill";
-      pill2.textContent = "수업 " + cand.assigned.length + "건";
-      stats.appendChild(pill2);
-      const pill3 = document.createElement("span");
-      pill3.className = "stat-pill";
-      pill3.textContent = "이동 " + totalTravelCount(cand.assigned) + "번";
-      stats.appendChild(pill3);
-      card.appendChild(stats);
-
-      const gridWrap = document.createElement("div");
-      gridWrap.className = "grid-scroll";
-      const gridEl = document.createElement("div");
-      gridEl.className = "cal-grid";
-      gridWrap.appendChild(gridEl);
-      card.appendChild(gridWrap);
-
-      const gridRange = businessHoursGridRange();
-      renderGrid(gridEl, availableCells, {
-        blocks: candidateToBlocks(cand),
-        travelBlocks: candidateToTravelBlocks(cand),
-        rangeStartSlot: gridRange.rangeStartSlot,
-        rangeEndSlot: gridRange.rangeEndSlot
-      });
-
-      if (cand.unassignedMembers.length > 0) {
-        const box = document.createElement("div");
-        box.className = "unassigned-box unassigned-box-danger";
-        box.innerHTML = "<b>미배정 회원 (" + cand.unassignedMembers.length + "명)</b> · " +
-          cand.unassignedMembers.map(m => m.name).join(", ");
-        card.appendChild(box);
-      }
-
-      if (cand.singleAssignedMembers.length > 0) {
-        const box = document.createElement("div");
-        box.className = "unassigned-box single-assigned-box";
-        box.innerHTML = "<b>1회 배정 회원 (" + cand.singleAssignedMembers.length + "명)</b> · " +
-          cand.singleAssignedMembers.map(m => m.name).join(", ");
-        card.appendChild(box);
-      }
-
-      candidatesEl.appendChild(card);
-    });
-  }
 
   /* ---------------- Page navigation (left sidebar, no forced order) ---------------- */
   const pageEls = {
     settings: document.getElementById("pageSettings"),
-    schedule: document.getElementById("pageSchedule"),
-    schedule2: document.getElementById("pageSchedule2"),
     schedule3: document.getElementById("pageSchedule3"),
     members: document.getElementById("pageMembers"),
     memberSchedule: document.getElementById("pageMemberSchedule")
@@ -6176,28 +5497,13 @@
     }
     // 회원 스케줄 추가 등에서 신청 데이터가 바뀐 뒤 이 메뉴로 들어오면, 옛 신청 기준으로
     // 계산된 후보는 더 이상 맞지 않으므로 자동으로 비워서 다시 생성하도록 안내한다.
-    if (pageId === "schedule" && requestsChangedSinceGenerate) {
-      requestsChangedSinceGenerate = false;
-      if (candidates.length > 0) {
-        candidates = [];
-        renderCandidates();
-        saveState();
-        generateHintEl.textContent = "신청 시간이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-      }
-    }
-    if (pageId === "schedule2" && requestsChangedSinceGenerate2) {
-      requestsChangedSinceGenerate2 = false;
-      if (schedule2Result) {
-        schedule2Result = null;
-        renderSchedule2Result();
-        saveState();
-        generateHint2El.textContent = "신청 시간이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-      }
-    }
     if (pageId === "schedule3" && requestsChangedSinceGenerate3) {
       requestsChangedSinceGenerate3 = false;
-      if (schedule3Result.candidateA || schedule3Result.candidateB || schedule3Result.candidateC) {
-        schedule3Result = { candidateA: null, candidateB: null, candidateC: null };
+      if (candidates.length > 0 || schedule3Result.candidateA) {
+        candidates = [];
+        schedule3Result = { candidateA: null };
+        Object.keys(candidateHistory).forEach(k => delete candidateHistory[k]);
+        Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]);
         renderSchedule3Result();
         saveState();
         generateHint3El.textContent = "신청 시간이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
@@ -6221,9 +5527,8 @@
      화면에 보여준다 (후보A=생성2 결과, 후보B/C=생성1의 후보A/B). 생성1·생성2의 알고리즘 코드는
      여기서 전혀 다시 만들지 않고, withSelectionOverride로 감싸 그대로 호출한다. ---------------- */
 
-  // 페이지 3의 "미배정 회원"/"1회 제한 회원" 위젯 하나를 만든다 — 페이지 2의 onceLimit2/excluded2
-  // 위젯과 완전히 같은 구조를 일반화한 것이다. 페이지 1·2의 기존 위젯 4벌은 그대로 두고 손대지
-  // 않으며, 새로 만드는 페이지 3의 위젯 2개만 이 팩토리로 만들어 복붙을 피한다.
+  // "미배정 회원"/"1회 제한 회원" 위젯을 만드는 공통 팩토리 — 두 위젯의 구조가 완전히
+  // 같아 복붙을 피하려고 일반화했다.
   function createMemberSelectionWidget(opts) {
     const {
       idsKey, conflictIdsKey, conflictMessage,
@@ -6343,8 +5648,11 @@
   // 이 설정은 후보 생성 결과에 바로 영향을 주므로, 이미 생성된 결과가 있으면 즉시 비운다
   // (onOnceLimit2Changed/onExcluded2Changed와 동일한 패턴).
   function onSchedule3SelectionChanged() {
-    if (schedule3Result.candidateA || schedule3Result.candidateB || schedule3Result.candidateC) {
-      schedule3Result = { candidateA: null, candidateB: null, candidateC: null };
+    if (candidates.length > 0 || schedule3Result.candidateA) {
+      candidates = [];
+      schedule3Result = { candidateA: null };
+      Object.keys(candidateHistory).forEach(k => delete candidateHistory[k]);
+      Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]);
       renderSchedule3Result();
       generateHint3El.textContent = "회원 선택이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
     } else {
@@ -6380,39 +5688,59 @@
   // await(yieldToUI)가 있어 오버라이드가 그 사이에도 켜져 있다 — 그동안 다른 생성 버튼이 눌리면
   // 서로 다른 페이지의 선택 목록이 뒤섞일 수 있는데, 이건 generationInProgress 가드(세 생성
   // 버튼이 공유)로 원천 차단한다.
-  async function generateSchedule3Async(onProgress) {
+  // genA/genBC: 후보A 버튼·후보B·C 버튼이 각각 자신의 엔진만 켜서 호출한다(둘 다 켤 일은 없다).
+  // 꺼진 쪽은 이 함수가 관여하지 않고 호출부가 이전 결과를 그대로 유지한다.
+  async function generateSchedule3Async(onProgress, { genA = true, genBC = true } = {}) {
     const excludedIds3 = state.excludedMemberIds3;
     const onceLimitIds3 = state.onceLimitedMemberIds3;
-    const v1Built = await withSelectionOverride(excludedIds3, onceLimitIds3, () =>
-      generateCandidatesAsync(progress => onProgress(progress * 0.5))
-    );
-    const v2Result = await withSelectionOverride(excludedIds3, onceLimitIds3, () =>
-      generateSchedule2Async(progress => onProgress(0.5 + progress * 0.5))
-    );
+    let v1Built = null;
+    let v2Result = null;
+    if (genBC) {
+      const bcWeight = genA ? 0.5 : 1;
+      v1Built = await withSelectionOverride(excludedIds3, onceLimitIds3, () =>
+        generateCandidatesAsync(progress => onProgress(progress * bcWeight))
+      );
+    }
+    if (genA) {
+      const aStart = genBC ? 0.5 : 0;
+      const aWeight = genBC ? 0.5 : 1;
+      v2Result = await withSelectionOverride(excludedIds3, onceLimitIds3, () =>
+        generateSchedule2Async(progress => onProgress(aStart + progress * aWeight))
+      );
+    }
     onProgress(1);
     return {
-      candidateB: v1Built[0] || null, // 생성1의 후보A(전략 0, 인원 최대)
-      candidateC: v1Built[1] || null, // 생성1의 후보B(전략 1, 수업 횟수 최대)
-      candidateA: v2Result
+      candidateB: v1Built ? (v1Built[0] || null) : null, // 생성1의 후보A(전략 0, 인원 최대)
+      candidateC: v1Built ? (v1Built[1] || null) : null, // 생성1의 후보B(전략 1, 수업 횟수 최대)
+      candidateA: v2Result,
+      genA, genBC
     };
   }
 
-  const generateBtn3El = document.getElementById("generateBtn3");
-  const generateBtn3LabelEl = document.getElementById("generateBtn3Label");
-  const generateBtn3CancelEl = document.getElementById("generateBtn3Cancel");
   const generateHint3El = document.getElementById("generateHint3");
   const candidates3El = document.getElementById("candidates3");
-  const generateProgressWrap3El = document.getElementById("generateProgressWrap3");
-  const generateProgressFill3El = document.getElementById("generateProgressFill3");
-  const generateProgressText3El = document.getElementById("generateProgressText3");
+  const generateBtnA3El = document.getElementById("generateBtnA3");
+  const generateBtnA3LabelEl = document.getElementById("generateBtnA3Label");
+  const generateBtnA3CancelEl = document.getElementById("generateBtnA3Cancel");
+  const generateProgressWrapA3El = document.getElementById("generateProgressWrapA3");
+  const generateProgressFillA3El = document.getElementById("generateProgressFillA3");
+  const generateProgressTextA3El = document.getElementById("generateProgressTextA3");
+  const generateBtnBC3El = document.getElementById("generateBtnBC3");
+  const generateBtnBC3LabelEl = document.getElementById("generateBtnBC3Label");
+  const generateBtnBC3CancelEl = document.getElementById("generateBtnBC3Cancel");
+  const generateProgressWrapBC3El = document.getElementById("generateProgressWrapBC3");
+  const generateProgressFillBC3El = document.getElementById("generateProgressFillBC3");
+  const generateProgressTextBC3El = document.getElementById("generateProgressTextBC3");
 
-  // 후보A(생성2 결과 모양)·후보B/C(생성1 결과 모양) 카드를 renderCandidates()/renderSchedule2Result()와
-  // 같은 구조로 그린다.
+  // 후보A(체인 DP)·후보B/C(그리디, candidates 배열) 카드를 그린다. 후보B/C는 strategyIndex(0/1)를
+  // 넘겨받으면 옛 "수업 스케줄 생성1" 페이지에 있던 "↩ 이전 후보"/"↻ 다음 후보" 버튼을 그대로 붙인다
+  // (regenerateCandidate/restorePreviousCandidate/candidateHistory/candidateUndoStack 로직은 무변경 —
+  // 이 카드가 candidates[strategyIndex]를 직접 읽고 쓰기 때문에 그대로 재사용할 수 있다).
   function renderSchedule3Result() {
     candidates3El.innerHTML = "";
     const gridRange = businessHoursGridRange();
 
-    function buildCard(title, desc, result, blocks, travelBlocks, idleMinutes) {
+    function buildCard(title, desc, result, blocks, travelBlocks, idleMinutes, strategyIndex) {
       const card = document.createElement("div");
       card.className = "candidate-card";
 
@@ -6422,6 +5750,51 @@
       titleEl.className = "candidate-title";
       titleEl.textContent = title;
       head.appendChild(titleEl);
+
+      if (strategyIndex != null) {
+        const actions = document.createElement("div");
+        actions.className = "candidate-card-actions";
+
+        const undoStackForThis = candidateUndoStack[strategyIndex] || [];
+        const undoBtn = document.createElement("button");
+        undoBtn.type = "button";
+        undoBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
+        undoBtn.textContent = "↩ 이전 후보";
+        undoBtn.title = "재생성하기 전의 후보로 되돌아갑니다.";
+        undoBtn.disabled = undoStackForThis.length === 0;
+        undoBtn.addEventListener("click", () => {
+          restorePreviousCandidate(strategyIndex);
+        });
+        actions.appendChild(undoBtn);
+
+        const regenBtn = document.createElement("button");
+        regenBtn.type = "button";
+        regenBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
+        regenBtn.textContent = "↻ 다음 후보";
+        regenBtn.title = "이 후보만 같은 전략 안에서 다시 계산합니다.";
+        regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
+        regenBtn.addEventListener("click", async () => {
+          regenBtn.disabled = true;
+          undoBtn.disabled = true;
+          try {
+            // 생성3 자신의 미배정/1회 제한 회원 설정(excludedMemberIds3/onceLimitedMemberIds3)이
+            // 적용되도록 반드시 withSelectionOverride로 감싼다 — 그냥 호출하면 currentExcludedIds()가
+            // (더 이상 UI가 없어 항상 비어있는) 옛 생성1 설정으로 폴백해버린다.
+            await withSelectionOverride(state.excludedMemberIds3, state.onceLimitedMemberIds3, () =>
+              regenerateCandidate(strategyIndex, progress => {
+                regenBtn.textContent = "재생성 중... " + Math.round(progress * 100) + "%";
+              })
+            );
+          } finally {
+            regenBtn.textContent = "↻ 다음 후보";
+            regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
+            undoBtn.disabled = (candidateUndoStack[strategyIndex] || []).length === 0;
+          }
+        });
+        actions.appendChild(regenBtn);
+        head.appendChild(actions);
+      }
+
       card.appendChild(head);
 
       const descEl = document.createElement("p");
@@ -6492,36 +5865,74 @@
       candidates3El.appendChild(card);
     }
 
+    // 아직 생성하지 않은 후보도 타이틀·설명만 담은 카드로 미리 보여준다 — 실제 배정 결과가
+    // 없으니 통계 pill·달력 그리드는 그리지 않는다.
+    function buildPlaceholderCard(title, desc) {
+      const card = document.createElement("div");
+      card.className = "candidate-card candidate-card-placeholder";
+
+      const titleEl = document.createElement("h3");
+      titleEl.className = "candidate-title";
+      titleEl.textContent = title;
+      card.appendChild(titleEl);
+
+      const descEl = document.createElement("p");
+      descEl.className = "candidate-desc";
+      descEl.textContent = desc;
+      card.appendChild(descEl);
+
+      const hint = document.createElement("p");
+      hint.className = "candidate-card-placeholder-hint";
+      hint.textContent = "아직 생성되지 않았습니다. '후보 생성하기'를 눌러주세요.";
+      card.appendChild(hint);
+
+      candidates3El.appendChild(card);
+    }
+
     if (schedule3Result.candidateA) {
       const a = schedule3Result.candidateA;
       buildCard(
-        "후보A", "체인 DP 방식 (수업 스케줄 생성2와 동일한 알고리즘)", a,
+        "후보A - 인원 최대 (공강 허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", a,
         schedule2ToBlocks(a.assigned, { result: a, onDone: renderSchedule3Result }),
         schedule2ToTravelBlocks(a.assigned).concat(schedule2ToIdleBlocks(a.assigned)),
-        schedule2TotalIdleMinutes(a.assigned)
+        schedule2TotalIdleMinutes(a.assigned),
+        null
       );
+    } else {
+      buildPlaceholderCard("후보A - 인원 최대 (공강 허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
     }
-    if (schedule3Result.candidateB) {
-      const b = schedule3Result.candidateB;
+    const b = candidates[0];
+    if (b) {
       buildCard(
-        "후보B", "그리디 방식 · 인원 최대 (수업 스케줄 생성1의 후보A와 동일한 알고리즘)", b,
+        "후보B - 인원 최대 (공강 미허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", b,
         candidateToBlocks(b, renderSchedule3Result),
         candidateToTravelBlocks(b),
-        null
+        null,
+        0
       );
+    } else {
+      buildPlaceholderCard("후보B - 인원 최대 (공강 미허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
     }
-    if (schedule3Result.candidateC) {
-      const c = schedule3Result.candidateC;
+    const c = candidates[1];
+    if (c) {
       buildCard(
-        "후보C", "그리디 방식 · 수업 횟수 최대 (수업 스케줄 생성1의 후보B와 동일한 알고리즘)", c,
+        "후보C - 수업 횟수 최대", "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.", c,
         candidateToBlocks(c, renderSchedule3Result),
         candidateToTravelBlocks(c),
-        null
+        null,
+        1
       );
+    } else {
+      buildPlaceholderCard("후보C - 수업 횟수 최대", "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.");
     }
   }
 
-  generateBtn3El.addEventListener("click", async () => {
+  // 후보A와 후보B·C는 소요 시간 차이가 커서(A는 체인 DP+담금질로 수십 초, B·C는 그리디
+  // 다중 시도로 INITIAL_SEARCH_ATTEMPTS 증가 후 수 분) 버튼을 따로 둔다 — A만 빠르게 다시
+  // 보고 싶을 때 B·C의 느린 탐색까지 함께 기다리지 않아도 된다. 다만 두 버튼이 동시에 도는
+  // 것까지는 허용하지 않는다(withSelectionOverride가 재진입을 지원하지 않으므로) —
+  // generationInProgress 가드를 그대로 공유해 한쪽이 도는 동안 다른 쪽은 토스트로 안내한다.
+  async function runGenerate3({ genA, genBC, idleLabel, btnEl, labelEl, cancelEl, progressWrapEl, progressFillEl, progressTextEl }) {
     if (generationInProgress) {
       showToast("다른 후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
       return;
@@ -6547,29 +5958,35 @@
     // 지킨다. 후보B/C(그리디)는 생성1과 마찬가지로 항상 새 결과로 덮어쓴다.
     const prevCandidateA = schedule3Result.candidateA;
 
-    generateBtn3El.disabled = true;
-    generateBtn3El.classList.add("loading");
-    generateBtn3LabelEl.textContent = "후보 생성 중...";
-    generateProgressWrap3El.style.display = "";
-    generateProgressFill3El.style.width = "0%";
-    generateProgressText3El.textContent = "0%";
-    generateProgressWrap3El.setAttribute("aria-valuenow", "0");
-    generateBtn3CancelEl.style.display = "";
-    generateBtn3CancelEl.disabled = false;
-    generateBtn3CancelEl.textContent = "생성 취소";
+    btnEl.disabled = true;
+    btnEl.classList.add("loading");
+    labelEl.textContent = "후보 생성 중...";
+    progressWrapEl.style.display = "";
+    progressFillEl.style.width = "0%";
+    progressTextEl.textContent = "0%";
+    progressWrapEl.setAttribute("aria-valuenow", "0");
+    cancelEl.style.display = "";
+    cancelEl.disabled = false;
+    cancelEl.textContent = "생성 취소";
 
     try {
       const result = await generateSchedule3Async(progress => {
         const pct = Math.round(progress * 100);
-        generateProgressFill3El.style.width = pct + "%";
-        generateProgressText3El.textContent = pct + "%";
-        generateProgressWrap3El.setAttribute("aria-valuenow", String(pct));
-      });
+        progressFillEl.style.width = pct + "%";
+        progressTextEl.textContent = pct + "%";
+        progressWrapEl.setAttribute("aria-valuenow", String(pct));
+      }, { genA, genBC });
       requestsChangedSinceGenerate3 = false;
-      const candidateA = (prevCandidateA && !isSchedule2ResultBetter(result.candidateA, prevCandidateA))
-        ? prevCandidateA
-        : result.candidateA;
-      schedule3Result = { candidateA, candidateB: result.candidateB, candidateC: result.candidateC };
+      const candidateA = result.genA
+        ? ((prevCandidateA && !isSchedule2ResultBetter(result.candidateA, prevCandidateA)) ? prevCandidateA : result.candidateA)
+        : prevCandidateA;
+      if (result.genBC) {
+        candidates = [result.candidateB, result.candidateC].filter(Boolean);
+        Object.keys(candidateHistory).forEach(k => delete candidateHistory[k]);
+        Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]);
+        candidates.forEach((cand, idx) => { candidateHistory[idx] = new Set([candidateSignature(cand)]); });
+      }
+      schedule3Result = { candidateA };
       renderSchedule3Result();
       saveState();
       showToast("후보가 생성되었습니다", "success");
@@ -6582,20 +5999,36 @@
         showToast("후보 생성에 실패했습니다", "danger");
       }
     } finally {
-      generateBtn3El.disabled = false;
-      generateBtn3El.classList.remove("loading");
-      generateBtn3LabelEl.textContent = "후보 생성하기";
-      generateProgressWrap3El.style.display = "none";
-      generateBtn3CancelEl.style.display = "none";
+      btnEl.disabled = false;
+      btnEl.classList.remove("loading");
+      labelEl.textContent = idleLabel;
+      progressWrapEl.style.display = "none";
+      cancelEl.style.display = "none";
       generationInProgress = false;
       generationCancelRequested = false;
     }
+  }
+
+  generateBtnA3El.addEventListener("click", () => runGenerate3({
+    genA: true, genBC: false, idleLabel: "후보A 생성하기",
+    btnEl: generateBtnA3El, labelEl: generateBtnA3LabelEl, cancelEl: generateBtnA3CancelEl,
+    progressWrapEl: generateProgressWrapA3El, progressFillEl: generateProgressFillA3El, progressTextEl: generateProgressTextA3El
+  }));
+  generateBtnA3CancelEl.addEventListener("click", () => {
+    generationCancelRequested = true;
+    generateBtnA3CancelEl.disabled = true;
+    generateBtnA3CancelEl.textContent = "취소하는 중...";
   });
 
-  generateBtn3CancelEl.addEventListener("click", () => {
+  generateBtnBC3El.addEventListener("click", () => runGenerate3({
+    genA: false, genBC: true, idleLabel: "후보B·C 생성하기",
+    btnEl: generateBtnBC3El, labelEl: generateBtnBC3LabelEl, cancelEl: generateBtnBC3CancelEl,
+    progressWrapEl: generateProgressWrapBC3El, progressFillEl: generateProgressFillBC3El, progressTextEl: generateProgressTextBC3El
+  }));
+  generateBtnBC3CancelEl.addEventListener("click", () => {
     generationCancelRequested = true;
-    generateBtn3CancelEl.disabled = true;
-    generateBtn3CancelEl.textContent = "취소하는 중...";
+    generateBtnBC3CancelEl.disabled = true;
+    generateBtnBC3CancelEl.textContent = "취소하는 중...";
   });
 
   const candidateRulesBlock3El = document.getElementById("candidateRulesBlock3");
@@ -6614,9 +6047,7 @@
     renderMemberTable();
     renderAvailabilityList();
     renderRequestList();
-    if (candidates.length) renderCandidates();
-    if (schedule2Result) renderSchedule2Result();
-    if (schedule3Result.candidateA || schedule3Result.candidateB || schedule3Result.candidateC) renderSchedule3Result();
+    renderSchedule3Result();
     goToPage(currentPage);
   }
 
