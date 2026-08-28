@@ -385,16 +385,18 @@
 
   // "회원 스케줄 추가" 페이지의 회원 탭과 같은 방식: 지점은 풀네임 대신 한 글자 배지(전체
   // 이름은 title 툴팁)로, 그 뒤에 이름을 붙인다 — 지점 풀네임을 쓰면 칩이 너무 길어지기 때문.
+  // 지점이 2개 이상인 회원은 배지도 모두 표시한다(회원 탭과 동일).
   // createMemberSelectionWidget(미배정/1회 제한 회원 위젯)이 공통으로 쓴다.
   function appendOnceLimitMemberLabel(container, member) {
-    const loc = locationById(member.locationIds[0]);
-    if (loc) {
+    member.locationIds.forEach(locId => {
+      const loc = locationById(locId);
+      if (!loc) return;
       const badge = document.createElement("span");
       badge.className = "tab-loc";
       badge.textContent = loc.name.charAt(0);
       badge.title = loc.name;
       container.appendChild(badge);
-    }
+    });
     const nameEl = document.createElement("span");
     nameEl.textContent = member.name;
     container.appendChild(nameEl);
@@ -1159,8 +1161,10 @@
   }
 
   // 숫자만 이어진 문자열을 "시(오후 기준, 1~12)"들의 나열로 되돌린다. 예: "8910" -> 8시·9시·10시,
-  // "730" -> 7시30분, "1030" -> 10시30분. 앞에서부터 그리디하게 2자리(10/11/12)를 먼저 시도하고,
-  // 뒤에 "30"이 바로 붙으면 반시간으로 묶는다(백트래킹으로 전체 문자열이 소진되는 경우만 채택).
+  // "730" -> 7시30분, "1030" -> 10시30분, "640" -> 6시40분. 앞에서부터 그리디하게 2자리(10/11/12)를
+  // 먼저 시도하고, 뒤에 "30"이나 "40"이 바로 붙으면 그 분으로 묶는다(백트래킹으로 전체 문자열이
+  // 소진되는 경우만 채택).
+  const HOUR_DIGIT_MINUTE_SUFFIXES = [30, 40];
   function tokenizeHourDigits(digits) {
     function rec(s) {
       if (s === "") return [];
@@ -1170,12 +1174,14 @@
         const valid = len === 2 ? (num === 10 || num === 11 || num === 12) : (num >= 1 && num <= 9);
         if (!valid) continue;
         const rest = s.slice(len);
-        if (rest.slice(0, 2) === "30") {
-          const sub = rec(rest.slice(2));
-          if (sub) return [{ hour: num, half: true }].concat(sub);
+        for (const minute of HOUR_DIGIT_MINUTE_SUFFIXES) {
+          if (rest.slice(0, 2) === String(minute)) {
+            const sub = rec(rest.slice(2));
+            if (sub) return [{ hour: num, minute }].concat(sub);
+          }
         }
         const sub2 = rec(rest);
-        if (sub2) return [{ hour: num, half: false }].concat(sub2);
+        if (sub2) return [{ hour: num, minute: 0 }].concat(sub2);
       }
       return null;
     }
@@ -1186,13 +1192,13 @@
   // 기준이라 12시는 정오, 1~11시는 모두 오후(13:00~23:00)로 취급한다.
   function hourMarkToStartSlot(mark) {
     const hour24 = (mark.hour % 12) + 12;
-    const minutes = hour24 * 60 + (mark.half ? 30 : 0);
+    const minutes = hour24 * 60 + mark.minute;
     return (minutes - START_MIN) / SLOT_MIN;
   }
 
   function hourMarkLabel(mark) {
     const hour24 = (mark.hour % 12) + 12;
-    return minutesLabel(hour24 * 60 + (mark.half ? 30 : 0));
+    return minutesLabel(hour24 * 60 + mark.minute);
   }
 
   // "월345"처럼 매시 정각이 연달아 이어진 마크들은, 회원이 그 사이 언제든 시작할 수 있다는
@@ -1230,14 +1236,14 @@
     for (let h24 = leftHour24; h24 <= rightHour24; h24++) {
       const hour = h24 === 12 ? 12 : h24 - 12;
       if (h24 === leftHour24 && h24 === rightHour24) {
-        marks.push({ hour, half: leftMark.half });
-        if (rightMark.half && !leftMark.half) marks.push({ hour, half: true });
+        marks.push({ hour, minute: leftMark.minute });
+        if (rightMark.minute !== leftMark.minute) marks.push({ hour, minute: rightMark.minute });
       } else if (h24 === leftHour24) {
-        marks.push({ hour, half: leftMark.half });
+        marks.push({ hour, minute: leftMark.minute });
       } else if (h24 === rightHour24) {
-        marks.push({ hour, half: rightMark.half });
+        marks.push({ hour, minute: rightMark.minute });
       } else {
-        marks.push({ hour, half: false });
+        marks.push({ hour, minute: 0 });
       }
     }
     return marks;
@@ -1249,25 +1255,36 @@
   //  - "630~" -> { type:"openStart", mark:{...} } (그 시각부터 마감까지 전부 가능)
   //  - "~730" -> { type:"openEnd", mark:{...} } (마감 이전부터 그 시각까지 전부 가능)
   function parseTimeToken(token) {
+    // "늦은시간"은 트레이너들이 관행적으로 쓰는 표현으로, 영업 마감 직전 시간대인
+    // 오후 10시30분 시작을 뜻한다.
+    if (token === "늦은시간") return { type: "point", marks: [{ hour: 10, minute: 30 }] };
+    const originalToken = token;
+    // "5까지"는 "~5"(마감 이전부터 5시까지), "4부터"·"5이후"는 "4~"·"5~"(그 시각부터 마감까지)와
+    // 같은 뜻이라 동일한 물결 표기로 바꿔서 아래 로직을 그대로 재사용한다.
+    const suffixMatch = token.match(/^(\d+)(까지|부터|이후)$/);
+    if (suffixMatch) {
+      const digits = suffixMatch[1];
+      token = suffixMatch[2] === "까지" ? ("~" + digits) : (digits + "~");
+    }
     const cleanMatch = token.match(/^[\d~]+/);
     let warning = null;
-    if (!cleanMatch) return { error: "알 수 없는 시간 표기: \"" + token + "\"" };
+    if (!cleanMatch) return { error: "알 수 없는 시간 표기: \"" + originalToken + "\"" };
     const clean = cleanMatch[0];
     if (clean.length < token.length) {
-      warning = "\"" + token + "\"에서 뒤쪽 문자(\"" + token.slice(clean.length) + "\")는 무시했습니다.";
+      warning = "\"" + originalToken + "\"에서 뒤쪽 문자(\"" + token.slice(clean.length) + "\")는 무시했습니다.";
     }
     const tildeCount = (clean.match(/~/g) || []).length;
-    if (tildeCount > 1) return { error: "알 수 없는 시간 표기: \"" + token + "\"", warning };
+    if (tildeCount > 1) return { error: "알 수 없는 시간 표기: \"" + originalToken + "\"", warning };
     if (tildeCount === 1) {
       const [leftStr, rightStr] = clean.split("~");
       if (leftStr !== "" && rightStr !== "") {
         const leftMarks = tokenizeHourDigits(leftStr);
         const rightMarks = tokenizeHourDigits(rightStr);
         if (!leftMarks || leftMarks.length !== 1 || !rightMarks || rightMarks.length !== 1) {
-          return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+          return { error: "구간 표기 해석 실패: \"" + originalToken + "\"", warning };
         }
         const marks = expandHourRange(leftMarks[0], rightMarks[0]);
-        if (!marks) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+        if (!marks) return { error: "구간 표기 해석 실패: \"" + originalToken + "\"", warning };
         return { type: "point", marks, warning };
       }
       if (rightStr === "") {
@@ -1275,18 +1292,18 @@
         // "그 시각부터 마감까지" 열린 시작점으로 삼고, 그 앞의 시각들(6시)은 각각 개별 희망
         // 시작 시각으로 남긴다.
         const marks = tokenizeHourDigits(leftStr);
-        if (!marks || marks.length === 0) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+        if (!marks || marks.length === 0) return { error: "구간 표기 해석 실패: \"" + originalToken + "\"", warning };
         return { type: "openStart", mark: marks[marks.length - 1], extraPoints: marks.slice(0, -1), warning };
       }
       // "~458"처럼 물결 뒤에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 첫 시각(4시)을
       // "마감 이전부터 그 시각까지" 열린 끝점으로 삼고, 그 뒤의 시각들(5시, 8시)은 각각
       // 개별 희망 시작 시각으로 남긴다.
       const marks = tokenizeHourDigits(rightStr);
-      if (!marks || marks.length === 0) return { error: "구간 표기 해석 실패: \"" + token + "\"", warning };
+      if (!marks || marks.length === 0) return { error: "구간 표기 해석 실패: \"" + originalToken + "\"", warning };
       return { type: "openEnd", mark: marks[0], extraPoints: marks.slice(1), warning };
     }
     const marks = tokenizeHourDigits(clean);
-    if (!marks) return { error: "시간 해석 실패: \"" + token + "\"", warning };
+    if (!marks) return { error: "시간 해석 실패: \"" + originalToken + "\"", warning };
     return { type: "point", marks, warning };
   }
 
@@ -3821,24 +3838,108 @@
   }
 
   // 후보 카드의 일정 하나를 확정한다: 재생성해도 이 일정은 고정되고 나머지만 다시 배정된다.
-  // onDone: 확정/확정취소 뒤 다시 그릴 함수. 생성3의 후보B/C 카드에서 항상 renderSchedule3Result를
+  // container: 후보B/C(candidate) 또는 후보A(result) 객체 — 항상 .assigned와 .confirmedIds를 가진다.
+  // onDone: 확정/확정취소/교체 뒤 다시 그릴 함수. 생성3의 카드에서 항상 renderSchedule3Result를
   // 명시적으로 넘겨받아 쓴다.
-  function confirmCandidateSession(candidate, reqId, onDone = renderSchedule3Result) {
-    if (!confirm("스케줄을 확정하시겠습니까?")) return;
-    if (!Array.isArray(candidate.confirmedIds)) candidate.confirmedIds = [];
-    if (!candidate.confirmedIds.includes(reqId)) candidate.confirmedIds.push(reqId);
+  function confirmSession(container, reqId, onDone) {
+    if (!Array.isArray(container.confirmedIds)) container.confirmedIds = [];
+    if (!container.confirmedIds.includes(reqId)) container.confirmedIds.push(reqId);
     saveState();
     onDone();
     showToast("스케줄이 확정되었습니다", "success");
   }
 
-  // 확정된 일정을 다시 눌러 확정을 취소한다.
-  function unconfirmCandidateSession(candidate, reqId, onDone = renderSchedule3Result) {
-    if (!confirm("확정된 스케줄을 취소하시겠습니까?")) return;
-    candidate.confirmedIds = (candidate.confirmedIds || []).filter(id => id !== reqId);
+  // 확정된 일정의 확정을 취소한다.
+  function unconfirmSession(container, reqId, onDone) {
+    container.confirmedIds = (container.confirmedIds || []).filter(id => id !== reqId);
     saveState();
     onDone();
     showToast("스케줄 확정이 취소되었습니다", "info");
+  }
+
+  // "1회 제한 회원" 목록은 생성3 자신의 것(onceLimitedMemberIds3)을 써야 한다 — maxSessionsFor는
+  // withSelectionOverride로 감싼 생성 중에만 이 목록을 보므로, 생성이 끝난 뒤 그리드를 클릭해
+  // 교체 후보를 고를 때는 직접 참조해야 한다.
+  function maxSessionsFor3(member) {
+    if (!member) return 1;
+    if (state.onceLimitedMemberIds3.includes(member.id)) return 1;
+    return (member.category || "상담") === "상담" ? 1 : MAX_SESSIONS_PER_MEMBER;
+  }
+
+  // 배정된 세션 하나(req)를 다른 회원으로 교체할 수 있는지 훑는다. 요일·시작 시각·길이가
+  // 정확히 같은 신청을 가진 회원만 후보로 본다 — 신청은 가능한 시작 시각마다 하나씩 등록돼
+  // 있으므로(addDesiredRange), 이 자리에 "신청 가능했던" 회원은 정확히 이 조건으로 걸러진다.
+  // 요일·시간·지점은 그대로 유지한 채 사람만 바뀌는 것이므로, 이동 시간·간격 재계산은
+  // 필요 없다(그 날의 다른 배정과의 물리적 배치는 달라지지 않는다) — 그날 다른 배정이 없는지,
+  // 주간 최대 횟수를 넘지 않는지, 미배정 회원으로 지정돼 있지 않은지, 그 지점을 이용할 수
+  // 있는지만 확인하면 된다.
+  function eligibleSwapMembersFor(container, req) {
+    const results = [];
+    const seenMemberIds = new Set();
+    state.requests.forEach(other => {
+      if (other.memberId === req.memberId) return;
+      if (other.day !== req.day || other.startSlot !== req.startSlot || other.duration !== req.duration) return;
+      if (seenMemberIds.has(other.memberId)) return;
+      const member = memberById(other.memberId);
+      if (!member) return;
+      if (state.excludedMemberIds3.includes(member.id)) return;
+      if (!candidateLocationsForRequest(other).includes(req.locationId)) return;
+      let weekCount = 0;
+      let sameDayCount = 0;
+      container.assigned.forEach(a => {
+        if (a.memberId !== member.id || a.id === req.id) return;
+        weekCount++;
+        if (a.day === req.day) sameDayCount++;
+      });
+      if (sameDayCount > 0) return; // 1일 최대 1회
+      if (weekCount >= maxSessionsFor3(member)) return; // 주간 최대 횟수(상담 회원·1회 제한 회원 포함)
+      seenMemberIds.add(member.id);
+      results.push(member);
+    });
+    results.sort((a, b) => a.name.localeCompare(b.name, "ko"));
+    return results;
+  }
+
+  // 배정된 세션의 자리(요일·시작 시각·길이·지점)는 그대로 두고 사람만 newMember로 바꿔치기한다.
+  // 원래 확정돼 있던 자리였다면, 확정 상태도 새 회원의 신청 id로 그대로 옮겨준다.
+  function swapSessionMember(container, req, newMember, onDone) {
+    const newReq = state.requests.find(r =>
+      r.memberId === newMember.id && r.day === req.day && r.startSlot === req.startSlot && r.duration === req.duration);
+    if (!newReq) return;
+    const idx = container.assigned.findIndex(a => a.id === req.id);
+    if (idx === -1) return;
+    const wasConfirmed = Array.isArray(container.confirmedIds) && container.confirmedIds.includes(req.id);
+    container.assigned[idx] = {
+      id: newReq.id, memberId: newMember.id, day: req.day, startSlot: req.startSlot,
+      duration: req.duration, locationId: req.locationId
+    };
+    if (wasConfirmed) {
+      container.confirmedIds = container.confirmedIds.filter(id => id !== req.id);
+      container.confirmedIds.push(newReq.id);
+    }
+    saveState();
+    onDone();
+    showToast(newMember.name + "(으)로 교체되었습니다", "success");
+  }
+
+  // 그리드의 배정된 세션 블록을 클릭했을 때 뜨는 메뉴: 맨 위는 확정/확정취소, 그 아래는 같은
+  // 요일·시간·지점에 교체 가능한 다른 회원 목록이다 — "확정하시겠습니까?" 확인창 대신 이 목록을
+  // 보여주고, 고르면 그 자리 인원만 바로 바뀐다.
+  function sessionSwapMenuItems(container, req, isConfirmed, onDone) {
+    const member = memberById(req.memberId);
+    const items = [{
+      label: isConfirmed ? "확정 취소" : "현재 인원(" + (member ? member.name : "?") + ")으로 확정",
+      onClick: () => (isConfirmed ? unconfirmSession(container, req.id, onDone) : confirmSession(container, req.id, onDone))
+    }, { separator: true }];
+    const swapMembers = eligibleSwapMembersFor(container, req);
+    if (swapMembers.length === 0) {
+      items.push({ label: "교체 가능한 인원 없음", disabled: true });
+    } else {
+      swapMembers.forEach(m => {
+        items.push({ label: m.name + "(으)로 교체", onClick: () => swapSessionMember(container, req, m, onDone) });
+      });
+    }
+    return items;
   }
 
   function candidateToBlocks(candidate, onDone = renderSchedule3Result) {
@@ -3857,9 +3958,7 @@
         sublabel: slotLabel(r.startSlot) + "~" + endLabel(r.startSlot, r.duration),
         color: m ? memberColor(m.id) : BLOCK_COLOR,
         confirmed: isConfirmed,
-        onClick: isConfirmed
-          ? () => unconfirmCandidateSession(candidate, r.id, onDone)
-          : () => confirmCandidateSession(candidate, r.id, onDone)
+        contextMenuItems: () => sessionSwapMenuItems(candidate, r, isConfirmed, onDone)
       };
     });
   }
@@ -5244,13 +5343,13 @@
   function schedule2Signature(result) {
     return result.assigned.map(r => r.memberId + "|" + r.day + "|" + r.startSlot + "|" + r.locationId).sort().join(",");
   }
-  const MAX_POLISH_CANDIDATES = 8; // 다듬기 전 지표 상위권 요일 순서 중 최대 이만큼만 서로 다른 시작점으로 쓴다
+  const MAX_POLISH_CANDIDATES = 10; // 다듬기 전 지표 상위권 요일 순서 중 최대 이만큼만 서로 다른 시작점으로 쓴다
   // 담금질 기법은 시드가 다르면 완전히 다른 경로를 헤매므로, 재시작 횟수 자체가 "3명 이상이
-  // 요일을 넘나들며 동시에 자리를 맞바꿔야만 나오는 조합"을 찾을 확률을 좌우한다. 기존
-  // 4회·24초는 이런 조합을 우연히 밟기엔 다소 부족해 보여, 재시작·예산을 늘렸다(각 시도
+  // 요일을 넘나들며 동시에 자리를 맞바꿔야만 나오는 조합"을 찾을 확률을 좌우한다. 24회·120초는
+  // 이런 조합을 우연히 밟기엔 다소 부족해 보여, 재시작·예산을 다시 한번 늘렸다(각 시도
   // 자체의 로직은 그대로 두고 "몇 번 더 시도해보는가"만 늘린 것이라 회귀 위험이 낮다).
-  const MAX_POLISH_ATTEMPTS = 24; // 요일 순서(위)와 담금질 시드 재시작을 합쳐 최대 이만큼만 다듬어본다
-  const TOTAL_POLISH_BUDGET_MS = 120000;
+  const MAX_POLISH_ATTEMPTS = 32; // 요일 순서(위)와 담금질 시드 재시작을 합쳐 최대 이만큼만 다듬어본다
+  const TOTAL_POLISH_BUDGET_MS = 240000;
   const MIN_POLISH_BUDGET_MS = 6000; // 시도가 여럿이어도 담금질이 의미 있으려면 한 시도당 최소한 이 정도는 필요하다
 
   // 여러 요일 순서를 다 시도해보는 동안(특히 회원·신청이 많으면 한 조합에도 시간이 좀
@@ -5276,7 +5375,7 @@
     // 단계 포함), 전체 탐색에 시간 예산을 둔다 — 예산을 넘기면 그때까지 찾은 가장 좋은
     // 순서로 넘어간다. 평가한 결과는 전부 기억해둔다 — 다듬기 전 동점 후보를 나중에
     // 다시 골라내야 하므로(아래 참고).
-    const SEARCH_DEADLINE = performance.now() + 12000;
+    const SEARCH_DEADLINE = performance.now() + 18000;
     let best = null, bestOrder = null;
     const evaluated = [];
     for (let i = 0; i < dayOrdersToTry.length; i++) {
@@ -5367,30 +5466,9 @@
         sublabel: slotLabel(r.startSlot) + "~" + endLabel(r.startSlot, r.duration),
         color: m ? memberColor(m.id) : BLOCK_COLOR,
         confirmed: isConfirmed,
-        onClick: isConfirmed
-          ? () => unconfirmSchedule2Session(r.id, result, onDone)
-          : () => confirmSchedule2Session(r.id, result, onDone)
+        contextMenuItems: () => sessionSwapMenuItems(result, r, isConfirmed, onDone)
       };
     });
-  }
-
-  // 후보B/C 카드의 확정/확정취소(confirmCandidateSession)와 동일한 동작을, 체인 DP 결과
-  // 모양(schedule2ToBlocks가 만드는 블록)에 대해 제공한다.
-  function confirmSchedule2Session(reqId, result, onDone) {
-    if (!confirm("스케줄을 확정하시겠습니까?")) return;
-    if (!Array.isArray(result.confirmedIds)) result.confirmedIds = [];
-    if (!result.confirmedIds.includes(reqId)) result.confirmedIds.push(reqId);
-    saveState();
-    onDone();
-    showToast("스케줄이 확정되었습니다", "success");
-  }
-
-  function unconfirmSchedule2Session(reqId, result, onDone) {
-    if (!confirm("확정된 스케줄을 취소하시겠습니까?")) return;
-    result.confirmedIds = (result.confirmedIds || []).filter(id => id !== reqId);
-    saveState();
-    onDone();
-    showToast("스케줄 확정이 취소되었습니다", "info");
   }
 
   // 같은 요일 안에서 연속된 두 세션 사이, 지점이 달라 실제로 이동이 필요한 구간만 표시한다
@@ -5827,8 +5905,17 @@
       stats.appendChild(pill3);
       if (idleMinutes != null) {
         const pill4 = document.createElement("span");
-        pill4.className = "stat-pill stat-pill-idle";
-        pill4.textContent = "공강 " + formatMinutesLabel(idleMinutes);
+        if (idleMinutes > 0) {
+          pill4.className = "stat-pill stat-pill-idle";
+          pill4.textContent = "빈 시간 " + formatMinutesLabel(idleMinutes);
+        } else {
+          pill4.className = "stat-pill";
+          pill4.append("빈 시간 ");
+          const none = document.createElement("span");
+          none.className = "stat-pill-muted";
+          none.textContent = "없음";
+          pill4.appendChild(none);
+        }
         stats.appendChild(pill4);
       }
       card.appendChild(stats);
@@ -5892,26 +5979,26 @@
     if (schedule3Result.candidateA) {
       const a = schedule3Result.candidateA;
       buildCard(
-        "후보A - 인원 최대 (공강 허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", a,
+        "후보A - 인원 최대 (빈 시간 허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", a,
         schedule2ToBlocks(a.assigned, { result: a, onDone: renderSchedule3Result }),
         schedule2ToTravelBlocks(a.assigned).concat(schedule2ToIdleBlocks(a.assigned)),
         schedule2TotalIdleMinutes(a.assigned),
         null
       );
     } else {
-      buildPlaceholderCard("후보A - 인원 최대 (공강 허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
+      buildPlaceholderCard("후보A - 인원 최대 (빈 시간 허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
     }
     const b = candidates[0];
     if (b) {
       buildCard(
-        "후보B - 인원 최대 (공강 미허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", b,
+        "후보B - 인원 최대 (빈 시간 미허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", b,
         candidateToBlocks(b, renderSchedule3Result),
         candidateToTravelBlocks(b),
         null,
         0
       );
     } else {
-      buildPlaceholderCard("후보B - 인원 최대 (공강 미허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
+      buildPlaceholderCard("후보B - 인원 최대 (빈 시간 미허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
     }
     const c = candidates[1];
     if (c) {
@@ -5927,7 +6014,7 @@
     }
   }
 
-  // 후보A와 후보B·C는 소요 시간 차이가 커서(A는 체인 DP+담금질로 수십 초, B·C는 그리디
+  // 후보A와 후보B·C는 소요 시간 차이가 커서(A는 체인 DP+담금질로 수 분, B·C는 그리디
   // 다중 시도로 INITIAL_SEARCH_ATTEMPTS 증가 후 수 분) 버튼을 따로 둔다 — A만 빠르게 다시
   // 보고 싶을 때 B·C의 느린 탐색까지 함께 기다리지 않아도 된다. 다만 두 버튼이 동시에 도는
   // 것까지는 허용하지 않는다(withSelectionOverride가 재진입을 지원하지 않으므로) —
