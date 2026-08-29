@@ -3549,20 +3549,6 @@
     return total;
   }
 
-  // 회원이 등록한 가능 시간 총합(분)을, 회원 스케줄 추가 그리드에 보이는 것과 같은 방식으로
-  // 계산한다(BREAK_MIN이 0이 아니었다면 구간마다 그만큼 더했을 자리 — 지금은 더할 것이 없다).
-  // 등록/상담 회원 모두 이 총합이 1시간(60분) 이하면 애초에 같은 날 두 번째 수업을
-  // 넣을 시간이 물리적으로 없으므로(등록 수업은 최소 120분, 상담은 최소 60분 필요), 1회만
-  // 배정되어도 예외적인 상황이 아니다.
-  function totalAvailableMinutesFor(memberId) {
-    const breakSlots = durationToSlots(BREAK_MIN);
-    const runs = mergeRequestRuns(state.requests.filter(r => r.memberId === memberId));
-    return runs.reduce((sum, run) => {
-      const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);
-      return sum + (displayEndSlot - run.startSlot) * SLOT_MIN;
-    }, 0);
-  }
-
   function buildCandidate(title, desc, sortedReqs, eligibleSet, allMemberIds, options, pinned) {
     const assigned = greedyAssign(sortedReqs.filter(r => eligibleSet.has(r.id)), options, pinned);
     const assignedMemberIds = new Set(assigned.map(r => r.memberId));
@@ -3570,18 +3556,7 @@
       .filter(id => !assignedMemberIds.has(id))
       .map(id => memberById(id))
       .filter(Boolean);
-    const sessionCountByMember = new Map();
-    assigned.forEach(r => sessionCountByMember.set(r.memberId, (sessionCountByMember.get(r.memberId) || 0) + 1));
-    // "1회 제한 회원"으로 선택된 회원이나, 가능 시간을 1시간 이하로만 등록해 애초에 2회를
-    // 받을 수 없었던 회원은 원래부터 1회만 배정되는 게 정상이므로, 예외적으로 1회만 배정된
-    // 회원을 알려주는 이 목록에는 표시하지 않는다.
-    const singleAssignedMembers = [...assignedMemberIds]
-      .filter(id => sessionCountByMember.get(id) === 1
-        && !currentOnceLimitIds().includes(id)
-        && totalAvailableMinutesFor(id) > 60)
-      .map(id => memberById(id))
-      .filter(Boolean);
-    return { title, desc, assigned, unassignedMembers, singleAssignedMembers, travelMinutes: totalTravelMinutes(assigned) };
+    return { title, desc, assigned, unassignedMembers, travelMinutes: totalTravelMinutes(assigned) };
   }
 
   // 각 전략은 "거의 동시에 경합하는" 신청들 사이에서 jitter 값으로 순서를 정한다.
@@ -4186,7 +4161,9 @@
   }
 
   // 배정된 세션의 자리(요일·시작 시각·길이·지점)는 그대로 두고 사람만 newMember로 바꿔치기한다.
-  // 원래 확정돼 있던 자리였다면, 확정 상태도 새 회원의 신청 id로 그대로 옮겨준다.
+  // moveSession/attemptSwap과 마찬가지로, 재생성해도 이 자리가 풀리지 않도록 새 회원의 신청
+  // id를 confirmedIds에 자동으로 넣는다(사람이 손댄 자리는 알고리즘이 건드리지 않는다는
+  // 원칙 — 세 "수동 편집" 함수 모두 같은 보호 수준을 준다).
   function swapSessionMember(container, req, newMember, onDone) {
     const newReq = state.requests.find(r =>
       r.memberId === newMember.id && r.day === req.day && r.startSlot === req.startSlot && r.duration === req.duration);
@@ -4194,15 +4171,13 @@
     const idx = container.assigned.findIndex(a => a.id === req.id);
     if (idx === -1) return;
     pushManualUndo(container);
-    const wasConfirmed = Array.isArray(container.confirmedIds) && container.confirmedIds.includes(req.id);
     container.assigned[idx] = {
       id: newReq.id, memberId: newMember.id, day: req.day, startSlot: req.startSlot,
       duration: req.duration, locationId: req.locationId
     };
-    if (wasConfirmed) {
-      container.confirmedIds = container.confirmedIds.filter(id => id !== req.id);
-      container.confirmedIds.push(newReq.id);
-    }
+    if (!Array.isArray(container.confirmedIds)) container.confirmedIds = [];
+    container.confirmedIds = container.confirmedIds.filter(id => id !== req.id);
+    container.confirmedIds.push(newReq.id);
     saveState();
     onDone();
     showToast(newMember.name + "(으)로 교체되었습니다", "success");
@@ -6330,14 +6305,29 @@
         const actions = document.createElement("div");
         actions.className = "candidate-card-actions";
 
+        // 텍스트 라벨 버튼 4개를 한 줄에 나열하면 카드가 좁을 때 제목이 두 줄로 밀려버려서,
+        // 아이콘 전용 버튼(툴팁으로 설명 대체)으로 압축하고 그룹 사이에 구분선을 둔다:
+        // [편집 취소] | [이전 후보][다음 후보] | [저장]
+        function makeIconBtn(iconSvg, label, tooltip) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "btn btn-ghost icon-btn regen-candidate-btn";
+          b.setAttribute("aria-label", label);
+          b.title = tooltip;
+          b.innerHTML = iconSvg;
+          return b;
+        }
+        function addDivider() {
+          const d = document.createElement("span");
+          d.className = "action-divider";
+          actions.appendChild(d);
+        }
+
+        const ICON_UNDO_MANUAL = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
         // 드래그 이동·자리 맞바꾸기·인원 교체·확정 등 "방금 한 조정 하나"만 되돌린다 — 아래
-        // "↩ 이전 후보"(재생성 되돌리기)와는 별개이고, 후보A에도(strategyIndex가 없어 재생성
+        // "이전 후보"(재생성 되돌리기)와는 별개이고, 후보A에도(strategyIndex가 없어 재생성
         // 되돌리기 버튼이 없는) 똑같이 필요하므로 strategyIndex 유무와 무관하게 항상 넣는다.
-        const undoManualBtn = document.createElement("button");
-        undoManualBtn.type = "button";
-        undoManualBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
-        undoManualBtn.textContent = "↺ 편집 취소";
-        undoManualBtn.title = "방금 드래그로 옮기거나 맞바꾸거나 교체·확정한 것을 취소합니다.";
+        const undoManualBtn = makeIconBtn(ICON_UNDO_MANUAL, "편집 취소", "방금 드래그로 옮기거나 맞바꾸거나 교체·확정한 것을 취소합니다.");
         undoManualBtn.disabled = !hasManualUndo(result);
         undoManualBtn.addEventListener("click", () => {
           undoManualEdit(result, renderSchedule3Result);
@@ -6345,38 +6335,37 @@
         actions.appendChild(undoManualBtn);
 
         if (strategyIndex != null) {
+          addDivider();
+
           const undoStackForThis = candidateUndoStack[strategyIndex] || [];
-          const undoBtn = document.createElement("button");
-          undoBtn.type = "button";
-          undoBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
-          undoBtn.textContent = "↩ 이전 후보";
-          undoBtn.title = "재생성하기 전의 후보로 되돌아갑니다.";
+          const ICON_PREV_CANDIDATE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>';
+          const undoBtn = makeIconBtn(ICON_PREV_CANDIDATE, "이전 후보", "재생성하기 전의 후보로 되돌아갑니다.");
           undoBtn.disabled = undoStackForThis.length === 0;
           undoBtn.addEventListener("click", () => {
             restorePreviousCandidate(strategyIndex);
           });
           actions.appendChild(undoBtn);
 
-          const regenBtn = document.createElement("button");
-          regenBtn.type = "button";
-          regenBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
-          regenBtn.textContent = "↻ 다음 후보";
-          regenBtn.title = "이 후보만 같은 전략 안에서 다시 계산합니다.";
+          const ICON_REGEN = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M20.49 9A9 9 0 0 0 5.65 5.64L1 10m22 4-4.65 4.36A9 9 0 0 1 3.51 15"/></svg>';
+          const regenBtn = makeIconBtn(ICON_REGEN, "다음 후보", "이 후보만 같은 전략 안에서 다시 계산합니다.");
+          const regenBtnIconHtml = regenBtn.innerHTML;
           regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
           regenBtn.addEventListener("click", async () => {
             regenBtn.disabled = true;
             undoBtn.disabled = true;
+            regenBtn.classList.add("icon-btn-loading");
             try {
               // 생성3 자신의 미배정/1회 제한 회원 설정(excludedMemberIds3/onceLimitedMemberIds3)이
               // 적용되도록 반드시 withSelectionOverride로 감싼다 — 그냥 호출하면 currentExcludedIds()가
               // (더 이상 UI가 없어 항상 비어있는) 옛 생성1 설정으로 폴백해버린다.
               await withSelectionOverride(state.excludedMemberIds3, state.onceLimitedMemberIds3, () =>
                 regenerateCandidate(strategyIndex, progress => {
-                  regenBtn.textContent = "재생성 중... " + Math.round(progress * 100) + "%";
+                  regenBtn.textContent = Math.round(progress * 100) + "%";
                 })
               );
             } finally {
-              regenBtn.textContent = "↻ 다음 후보";
+              regenBtn.classList.remove("icon-btn-loading");
+              regenBtn.innerHTML = regenBtnIconHtml;
               regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
               undoBtn.disabled = (candidateUndoStack[strategyIndex] || []).length === 0;
             }
@@ -6384,11 +6373,10 @@
           actions.appendChild(regenBtn);
         }
 
-        const saveImageBtn = document.createElement("button");
-        saveImageBtn.type = "button";
-        saveImageBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
-        saveImageBtn.textContent = "📷 저장";
-        saveImageBtn.title = "이 후보 카드를 이미지로 저장합니다.";
+        addDivider();
+
+        const ICON_SAVE = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>';
+        const saveImageBtn = makeIconBtn(ICON_SAVE, "이미지로 저장", "이 후보 카드를 이미지로 저장합니다.");
         saveImageBtn.addEventListener("click", () => {
           saveCandidateCardAsImage(card, title);
         });
@@ -6465,14 +6453,6 @@
           result.unassignedMembers.map(m => m.name).join(", ");
         card.appendChild(box);
       }
-      if (result.singleAssignedMembers && result.singleAssignedMembers.length > 0) {
-        const box = document.createElement("div");
-        box.className = "unassigned-box single-assigned-box";
-        box.innerHTML = "<b>1회 배정 회원 (" + result.singleAssignedMembers.length + "명)</b> · " +
-          result.singleAssignedMembers.map(m => m.name).join(", ");
-        card.appendChild(box);
-      }
-
       // 회원별 배정 세션을 모아 정확히 2회 배정된 회원의 지점(세션마다 다를 수 있어 중복 제거
       // 후 "(첫 글자)"를 이어붙임)과 이름을 보여준다. candidateA(체인 DP)·B/C(그리디) 모두
       // result.assigned에 {memberId, locationId} 형태의 세션을 담고 있어 별도 계산 없이 여기서
