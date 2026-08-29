@@ -61,6 +61,22 @@
           <h4 class="subsection-subtitle" id="travelTitle" style="display:none;">지점 간 이동 시간 (분)</h4>
           <div id="travelMatrix" class="travel-matrix"></div>
         </div>
+
+        <div class="settings-section">
+          <h3 class="subsection-title">데이터 백업 · 복원</h3>
+          <p class="card-desc subsection-desc">모든 데이터는 이 브라우저에만 저장되어 다른 기기·브라우저와 자동으로 공유되지 않습니다. 다른 기기에서도 같은 데이터를 쓰고 싶을 때, 여기서 백업 코드를 만들어 복사한 뒤 그 기기에서 붙여넣어 복원하세요. 백업 코드는 PIN으로 암호화되어, PIN을 모르면 코드만으로는 내용을 볼 수 없습니다.</p>
+
+          <div class="request-form">
+            <button type="button" class="btn btn-ghost" id="backupExportBtn">백업 코드 만들기</button>
+            <button type="button" class="btn btn-ghost" id="backupImportOpenBtn">백업 코드로 복원</button>
+          </div>
+
+          <div id="backupExportResult" style="display:none;margin-top:12px;">
+            <label for="backupExportTextarea">백업 코드 (복사해서 다른 기기에 붙여넣으세요)</label>
+            <textarea id="backupExportTextarea" class="bulk-import-textarea" readonly rows="4" style="font-family:monospace;font-size:12px;"></textarea>
+            <button type="button" class="btn btn-primary" id="backupExportCopyBtn" style="margin-top:6px;">복사</button>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -388,10 +404,40 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="backupImportOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="backupImportTitle">
+    <div class="modal-head">
+      <h3 id="backupImportTitle">백업 코드로 복원</h3>
+      <button type="button" class="modal-close" id="backupImportCloseBtn" aria-label="닫기">×</button>
+    </div>
+
+    <div class="modal-body">
+      <p class="card-desc subsection-desc">
+        다른 기기에서 만든 백업 코드와, 그 코드를 만들 때 입력한 PIN을 입력하세요.
+        복원하면 이 기기에 현재 저장된 데이터는 백업 코드의 내용으로 덮어써집니다.
+      </p>
+      <div class="field">
+        <label for="backupImportTextarea">백업 코드</label>
+        <textarea id="backupImportTextarea" class="bulk-import-textarea" rows="4" style="font-family:monospace;font-size:12px;"></textarea>
+      </div>
+      <div class="field" style="margin-top:10px;">
+        <label for="backupImportPinInput">PIN</label>
+        <input type="password" id="backupImportPinInput" autocomplete="off" />
+      </div>
+      <p class="generate-hint" id="backupImportHint"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-ghost" id="backupImportCancelBtn">취소</button>
+        <button type="button" class="btn btn-primary" id="backupImportApplyBtn">복원</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <footer class="app-footer">
   <p>모든 데이터는 이 브라우저에만 저장됩니다 (localStorage).</p>
 </footer>
 
+<script src="vendor/html2canvas.min.js"></script>
 <script src="script.js"></script>
 </body>
 </html>

@@ -10,7 +10,10 @@
   const SESSION_DURATION_MIN = 60; // 수업(등록 회원) 시간
   const CONSULT_DURATION_MIN = 30; // 상담 회원은 확보 시간이 더 짧음
   const BREAK_MIN = 0; // 수업 사이 쉬는 시간 없음(지점이 바뀔 때만 이동 시간만큼 간격을 둔다)
-  const ALLOWED_GAP_MIN = 10; // 이동시간·휴식시간을 제외하고 추가로 허용되는 공강(설명 안 되는 빈 시간)
+  const ALLOWED_GAP_MIN = 10; // 이동시간·휴식시간을 제외하고 추가로 허용되는 빈 시간
+  // 상암점·여의도점·마포점 세 지점을 모두 다니는 회원은 "이동-회원-이동"(도착도 이동, 떠날 때도
+  // 이동)으로 배정될 수 없다는 숨김 하드 로직(greedyAssign·eligibleSwapMembersFor 공용)의 기준 지점들.
+  const SOLO_TRAVEL_LOCATION_NAMES = ["상암점", "여의도점", "마포점"];
   const BLOCK_COLOR = "#4f46e5"; // 회원 미지정 등 예외 상황의 기본 블록 배경색
   // 회원별 블록 배경색(등록 순서대로 순환, 고정 순서 — 절대 임의로 섞지 않음). 색맹 시뮬레이션
   // 기준으로 인접 색끼리 구분이 되도록 검증된 팔레트: blue/orange/aqua/yellow/magenta/green/
@@ -183,7 +186,56 @@
     }, 2200);
   }
 
+  // 후보 카드를 이미지(PNG)로 캡처해 다운로드한다. 편집취소·이전 후보·다음 후보·저장 버튼이 모인
+  // actions 영역은 스크린샷에 의미가 없으므로 ignoreElements로 제외한다.
+  async function saveCandidateCardAsImage(cardEl, title) {
+    if (typeof html2canvas !== "function") {
+      showToast("이미지 저장 기능을 불러오지 못했습니다.", "error");
+      return;
+    }
+    try {
+      const canvas = await html2canvas(cardEl, {
+        backgroundColor: "#ffffff",
+        scale: 2,
+        ignoreElements: el => el.classList && el.classList.contains("candidate-card-actions"),
+        // html2canvas가 repeating-linear-gradient 배경을 그리지 못하고 흰 배경으로 남기는 문제가
+        // 있어(이동 시간 블록·제외 회원 블록에 사용 중), 캡처용 복제 문서에서만 무늬를 대표하는
+        // 단색으로 바꿔치기한다. 화면에 실제로 보이는 원본 요소는 건드리지 않는다.
+        onclone: clonedDoc => {
+          clonedDoc.querySelectorAll(".cal-travel-block").forEach(el => {
+            el.style.background = "#ffedd5";
+          });
+          clonedDoc.querySelectorAll(".cal-block.excluded").forEach(el => {
+            el.style.background = "#e5e7eb";
+          });
+        }
+      });
+      canvas.toBlob(blob => {
+        if (!blob) {
+          showToast("이미지 저장에 실패했습니다.", "error");
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        const dateLabel = new Date().toISOString().slice(0, 10);
+        a.href = url;
+        a.download = title.replace(/[\\/:*?"<>|]/g, "") + "_" + dateLabel + ".png";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+        showToast("후보를 이미지로 저장했습니다", "success");
+      }, "image/png");
+    } catch (err) {
+      showToast("이미지 저장에 실패했습니다.", "error");
+    }
+  }
+
+  // 백업 복원 직후 reload()할 때 beforeunload/visibilitychange 핸들러가 옛 메모리 상태로
+  // saveState()를 한 번 더 실행해 방금 덮어쓴 localStorage를 되돌리지 않도록 막는 플래그.
+  let suppressAutosave = false;
   function saveState() {
+    if (suppressAutosave) return;
     state.availableCells = Array.from(availableCells);
     state.candidates = candidates;
     state.schedule3Result = schedule3Result;
@@ -413,6 +465,18 @@
 
   function locationById(id) { return state.locations.find(l => l.id === id); }
 
+  // SOLO_TRAVEL_LOCATION_NAMES 세 지점을 모두 등록해둔 회원 id 집합. greedyAssign(생성 시
+  // "이동-회원-이동" 금지)과 eligibleSwapMembersFor(수동 교체 시 같은 규칙 적용)가 공용으로 쓴다.
+  function soloTravelMemberIds() {
+    // 이름이 정확히 하나씩만 매칭돼야 규칙이 어느 지점을 가리키는지 모호하지 않다 — 같은
+    // 이름을 가진 지점이 실수로 두 개 등록되면(중복 매칭) 전체 개수가 3개를 넘어서게 되고,
+    // 이럴 땐 어느 쪽이 진짜인지 알 수 없으므로 규칙 자체를 비활성화한다(잘못된 지점에
+    // 하드 로직을 적용하는 것보다 안전).
+    const soloTravelLocationIds = state.locations.filter(l => SOLO_TRAVEL_LOCATION_NAMES.includes(l.name)).map(l => l.id);
+    if (soloTravelLocationIds.length !== SOLO_TRAVEL_LOCATION_NAMES.length) return new Set();
+    return new Set(state.members.filter(m => soloTravelLocationIds.every(id => m.locationIds.includes(id))).map(m => m.id));
+  }
+
   function memberColor(id) {
     const idx = state.members.findIndex(m => m.id === id);
     if (idx === -1) return BLOCK_COLOR;
@@ -434,10 +498,27 @@
     return typeof v === "number" && v >= 0 ? v : 0;
   }
 
+  // 드래그로 세션 블록을 옮기는 동안, 놓았을 때 호출할 이동 함수·그 세션의 길이(슬롯 수)·
+  // "여기 놓아도 되는지" 실시간으로 검사할 함수를 잠시 들고 있는다. 그리드는 렌더할 때마다
+  // 통째로 다시 그려지므로(container.innerHTML = ""), 드래그 시작 시점의 블록 정보를 렌더
+  // 함수 바깥(모듈 스코프)에 붙잡아둬야 drop/dragover 이벤트에서 찾을 수 있다. durationSlots는
+  // 드래그 중 미리보기를 그 세션 길이만큼(예: 1시간이면 6칸) 보여주기 위한 값이다 — 실제
+  // 10분짜리 배경 셀 하나만 강조하면 옮겨질 범위를 알기 어렵다. validator는 놓았을 때 성공할지
+  // 실패할지를 미리 보여주기 위한 것으로, 실제 커밋 함수(onMove)와 항상 같은 기준으로 판단해야
+  // 한다(각 블록이 canMoveTo로 함께 제공한다). sourceContainer는 드래그가 시작된 그리드
+  // 컨테이너 자신이다 — 후보A/B/C처럼 여러 그리드가 동시에 화면에 떠 있을 때, 다른 그리드
+  // 위에서 dragover/drop이 걸려도 이 값과 비교해 자신이 시작한 드래그가 아니면 무시한다
+  // (그러지 않으면 A에서 시작한 드래그를 B 위에 놓았을 때 B의 좌표로 A의 데이터가 바뀐다).
+  let draggingMoveHandler = null;
+  let draggingDurationSlots = 1;
+  let draggingValidator = null;
+  let draggingSourceContainer = null;
+
   /* ---------------- Grid rendering ---------------- */
-  // options: { blocks: [{day, startSlot, duration, label, loc, sublabel, color, excluded, onDelete}],
+  // options: { blocks: [{day, startSlot, duration, label, loc, sublabel, color, excluded, onDelete, onMove}],
   //   travelBlocks: [{day, startSlot, duration, label, type: "travel" | "break"}] }
   // onDelete(있는 블록만): 마우스 호버 시 우측 상단에 삭제(×) 버튼이 나타난다 (PC 전용 기능).
+  // onMove(있는 블록만): 블록을 다른 (day, slot) 셀에 드래그해 놓으면 onMove(day, slot)를 호출한다.
   function renderGrid(container, availableSet, options) {
     options = options || {};
     const rangeStart = typeof options.rangeStartSlot === "number" ? options.rangeStartSlot : 0;
@@ -499,6 +580,41 @@
       travel.style.gridRow = (clippedStart - rangeStart + 2) + " / span " + (clippedEnd - clippedStart);
       travel.title = t.label;
       travel.textContent = t.label;
+      // 이동 시간 블록 자체는 옮길 수 있는 데이터가 아니라(두 수업 사이 간격에서 계산되는
+      // 값일 뿐), 드래그·클릭 모두 "바로 다음 수업"(t.onMove/t.contextMenuItems가 감싸고
+      // 있는 세션)을 이 이동 시간 앞뒤로 당기거나 미루는 동작으로 연결한다. 미리보기 크기는
+      // 이동 시간 블록의 짧은 길이가 아니라 실제로 옮겨질 다음 수업의 길이(t.moveDurationSlots)를
+      // 써야 얼마만큼의 자리가 필요한지 정확히 보여줄 수 있다.
+      if (t.onMove) {
+        travel.draggable = true;
+        travel.classList.add("draggable");
+        travel.addEventListener("dragstart", (e) => {
+          draggingMoveHandler = t.onMove;
+          draggingDurationSlots = t.moveDurationSlots || durationToSlots(t.duration);
+          draggingValidator = t.canMoveTo || null;
+          draggingSourceContainer = container;
+          travel.classList.add("dragging");
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", "");
+          paintDropTargets();
+        });
+        travel.addEventListener("dragend", () => {
+          travel.classList.remove("dragging");
+          draggingMoveHandler = null;
+          draggingValidator = null;
+          draggingDurationSlots = 1;
+          draggingSourceContainer = null;
+          clearDropPreview();
+          clearDropTargets();
+        });
+      }
+      if (t.contextMenuItems) {
+        travel.style.cursor = "pointer";
+        travel.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openContextMenu(e.clientX, e.clientY, t.contextMenuItems(e.clientX, e.clientY));
+        });
+      }
       container.appendChild(travel);
     });
 
@@ -540,6 +656,29 @@
         badge.textContent = "✓ 확정";
         block.appendChild(badge);
       }
+      if (!b.excluded && b.onMove) {
+        block.draggable = true;
+        block.classList.add("draggable");
+        block.addEventListener("dragstart", (e) => {
+          draggingMoveHandler = b.onMove;
+          draggingDurationSlots = durationToSlots(b.duration);
+          draggingValidator = b.canMoveTo || null;
+          draggingSourceContainer = container;
+          block.classList.add("dragging");
+          e.dataTransfer.effectAllowed = "move";
+          e.dataTransfer.setData("text/plain", "");
+          paintDropTargets();
+        });
+        block.addEventListener("dragend", () => {
+          block.classList.remove("dragging");
+          draggingMoveHandler = null;
+          draggingValidator = null;
+          draggingDurationSlots = 1;
+          draggingSourceContainer = null;
+          clearDropPreview();
+          clearDropTargets();
+        });
+      }
       if (!b.excluded && b.onDelete) {
         const delBtn = document.createElement("button");
         delBtn.type = "button";
@@ -566,6 +705,110 @@
       }
       container.appendChild(block);
     });
+
+    // 세션/이동/빈 시간 블록은 배경 cal-cell 위에 같은 컨테이너의 형제 엘리먼트로 그려지므로,
+    // 드래그 중인 포인터가 그 블록 위에 있으면 dragover/drop 이벤트가 (사이에 아무 조상 관계도
+    // 없는) cal-cell까지 전달되지 않고 그 블록에서 그냥 끝나버린다(블록엔 dragover/drop 핸들러가
+    // 없으므로 브라우저 기본 동작상 드롭이 거부됨) — 그래서 개별 셀에 리스너를 붙이는 대신
+    // 컨테이너 하나에만 붙이고, 실제 드롭 위치는 포인터 좌표 아래 쌓인 엘리먼트들 중에서
+    // cal-cell을 찾아(document.elementsFromPoint) 판단한다. 이러면 어떤 블록이 위에 덮여
+    // 있어도 그 밑의 실제 요일·슬롯을 항상 정확히 찾아낼 수 있다.
+    function cellAtPoint(x, y) {
+      return document.elementsFromPoint(x, y).find(el => el.classList && el.classList.contains("cal-cell")) || null;
+    }
+    // 드래그 중인 자리를 셀 하나(10분)가 아니라 옮기는 세션 길이만큼(draggingDurationSlots)
+    // 통짜로 미리 보여준다 — 실제 배정 블록과 똑같이 gridRow를 여러 칸 span해서 그린, 클릭은
+    // 통과시키는(pointer-events: none) 미리보기 엘리먼트 하나를 그때그때 위치만 옮겨가며 재사용한다.
+    let dropPreviewEl = null;
+    function clearDropPreview() {
+      if (dropPreviewEl) { dropPreviewEl.remove(); dropPreviewEl = null; }
+    }
+    // 드래그를 시작하는 순간, 포인터가 아직 지나가보지 않은 칸까지 포함해 이 세션이 놓일 수
+    // 없는 칸 전부를 한 번에 옅게 표시한다 — 한 칸씩 지나가 봐야만 가능 여부를 알 수 있으면
+    // "어디에 놓을 수 있는지" 전체 그림을 파악하기 어렵다. draggingValidator(dragstart에서 붙잡아둔
+    // canMoveTo)를 셀마다 한 번씩만(드래그 시작 시 1회) 돌리면 되므로 비용은 크지 않다.
+    // "시작 가능한 칸" 하나(10분)만 표시하면, 실제로는 1시간 자리인데도 10분만 되는 것처럼
+    // 보여 헷갈린다 — 마우스를 올렸을 때 보이는 실제 미리보기(showDropPreview)와 같은 기준으로,
+    // 시작 가능한 칸부터 옮길 세션 길이(draggingDurationSlots)만큼 이어지는 범위 전체를
+    // "놓을 수 있음"으로 넓혀서 표시한다.
+    function paintDropTargets() {
+      if (!draggingValidator) return;
+      const reachableByDay = [];
+      for (let day = 0; day < DAYS.length; day++) {
+        const reachable = new Set();
+        for (let slot = rangeStart; slot < rangeEnd; slot++) {
+          if (draggingValidator(day, slot).ok) {
+            for (let k = 0; k < draggingDurationSlots; k++) reachable.add(slot + k);
+          }
+        }
+        reachableByDay.push(reachable);
+      }
+      container.querySelectorAll(".cal-cell").forEach(cell => {
+        const day = parseInt(cell.dataset.day, 10);
+        const slot = parseInt(cell.dataset.slot, 10);
+        cell.classList.toggle("cal-cell-blocked", !reachableByDay[day].has(slot));
+      });
+    }
+    function clearDropTargets() {
+      container.querySelectorAll(".cal-cell-blocked").forEach(cell => cell.classList.remove("cal-cell-blocked"));
+    }
+    // kind: "move"(빈 자리로 이동) / "swap"(다른 배정과 맞바꾸기) / "invalid"(놓을 수 없음) —
+    // 색으로 세 가지를 구분해서, 놓기 전에 "그냥 옮기는 건지 남의 자리와 맞바뀌는 건지"까지
+    // 미리 알 수 있게 한다(맞바꾸기인 줄 모르고 놨다가 놀라는 일이 없도록).
+    function showDropPreview(day, startSlot, kind) {
+      const clippedStart = Math.max(startSlot, rangeStart);
+      const clippedEnd = Math.min(startSlot + draggingDurationSlots, rangeEnd);
+      if (clippedEnd <= clippedStart) { clearDropPreview(); return; }
+      if (!dropPreviewEl) {
+        dropPreviewEl = document.createElement("div");
+        dropPreviewEl.className = "cal-drop-preview";
+        container.appendChild(dropPreviewEl);
+      }
+      dropPreviewEl.style.gridColumn = String(day + 2);
+      dropPreviewEl.style.gridRow = (clippedStart - rangeStart + 2) + " / span " + (clippedEnd - clippedStart);
+      dropPreviewEl.classList.toggle("invalid", kind === "invalid");
+      dropPreviewEl.classList.toggle("swap", kind === "swap");
+    }
+    // 그리드 컨테이너 자체(scheduleGridEl 등)는 요청 편집마다 renderGrid가 재호출돼도 같은
+    // DOM 노드가 재사용된다(innerHTML만 비움) — 컨테이너 리스너를 매 렌더마다 새로 붙이면
+    // 이전 렌더의 리스너가 계속 쌓여 메모리가 새므로, dataset 플래그로 한 번만 붙인다. 대신
+    // cellAtPoint/showDropPreview 등은 이번 렌더의 최신 클로저를 container._dndHelpers에
+    // 매 렌더마다 갱신해두고, 리스너는 항상 그 최신 값을 통해서만 호출한다.
+    container._dndHelpers = { cellAtPoint, clearDropPreview, clearDropTargets, showDropPreview };
+    if (!container.dataset.dndBound) {
+      container.dataset.dndBound = "1";
+      container.addEventListener("dragover", (e) => {
+        if (!draggingMoveHandler || draggingSourceContainer !== container) return;
+        e.preventDefault();
+        const helpers = container._dndHelpers;
+        const cell = helpers.cellAtPoint(e.clientX, e.clientY);
+        if (cell) {
+          const day = parseInt(cell.dataset.day, 10);
+          const slot = parseInt(cell.dataset.slot, 10);
+          // 검사 함수(canMoveTo)가 없는 블록(구버전 호출부 대비 방어)은 항상 놓을 수 있는 것으로
+          // 보여준다 — 실시간 미리보기가 없다고 실제 드롭까지 막지는 않기 때문이다.
+          const kind = draggingValidator ? draggingValidator(day, slot).kind : "move";
+          helpers.showDropPreview(day, slot, kind);
+        } else {
+          helpers.clearDropPreview();
+        }
+      });
+      container.addEventListener("dragleave", (e) => {
+        if (!container.contains(e.relatedTarget)) container._dndHelpers.clearDropPreview();
+      });
+      container.addEventListener("drop", (e) => {
+        if (!draggingMoveHandler || draggingSourceContainer !== container) return;
+        e.preventDefault();
+        const helpers = container._dndHelpers;
+        helpers.clearDropPreview();
+        helpers.clearDropTargets();
+        const cell = helpers.cellAtPoint(e.clientX, e.clientY);
+        const handler = draggingMoveHandler;
+        draggingMoveHandler = null;
+        draggingSourceContainer = null;
+        if (cell) handler(parseInt(cell.dataset.day, 10), parseInt(cell.dataset.slot, 10));
+      });
+    }
   }
 
   /* ---------------- Generic block click menu (그리드 블록 클릭 메뉴) ---------------- */
@@ -2452,29 +2695,22 @@
     showToast("지점이 제거되었습니다", "info");
   }
 
-  // "지점 추가하기" 하위 메뉴: 회원의 기본 지점과 이미 추가된 지점을 뺀 나머지 지점만 보여준다.
-  function openAddRunLocationMenu(member, run, x, y) {
-    const excluded = new Set((member.locationIds || []).concat(requestRunExtraLocationIds(run)));
-    const items = state.locations
-      .filter(l => !excluded.has(l.id))
-      .map(l => ({ label: l.name, onClick: () => addExtraLocationToRun(run, l.id) }));
-    if (items.length === 0) items.push({ label: "추가할 수 있는 지점이 없습니다", disabled: true });
-    openContextMenu(x, y, items);
-  }
-
-  // 좌클릭 시 뜨는 메뉴: 지점 추가하기(이 시간대만 다른 지점에서도 배정 가능해짐), 이미
+  // 좌클릭 시 뜨는 메뉴: 지점 추가하기(이 시간대만 다른 지점에서도 배정 가능해짐 — 회원의
+  // 기본 지점과 이미 추가된 지점을 뺀 나머지 지점을 바로 항목으로 보여준다), 이미
   // 추가해둔 지점 제거하기.
   function buildRequestRunMenu(member, run, x, y) {
-    const items = [
-      { label: "지점 추가하기", onClick: () => openAddRunLocationMenu(member, run, x, y) }
-    ];
+    const excluded = new Set((member.locationIds || []).concat(requestRunExtraLocationIds(run)));
+    const addableLocations = state.locations.filter(l => !excluded.has(l.id));
+    const items = addableLocations.length > 0
+      ? addableLocations.map(l => ({ label: l.name + " 추가하기", onClick: () => addExtraLocationToRun(run, l.id) }))
+      : [{ label: "추가할 수 있는 지점이 없습니다", disabled: true }];
     const extraIds = requestRunExtraLocationIds(run);
     if (extraIds.length > 0) {
       items.push({ separator: true });
       extraIds.forEach(id => {
         const loc = locationById(id);
         if (!loc) return;
-        items.push({ label: "'" + loc.name + "' 지점 제거", danger: true, onClick: () => removeExtraLocationFromRun(run, id) });
+        items.push({ label: loc.name + " 제거하기", danger: true, onClick: () => removeExtraLocationFromRun(run, id) });
       });
     }
     return items;
@@ -2731,10 +2967,10 @@
   // 근무 가능 시간이 예를 들어 15시부터라고 해서 그 요일의 첫 세션이 꼭 15시부터일 필요는
   // 없다 — 오히려 "일단 제일 이른 신청부터 채우고 본다"는 방식은, 이르지만 고립된(그 뒤로
   // 아무도 이어붙일 수 없는) 신청을 먼저 확정해버려서 뒤에 왔으면 빈틈없이 꽉 채울 수 있었던
-  // 더 나은 무리(cluster)를 놓치고, 그 사이에 허용 범위를 넘는 공강만 남기기 쉽다. 그래서 요일별로
+  // 더 나은 무리(cluster)를 놓치고, 그 사이에 허용 범위를 넘는 빈 시간만 남기기 쉽다. 그래서 요일별로
   // "이 지점에서, 이 시각부터, 앞으로 이어지는 신청이 있는가"만 이어붙이는 최장 체인을 DP로
   // 찾는다 — 체인 안의 인접한 두 세션 사이 간격은 항상 requiredGapMin 이상, requiredGapMin +
-  // allowGapMin 이하여야 하므로, 완성된 체인에는 정의상 그 한도를 넘는 공강이 생기지
+  // allowGapMin 이하여야 하므로, 완성된 체인에는 정의상 그 한도를 넘는 빈 시간이 생기지
   // 않는다. 이 최장 체인 탐색은 세 단계로 나눠 진행한다:
   //   1단계 - "각 회원은 최대한 1회 이상"을 위해, 아직 아무 것도 못 받은 회원들만으로 요일별
   //           최장 체인을 새로 짠다.
@@ -2795,12 +3031,8 @@
     // 지점에 그 회원 혼자만 있는 경우)으로 배정될 수 없다. 같은 지점에서 다른 회원과 붙어
     // 있으면(이동-회원-다른회원-이동) 괜찮다. buildBestChain predecessor 탐색에서, 이 회원
     // 자신도 이동으로 도착한 노드일 때 그 다음도 이동으로 이어지려는 연결만 걸러낸다(아래
-    // arrivedViaTravel/soloTravelMemberIds 참고).
-    const SOLO_TRAVEL_LOCATION_NAMES = ["상암점", "여의도점", "마포점"];
-    const soloTravelLocationIds = state.locations.filter(l => SOLO_TRAVEL_LOCATION_NAMES.includes(l.name)).map(l => l.id);
-    const soloTravelMemberIds = soloTravelLocationIds.length === SOLO_TRAVEL_LOCATION_NAMES.length
-      ? new Set(state.members.filter(m => soloTravelLocationIds.every(id => m.locationIds.includes(id))).map(m => m.id))
-      : new Set();
+    // arrivedViaTravel 참고). eligibleSwapMembersFor도 수동 교체 시 같은 규칙을 적용한다.
+    const soloTravelIds = soloTravelMemberIds();
 
     // 정렬 순서(전략별 동점 처리 포함)를 "이 신청이 얼마나 우선인가"로만 쓴다 — 체인을 이을 때
     // 여러 후보가 동시에 맞물릴 수 있으면 순위가 앞선 쪽을 고르고, 체인 길이가 같으면 순위
@@ -2821,7 +3053,7 @@
     // 하루치 배정을 처음부터 끝까지 한 번 실행한다(1~3단계 전체). stage1Order로 1단계에서
     // 요일을 처리하는 순서만 바꿀 수 있다 — minimizeUnassigned 옵션("후보A")이 이 순서를
     // 두 가지로 각각 시도해보고 더 나은 쪽을 고르는 데 쓴다. allowGapMin은 이번 실행에서
-    // 세션 사이에 추가로 허용할 공강(분) 한도다 — 아래 runWithGapPolicy가 0(엄격)과
+    // 세션 사이에 추가로 허용할 빈 시간(분) 한도다 — 아래 runWithGapPolicy가 0(엄격)과
     // ALLOWED_GAP_MIN(완화)을 각각 시도해보고 실제로 세션 수가 늘어날 때만 완화 쪽을 쓴다.
     function runPass(stage1Order, allowGapMin) {
     const assigned = [];
@@ -2925,7 +3157,7 @@
       // 시간(슬랙) 합이다 — 기본 순서는 "인원 최대화 → 이동 횟수 최소화 → (travelCountOnly가
       // 아니면) 이동 시간 최소화 → 총 이동시간+빈 시간의 합이 적은 쪽"(마지막 비교는 이동
       // 시간이 이미 같으므로 사실상 빈 시간만 비교하는 셈이 된다). slackPen은 숨김 하드 로직(세 지점을 모두 다니는 회원)의
-      // 연장선인 숨김 소프트 선호다 — 그런 회원이 같은 지점 앞사람에게서 공강 슬랙을 써서
+      // 연장선인 숨김 소프트 선호다 — 그런 회원이 같은 지점 앞사람에게서 빈 시간 슬랙을 써서
       // 이어붙는 것보다는, 슬랙 없이 이어붙고 대신 그 뒤 이동 쪽에 슬랙이 남는 배치를 우선한다.
       function isBetterPair(dpA, countA, travelA, timeCostA, alignedA, slackPenA, daytimeA, groupA, dpB, countB, travelB, timeCostB, alignedB, slackPenB, daytimeB, groupB) {
         if (travelFirst) {
@@ -2957,7 +3189,7 @@
           const need = requiredGapMin(predLoc, node.locationId);
           const transitionMin = travelMinutes(predLoc, node.locationId);
           // 필요한 간격(need)보다 최대 allowGapMin분까지 더 벌어져도(=설명 안 되는
-          // 공강이 그만큼 생겨도) 이어붙일 수 있다 — 10분 단위 슬롯마다 하나씩 확인한다.
+          // 빈 시간이 그만큼 생겨도) 이어붙일 수 있다 — 10분 단위 슬롯마다 하나씩 확인한다.
           for (let slackMin = 0; slackMin <= allowGapMin; slackMin += SLOT_MIN) {
             const reqEnd = node.cand.startSlot - (need + slackMin) / SLOT_MIN;
             const list = index.get(key(reqEnd, predLoc));
@@ -2967,16 +3199,16 @@
               // 숨김 하드 로직: 세 지점을 모두 다니는 회원이 이동으로 도착한 세션이면, 거기서
               // 또 이동으로 이어지는 연결은 막는다("이동-회원-이동" 금지). 같은 지점에서 다른
               // 회원에게 이어지는 것(이동-회원-다른회원-이동)은 transitionMin이 0이라 여기 걸리지 않는다.
-              if (soloTravelMemberIds.has(prevNode.cand.memberId)
+              if (soloTravelIds.has(prevNode.cand.memberId)
                 && prevNode.arrivedViaTravel && transitionMin > 0) continue;
               const tc = prevNode.travelCount + (transitionMin > 0 ? 1 : 0);
               if (tc > maxTravelsPerDay) continue; // 하루 이동 최대 허용 횟수
               if (maxTravelsPerWeek != null && otherDaysTravelUsed + tc > maxTravelsPerWeek) continue; // 일주일 총 이동 최대 허용 횟수
               const resultTravelOnly = prevNode.travelMinutesSum + transitionMin;
               const resultTimeCost = resultTravelOnly + prevNode.idleMinutesSum + slackMin;
-              // 숨김 소프트 로직: 세 지점을 모두 다니는 회원이 같은 지점 앞사람에게서 슬랙(공강)을
+              // 숨김 소프트 로직: 세 지점을 모두 다니는 회원이 같은 지점 앞사람에게서 슬랙(빈 시간)을
               // 써서 이어붙으면 그만큼 페널티를 쌓는다 — 슬랙 없이 붙거나(0) 이동으로 이어지는 경우는 0.
-              const slackPenalty = (soloTravelMemberIds.has(node.cand.memberId)
+              const slackPenalty = (soloTravelIds.has(node.cand.memberId)
                 && transitionMin === 0 && slackMin > 0) ? slackMin : 0;
               const resultSlackPen = prevNode.soloSlackPenalty + slackPenalty;
               if (!bestPrev || isBetterPair(prevNode.dp, tc, resultTravelOnly, resultTimeCost, prevNode.alignedScore, resultSlackPen, prevNode.daytimeScore, prevNode.groupScore, bestPrevDp, bestTravelCount, bestResultTravelOnly, bestResultTimeCost, bestResultAligned, bestResultSlackPen, bestResultDaytime, bestResultGroup)) {
@@ -3047,7 +3279,7 @@
             if (!list || list.length === 0) continue;
             // 이미 버킷 안에서 가장 좋은 순으로 정렬되어 있으니 첫 유효 항목을 쓴다 — 다만
             // 숨김 하드 로직에 걸리는 회원이면("이동-회원-이동") 다음 후보를 본다.
-            const node = list.find(n => !(soloTravelMemberIds.has(n.cand.memberId)
+            const node = list.find(n => !(soloTravelIds.has(n.cand.memberId)
               && n.arrivedViaTravel && transitionMin > 0));
             if (!node) continue;
             const nodeTimeCost = timeCostOf(node);
@@ -3084,7 +3316,7 @@
         // 도착했다면, 여기서 또 이동으로 이어붙이는 것은 막는다("이동-회원-이동" 금지,
         // buildBestChain의 동일 로직 참고).
         const chainEndArrivedViaTravel = chain.length >= 2 && chain[chain.length - 2].locationId !== chainEnd.locationId;
-        const chainEndIsSoloTravelMember = soloTravelMemberIds.has(chainEnd.memberId) && chainEndArrivedViaTravel;
+        const chainEndIsSoloTravelMember = soloTravelIds.has(chainEnd.memberId) && chainEndArrivedViaTravel;
         // "하루 이동은 최소화"하기 위해, 여러 회원이 동시에 이어붙을 수 있으면 이동 시간이
         // 적게 드는 쪽을 먼저 고르고, 그래도 같으면 우선순위(priorityRank)로 정한다.
         let bestCand = null, bestLocated = null, bestCost = Infinity;
@@ -3238,7 +3470,7 @@
     return assigned;
     }
 
-    // 주어진 공강 허용 한도(allowGapMin)로 배정을 한 번 완결한다. 기본은 요일 순서
+    // 주어진 빈 시간 허용 한도(allowGapMin)로 배정을 한 번 완결한다. 기본은 요일 순서
     // 그대로 한 번 실행한다. 그 외에 두 가지 경로로 "1단계 요일 처리 순서를 바꾸면 더
     // 나아지는지"를 추가로 시도해볼 수 있다 — (1) minimizeUnassigned 옵션("후보A")이
     // 켜지면 "신청 가능한 회원이 적은(대안이 좁은) 요일부터 먼저 채우면 미배정이 줄어들
@@ -3275,8 +3507,8 @@
     }
 
     // "이동시간·휴식시간을 제외한 빈 시간은 없도록" 엄격(allowGapMin=0)하게 한 번 배정해보고,
-    // 공강을 최대 ALLOWED_GAP_MIN분까지 허용했을 때 실제로 수업(세션) 개수가 늘어나는 경우에만
-    // 완화된 결과를 쓴다 — 공강 허용이 세션 수를 늘리지 못한다면(그저 같은 인원을 다르게
+    // 빈 시간을 최대 ALLOWED_GAP_MIN분까지 허용했을 때 실제로 수업(세션) 개수가 늘어나는 경우에만
+    // 완화된 결과를 쓴다 — 빈 시간 허용이 세션 수를 늘리지 못한다면(그저 같은 인원을 다르게
     // 배치할 뿐이라면) 빈 시간이 없는 엄격한 배정을 그대로 유지한다.
     const strictResult = runWithGapPolicy(0);
     const looseResult = ALLOWED_GAP_MIN > 0 ? runWithGapPolicy(ALLOWED_GAP_MIN) : strictResult;
@@ -3394,7 +3626,7 @@
   const STRATEGIES = [
     {
       title: "후보A - 인원 최대",
-      desc: "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다. (공강 미허용)",
+      desc: "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다. (빈 시간 최소화)",
       // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
       // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
       // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
@@ -3843,7 +4075,9 @@
   // 명시적으로 넘겨받아 쓴다.
   function confirmSession(container, reqId, onDone) {
     if (!Array.isArray(container.confirmedIds)) container.confirmedIds = [];
-    if (!container.confirmedIds.includes(reqId)) container.confirmedIds.push(reqId);
+    if (container.confirmedIds.includes(reqId)) return;
+    pushManualUndo(container);
+    container.confirmedIds.push(reqId);
     saveState();
     onDone();
     showToast("스케줄이 확정되었습니다", "success");
@@ -3851,7 +4085,9 @@
 
   // 확정된 일정의 확정을 취소한다.
   function unconfirmSession(container, reqId, onDone) {
-    container.confirmedIds = (container.confirmedIds || []).filter(id => id !== reqId);
+    if (!(container.confirmedIds || []).includes(reqId)) return;
+    pushManualUndo(container);
+    container.confirmedIds = container.confirmedIds.filter(id => id !== reqId);
     saveState();
     onDone();
     showToast("스케줄 확정이 취소되었습니다", "info");
@@ -3872,8 +4108,20 @@
   // 요일·시간·지점은 그대로 유지한 채 사람만 바뀌는 것이므로, 이동 시간·간격 재계산은
   // 필요 없다(그 날의 다른 배정과의 물리적 배치는 달라지지 않는다) — 그날 다른 배정이 없는지,
   // 주간 최대 횟수를 넘지 않는지, 미배정 회원으로 지정돼 있지 않은지, 그 지점을 이용할 수
-  // 있는지만 확인하면 된다.
+  // 있는지만 확인하면 된다. 다만 greedyAssign의 "이동-회원-이동 금지" 숨김 하드 로직(위
+  // soloTravelMemberIds 참고)은 자리가 아니라 사람에 달린 규칙이라 예외 — req가 양옆 모두
+  // 이동으로 이어지는 자리라면, 세 지점을 모두 다니는 회원은 후보에서 뺀다.
   function eligibleSwapMembersFor(container, req) {
+    const dayAssigned = container.assigned
+      .filter(a => a.day === req.day && a.id !== req.id)
+      .sort((a, b) => a.startSlot - b.startSlot);
+    const prevAssigned = dayAssigned.filter(a => a.startSlot < req.startSlot).pop() || null;
+    const nextAssigned = dayAssigned.find(a => a.startSlot > req.startSlot) || null;
+    const arrivedViaTravel = !!prevAssigned && travelMinutes(prevAssigned.locationId, req.locationId) > 0;
+    const departsViaTravel = !!nextAssigned && travelMinutes(req.locationId, nextAssigned.locationId) > 0;
+    const soloTravelBlocked = arrivedViaTravel && departsViaTravel;
+    const soloIds = soloTravelBlocked ? soloTravelMemberIds() : null;
+
     const results = [];
     const seenMemberIds = new Set();
     state.requests.forEach(other => {
@@ -3884,6 +4132,7 @@
       if (!member) return;
       if (state.excludedMemberIds3.includes(member.id)) return;
       if (!candidateLocationsForRequest(other).includes(req.locationId)) return;
+      if (soloTravelBlocked && soloIds.has(member.id)) return; // 이동-회원-이동 금지
       let weekCount = 0;
       let sameDayCount = 0;
       container.assigned.forEach(a => {
@@ -3900,6 +4149,42 @@
     return results;
   }
 
+  // 드래그 이동·자리 맞바꾸기·인원 교체·확정 등 "수동 편집" 하나를 취소할 수 있도록, 편집
+  // 직전의 assigned/confirmedIds 스냅샷을 후보 객체(container)별로 최대 20개까지 쌓아둔다.
+  // 재생성(regenerateCandidate)이 쓰는 candidateUndoStack과는 별개다 — 그건 "다른 배정 조합
+  // 통째로 되돌리기"이고 이건 "방금 한 조정 하나만 되돌리기"라 성격이 다르다. WeakMap을 써서
+  // container 객체(candidateA 또는 candidates[i]) 자체를 키로 삼으므로, 재생성으로 그 자리의
+  // container 객체가 통째로 새로 만들어지면 자연스럽게 새 빈 되돌리기 이력에서 다시 시작한다.
+  // candidateUndoStack과 마찬가지로 저장하지 않으므로 새로고침하면 초기화된다.
+  const manualUndoStacks = new WeakMap();
+  const MANUAL_UNDO_LIMIT = 20;
+  function snapshotContainer(container) {
+    return {
+      assigned: container.assigned.map(a => ({ ...a })),
+      confirmedIds: (container.confirmedIds || []).slice()
+    };
+  }
+  function pushManualUndo(container) {
+    if (!manualUndoStacks.has(container)) manualUndoStacks.set(container, []);
+    const stack = manualUndoStacks.get(container);
+    stack.push(snapshotContainer(container));
+    if (stack.length > MANUAL_UNDO_LIMIT) stack.shift();
+  }
+  function hasManualUndo(container) {
+    const stack = manualUndoStacks.get(container);
+    return !!stack && stack.length > 0;
+  }
+  function undoManualEdit(container, onDone) {
+    const stack = manualUndoStacks.get(container);
+    if (!stack || stack.length === 0) return;
+    const snapshot = stack.pop();
+    container.assigned = snapshot.assigned;
+    container.confirmedIds = snapshot.confirmedIds;
+    saveState();
+    onDone();
+    showToast("방금 편집을 되돌렸습니다", "info");
+  }
+
   // 배정된 세션의 자리(요일·시작 시각·길이·지점)는 그대로 두고 사람만 newMember로 바꿔치기한다.
   // 원래 확정돼 있던 자리였다면, 확정 상태도 새 회원의 신청 id로 그대로 옮겨준다.
   function swapSessionMember(container, req, newMember, onDone) {
@@ -3908,6 +4193,7 @@
     if (!newReq) return;
     const idx = container.assigned.findIndex(a => a.id === req.id);
     if (idx === -1) return;
+    pushManualUndo(container);
     const wasConfirmed = Array.isArray(container.confirmedIds) && container.confirmedIds.includes(req.id);
     container.assigned[idx] = {
       id: newReq.id, memberId: newMember.id, day: req.day, startSlot: req.startSlot,
@@ -3920,6 +4206,200 @@
     saveState();
     onDone();
     showToast(newMember.name + "(으)로 교체되었습니다", "success");
+  }
+
+  // req가 targetDay/targetStartSlot(그 자신의 길이만큼)으로 옮겨갈 때, 실제로 자리를 차지하고
+  // 있어서 걸리는 다른 배정을 찾는다(자기 자신은 제외). 있으면 "그 자리로 드래그" = "그 배정과
+  // 자리를 맞바꾸고 싶다"는 뜻으로 다룬다.
+  function findOccupyingAssigned(container, req, targetDay, targetStartSlot) {
+    const durSlots = durationToSlots(req.duration);
+    return container.assigned.find(a =>
+      a.id !== req.id && a.day === targetDay &&
+      targetStartSlot < a.startSlot + durationToSlots(a.duration) &&
+      targetStartSlot + durSlots > a.startSlot
+    ) || null;
+  }
+
+  // 세션 하나를 (targetDay, targetStartSlot)으로 옮길 수 있는지 검사만 하고, 실제로 옮기지는
+  // 않는다 — 드래그 중 실시간 유효성 표시(canMoveOrSwapTo)와 실제 커밋(moveSession) 양쪽에서
+  // 똑같은 기준으로 재사용하기 위해 분리했다. ignoreIds에 담긴 배정은 "이미 자리를 비운 것"
+  // 취급하여 겹침·인원 검사에서 제외한다 — 자리 맞바꾸기(prepareSwap)에서, 상대방이 내가 있던
+  // 자리로 옮겨가는 중이라 그 상대방의 현재 자리는 곧 빌 것이므로 걸림돌로 치지 않기 위함이다.
+  // 검증 순서: (1) 그 자리에 신청 이력이 있는지 → (2) 그 요일에 이미 이 회원의 다른 배정이
+  // 없는지(1일 최대 1회) → (3) 그 자리에서 지점을 그대로 쓸 수 있는지 → (4) 앞뒤 배정과 실제로
+  // 겹치지 않고 지점이 다르면 이동 시간까지 확보되는지(requiredGapMin — 단순 시간 겹침만 보면
+  // 이동 시간 없이 딱 붙는 물리적으로 불가능한 배치를 허용해버린다) → (5) 이동-회원-이동 금지
+  // 숨김 규칙.
+  function validateMove(container, req, targetDay, targetStartSlot, ignoreIds) {
+    const ignoreSet = new Set([req.id, ...(ignoreIds || [])]);
+    if (targetDay === req.day && targetStartSlot === req.startSlot) {
+      return { ok: true, noop: true, newReq: req, locationId: req.locationId };
+    }
+    const newReq = state.requests.find(r =>
+      r.memberId === req.memberId && r.day === targetDay && r.startSlot === targetStartSlot && r.duration === req.duration);
+    if (!newReq) {
+      return { ok: false, message: "이 회원은 해당 시간에 신청한 이력이 없습니다" };
+    }
+    const sameDayConflict = container.assigned.some(a =>
+      !ignoreSet.has(a.id) && a.memberId === req.memberId && a.day === targetDay);
+    if (sameDayConflict) {
+      return { ok: false, message: "같은 요일에는 하루 최대 1회만 배정할 수 있습니다" };
+    }
+    const validLocations = candidateLocationsForRequest(newReq);
+    const locationId = validLocations.includes(req.locationId) ? req.locationId : validLocations[0];
+    if (!locationId) {
+      return { ok: false, message: "해당 지점에서는 이 시간을 이용할 수 없습니다" };
+    }
+    const durSlots = durationToSlots(req.duration);
+    const dayAssigned = container.assigned
+      .filter(a => a.day === targetDay && !ignoreSet.has(a.id))
+      .sort((a, b) => a.startSlot - b.startSlot);
+    const prevAssigned = dayAssigned.filter(a => a.startSlot < targetStartSlot).pop() || null;
+    const nextAssigned = dayAssigned.find(a => a.startSlot >= targetStartSlot) || null;
+    if (prevAssigned) {
+      const prevEnd = prevAssigned.startSlot + durationToSlots(prevAssigned.duration);
+      const gapSlots = requiredGapMin(prevAssigned.locationId, locationId) / SLOT_MIN;
+      if (prevEnd + gapSlots > targetStartSlot) {
+        return { ok: false, message: "바로 앞 수업과 시간이 겹치거나 이동 시간이 부족합니다" };
+      }
+    }
+    if (nextAssigned) {
+      const gapSlots = requiredGapMin(locationId, nextAssigned.locationId) / SLOT_MIN;
+      if (targetStartSlot + durSlots + gapSlots > nextAssigned.startSlot) {
+        return { ok: false, message: "바로 다음 수업과 시간이 겹치거나 이동 시간이 부족합니다" };
+      }
+    }
+    const arrivedViaTravel = !!prevAssigned && travelMinutes(prevAssigned.locationId, locationId) > 0;
+    const departsViaTravel = !!nextAssigned && travelMinutes(locationId, nextAssigned.locationId) > 0;
+    if (arrivedViaTravel && departsViaTravel && soloTravelMemberIds().has(req.memberId)) {
+      return { ok: false, message: "이 회원은 이동으로 앞뒤가 막힌 자리에는 배정할 수 없습니다" };
+    }
+    return { ok: true, newReq, locationId };
+  }
+
+  // 배정된 세션 하나를 드래그로 다른 (day, startSlot) 자리로 옮긴다. 자리는 항상 "그 회원이
+  // 실제로 신청했던 시간" 중 하나여야 한다 — 신청 이력에 없는 임의의 시간으로는 옮길 수 없다
+  // (배정은 항상 실제 신청 중 하나를 고르는 것이라는 시스템 전체의 전제와 같다. addDesiredRange
+  // 참고 — 회원이 신청한 범위 안의 모든 10분 간격 시작 시각이 이미 개별 신청으로 등록돼 있으므로,
+  // 신청 범위 안이라면 대부분 그대로 맞아떨어진다). 검증은 validateMove에 그대로 맡긴다.
+  // 통과하면 옮기고, 재생성해도 이 자리가 풀리지 않도록 자동으로 확정한다(사람이 손댄 자리는
+  // 알고리즘이 건드리지 않는다는 기존 확정 로직과 같은 취지).
+  function moveSession(container, req, targetDay, targetStartSlot, onDone) {
+    const result = validateMove(container, req, targetDay, targetStartSlot);
+    if (!result.ok) {
+      showToast(result.message, "error");
+      return;
+    }
+    if (result.noop) return;
+    const { newReq, locationId } = result;
+    const idx = container.assigned.findIndex(a => a.id === req.id);
+    if (idx === -1) return;
+    pushManualUndo(container);
+    container.assigned[idx] = {
+      id: newReq.id, memberId: req.memberId, day: targetDay, startSlot: targetStartSlot,
+      duration: req.duration, locationId
+    };
+    if (!Array.isArray(container.confirmedIds)) container.confirmedIds = [];
+    container.confirmedIds = container.confirmedIds.filter(id => id !== req.id);
+    container.confirmedIds.push(newReq.id);
+    saveState();
+    onDone();
+    showToast("일정이 이동되었습니다", "success");
+  }
+
+  // 자리 맞바꾸기가 가능한지 검사만 한다(prepareSwap) — req를 occupying의 자리로, occupying을
+  // req의 자리로 동시에 옮기는 것이므로 두 방향 모두 validateMove를 통과해야 한다. 서로 상대의
+  // 현재 자리는 "곧 비워질 자리"라 걸림돌이 아니므로 ignoreIds로 서로를 빼고 검사한다. 길이가
+  // 다르면애초에 "맞바꾼다"는 개념이 어색해지므로(한쪽만 옮기면 남는 자리가 생김) 막는다.
+  function prepareSwap(container, req, occupying) {
+    if (occupying.duration !== req.duration) {
+      return { ok: false, message: "길이가 서로 달라 자리를 맞바꿀 수 없습니다" };
+    }
+    const reqA2 = state.requests.find(r =>
+      r.memberId === req.memberId && r.day === occupying.day && r.startSlot === occupying.startSlot && r.duration === req.duration);
+    const reqB2 = state.requests.find(r =>
+      r.memberId === occupying.memberId && r.day === req.day && r.startSlot === req.startSlot && r.duration === occupying.duration);
+    if (!reqA2 || !reqB2) {
+      return { ok: false, message: "두 회원 모두 상대방 시간에 신청한 이력이 있어야 자리를 맞바꿀 수 있습니다" };
+    }
+    const checkA = validateMove(container, req, occupying.day, occupying.startSlot, [occupying.id]);
+    if (!checkA.ok) return { ok: false, message: checkA.message };
+    const checkB = validateMove(container, occupying, req.day, req.startSlot, [req.id]);
+    if (!checkB.ok) return { ok: false, message: checkB.message };
+    return { ok: true, reqA2, reqB2, locA: checkA.locationId, locB: checkB.locationId };
+  }
+
+  // 드래그로 놓은 자리에 이미 다른 배정이 있을 때, 그 자리로 그냥 옮기는 대신 두 배정의
+  // 자리를 서로 맞바꾼다 — "이수정을 금5로, 한지원을 목3에서 이수정이 있던 목4로" 같은 조정을
+  // 순서 신경 쓰지 않고 한 번의 드래그로 끝낼 수 있게 해준다.
+  function attemptSwap(container, req, occupying, onDone) {
+    const plan = prepareSwap(container, req, occupying);
+    if (!plan.ok) {
+      showToast(plan.message, "error");
+      return;
+    }
+    const idxA = container.assigned.findIndex(a => a.id === req.id);
+    const idxB = container.assigned.findIndex(a => a.id === occupying.id);
+    if (idxA === -1 || idxB === -1) return;
+    pushManualUndo(container);
+    container.assigned[idxA] = {
+      id: plan.reqA2.id, memberId: req.memberId, day: occupying.day, startSlot: occupying.startSlot,
+      duration: req.duration, locationId: plan.locA
+    };
+    container.assigned[idxB] = {
+      id: plan.reqB2.id, memberId: occupying.memberId, day: req.day, startSlot: req.startSlot,
+      duration: occupying.duration, locationId: plan.locB
+    };
+    if (!Array.isArray(container.confirmedIds)) container.confirmedIds = [];
+    container.confirmedIds = container.confirmedIds.filter(id => id !== req.id && id !== occupying.id);
+    container.confirmedIds.push(plan.reqA2.id, plan.reqB2.id);
+    saveState();
+    onDone();
+    showToast("두 자리를 맞바꿨습니다", "success");
+  }
+
+  // 드래그·클릭으로 세션을 옮기려 할 때 공통으로 쓰는 진입점: 놓을 자리가 비어있으면 그냥
+  // 옮기고(moveSession), 이미 다른 배정이 있으면 자리 맞바꾸기를 시도한다(attemptSwap).
+  function moveOrSwapSession(container, req, targetDay, targetStartSlot, onDone) {
+    const occupying = findOccupyingAssigned(container, req, targetDay, targetStartSlot);
+    if (occupying) {
+      attemptSwap(container, req, occupying, onDone);
+    } else {
+      moveSession(container, req, targetDay, targetStartSlot, onDone);
+    }
+  }
+
+  // 드래그 중 실시간으로 "여기에 놓으면 어떻게 되는지"를 보여주기 위한 판정. 자리가 비어있으면
+  // 일반 이동 기준으로, 이미 차 있으면 자리 맞바꾸기 기준으로 판단한다 — moveOrSwapSession이
+  // 실제로 어느 쪽을 실행할지와 항상 같은 기준이어야 한다. kind는 미리보기 색을 구분하는 데
+  // 쓴다: "move"(빈 자리로 이동 가능) / "swap"(다른 배정과 맞바꾸기 가능) / "invalid"(둘 다 불가).
+  function canMoveOrSwapTo(container, req, targetDay, targetStartSlot) {
+    const occupying = findOccupyingAssigned(container, req, targetDay, targetStartSlot);
+    if (!occupying) {
+      const ok = validateMove(container, req, targetDay, targetStartSlot).ok;
+      return { ok, kind: ok ? "move" : "invalid" };
+    }
+    const ok = prepareSwap(container, req, occupying).ok;
+    return { ok, kind: ok ? "swap" : "invalid" };
+  }
+
+  // 이동 시간 블록 자체는 옮길 수 있는 데이터가 아니다(두 수업 사이 간격에서 계산되는 값일
+  // 뿐이라 독립적인 자리가 없다) — 그래서 "이동 시간을 30분 추가/제거한다"는, 실제로는 그
+  // 이동 시간 바로 다음 수업(nextReq)을 30분 뒤로 밀거나 앞으로 당겨 그 앞의 간격을 늘리거나
+  // 줄이는 것으로 구현한다. moveSession이 신청 이력·겹침·이동 시간 확보 여부를 그대로
+  // 검증해주므로, 최소 이동 시간보다 더 줄이려 하면 자연스럽게 거부된다.
+  const TRAVEL_SHIFT_SLOTS = 30 / SLOT_MIN;
+  function travelShiftMenuItems(container, nextReq, onDone) {
+    return [
+      {
+        label: "다음 수업 30분 뒤로 미루기 (여유 늘리기)",
+        onClick: () => moveOrSwapSession(container, nextReq, nextReq.day, nextReq.startSlot + TRAVEL_SHIFT_SLOTS, onDone)
+      },
+      {
+        label: "다음 수업 30분 앞당기기 (여유 줄이기)",
+        onClick: () => moveOrSwapSession(container, nextReq, nextReq.day, nextReq.startSlot - TRAVEL_SHIFT_SLOTS, onDone)
+      }
+    ];
   }
 
   // 그리드의 배정된 세션 블록을 클릭했을 때 뜨는 메뉴: 맨 위는 확정/확정취소, 그 아래는 같은
@@ -3958,14 +4438,16 @@
         sublabel: slotLabel(r.startSlot) + "~" + endLabel(r.startSlot, r.duration),
         color: m ? memberColor(m.id) : BLOCK_COLOR,
         confirmed: isConfirmed,
-        contextMenuItems: () => sessionSwapMenuItems(candidate, r, isConfirmed, onDone)
+        contextMenuItems: () => sessionSwapMenuItems(candidate, r, isConfirmed, onDone),
+        onMove: (targetDay, targetSlot) => moveOrSwapSession(candidate, r, targetDay, targetSlot, onDone),
+        canMoveTo: (targetDay, targetSlot) => canMoveOrSwapTo(candidate, r, targetDay, targetSlot)
       };
     });
   }
 
   // 같은 요일 안에서 연속된 두 세션 사이, 지점이 달라 실제로 이동이 필요한 구간만 표시한다
   // (쉬는 시간 없음이 규칙이므로 같은 지점이면 표시할 것이 없다).
-  function candidateToTravelBlocks(candidate) {
+  function candidateToTravelBlocks(candidate, onDone = renderSchedule3Result) {
     const byDay = new Map();
     candidate.assigned.forEach(r => {
       if (!byDay.has(r.day)) byDay.set(r.day, []);
@@ -3981,7 +4463,13 @@
         if (gapMin <= 0) continue;
         const mins = travelMinutes(prev.locationId, cur.locationId);
         if (mins > 0) {
-          travelBlocks.push({ day: prev.day, startSlot, duration: mins, label: "이동 " + mins + "분", type: "travel" });
+          travelBlocks.push({
+            day: prev.day, startSlot, duration: mins, label: "이동 " + mins + "분", type: "travel",
+            moveDurationSlots: durationToSlots(cur.duration),
+            onMove: (targetDay, targetSlot) => moveOrSwapSession(candidate, cur, targetDay, targetSlot, onDone),
+            canMoveTo: (targetDay, targetSlot) => canMoveOrSwapTo(candidate, cur, targetDay, targetSlot),
+            contextMenuItems: () => travelShiftMenuItems(candidate, cur, onDone)
+          });
         } else if (BREAK_MIN > 0) {
           // 지점이 같아도(또는 이동 시간이 0분이어도) 최소 BREAK_MIN만큼은 쉬는 시간으로 예약돼 있다.
           const breakMin = Math.min(BREAK_MIN, gapMin);
@@ -5466,14 +5954,17 @@
         sublabel: slotLabel(r.startSlot) + "~" + endLabel(r.startSlot, r.duration),
         color: m ? memberColor(m.id) : BLOCK_COLOR,
         confirmed: isConfirmed,
-        contextMenuItems: () => sessionSwapMenuItems(result, r, isConfirmed, onDone)
+        contextMenuItems: () => sessionSwapMenuItems(result, r, isConfirmed, onDone),
+        onMove: (targetDay, targetSlot) => moveOrSwapSession(result, r, targetDay, targetSlot, onDone),
+        canMoveTo: (targetDay, targetSlot) => canMoveOrSwapTo(result, r, targetDay, targetSlot)
       };
     });
   }
 
   // 같은 요일 안에서 연속된 두 세션 사이, 지점이 달라 실제로 이동이 필요한 구간만 표시한다
   // (쉬는 시간 없음이 규칙이므로 같은 지점이면 표시할 것이 없다).
-  function schedule2ToTravelBlocks(assigned) {
+  function schedule2ToTravelBlocks(container, onDone = renderSchedule3Result) {
+    const assigned = container.assigned;
     const byDay = new Map();
     assigned.forEach(r => {
       if (!byDay.has(r.day)) byDay.set(r.day, []);
@@ -5487,7 +5978,13 @@
         const startSlot = prev.startSlot + durationToSlots(prev.duration);
         const mins = travelMinutes(prev.locationId, cur.locationId);
         if (mins > 0) {
-          travelBlocks.push({ day: prev.day, startSlot, duration: mins, label: "이동 " + mins + "분", type: "travel" });
+          travelBlocks.push({
+            day: prev.day, startSlot, duration: mins, label: "이동 " + mins + "분", type: "travel",
+            moveDurationSlots: durationToSlots(cur.duration),
+            onMove: (targetDay, targetSlot) => moveOrSwapSession(container, cur, targetDay, targetSlot, onDone),
+            canMoveTo: (targetDay, targetSlot) => canMoveOrSwapTo(container, cur, targetDay, targetSlot),
+            contextMenuItems: () => travelShiftMenuItems(container, cur, onDone)
+          });
         }
       }
     });
@@ -5495,7 +5992,7 @@
   }
 
   // 같은 요일 안에서 연속된 두 세션 사이, 이동 블록이 차지하는 구간을 뺀 나머지
-  // "진짜 빈 시간"을 회색 배경의 공강 블록으로 그리드에 표시하기 위한 좌표를 만든다.
+  // "진짜 빈 시간"을 회색 배경의 빈 시간 블록으로 그리드에 표시하기 위한 좌표를 만든다.
   // (이동 블록과 겹치거나 빈틈이 생기지 않도록, 이동 블록 렌더링과 동일한 반올림을 쓴다.)
   function schedule2ToIdleBlocks(assigned) {
     const byDay = new Map();
@@ -5509,13 +6006,13 @@
       for (let i = 1; i < sorted.length; i++) {
         const prev = sorted[i - 1], cur = sorted[i];
         // 실제 스케줄링 제약(requiredGapMin2)과 같은 반올림을 써야, 알고리즘이 실제로 예약해둔
-        // 이동 시간과 화면에 표시되는 "공강" 시작 지점이 어긋나지 않는다.
+        // 이동 시간과 화면에 표시되는 "빈 시간" 시작 지점이 어긋나지 않는다.
         const travelSlots = requiredGapMin2(prev.locationId, cur.locationId) / SLOT_MIN;
         const idleStartSlot = prev.startSlot + durationToSlots(prev.duration) + travelSlots;
         const idleEndSlot = cur.startSlot;
         if (idleEndSlot > idleStartSlot) {
           const mins = (idleEndSlot - idleStartSlot) * SLOT_MIN;
-          idleBlocks.push({ day: prev.day, startSlot: idleStartSlot, duration: mins, label: "공강 " + mins + "분", type: "break" });
+          idleBlocks.push({ day: prev.day, startSlot: idleStartSlot, duration: mins, label: "빈 시간 " + mins + "분", type: "break" });
         }
       }
     });
@@ -5523,7 +6020,7 @@
   }
 
   // 같은 요일 안에서 연속된 두 세션 사이 간격 중, 이동에 실제로 필요한 시간을 넘어서는
-  // "진짜 빈 시간"만 합산한다 — 이동으로 이미 설명되는 구간은 공강으로 치지 않는다.
+  // "진짜 빈 시간"만 합산한다 — 이동으로 이미 설명되는 구간은 빈 시간으로 치지 않는다.
   function schedule2TotalIdleMinutes(assigned) {
     let idle = 0;
     const byDay = new Map();
@@ -5829,47 +6326,74 @@
       titleEl.textContent = title;
       head.appendChild(titleEl);
 
-      if (strategyIndex != null) {
+      {
         const actions = document.createElement("div");
         actions.className = "candidate-card-actions";
 
-        const undoStackForThis = candidateUndoStack[strategyIndex] || [];
-        const undoBtn = document.createElement("button");
-        undoBtn.type = "button";
-        undoBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
-        undoBtn.textContent = "↩ 이전 후보";
-        undoBtn.title = "재생성하기 전의 후보로 되돌아갑니다.";
-        undoBtn.disabled = undoStackForThis.length === 0;
-        undoBtn.addEventListener("click", () => {
-          restorePreviousCandidate(strategyIndex);
+        // 드래그 이동·자리 맞바꾸기·인원 교체·확정 등 "방금 한 조정 하나"만 되돌린다 — 아래
+        // "↩ 이전 후보"(재생성 되돌리기)와는 별개이고, 후보A에도(strategyIndex가 없어 재생성
+        // 되돌리기 버튼이 없는) 똑같이 필요하므로 strategyIndex 유무와 무관하게 항상 넣는다.
+        const undoManualBtn = document.createElement("button");
+        undoManualBtn.type = "button";
+        undoManualBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
+        undoManualBtn.textContent = "↺ 편집 취소";
+        undoManualBtn.title = "방금 드래그로 옮기거나 맞바꾸거나 교체·확정한 것을 취소합니다.";
+        undoManualBtn.disabled = !hasManualUndo(result);
+        undoManualBtn.addEventListener("click", () => {
+          undoManualEdit(result, renderSchedule3Result);
         });
-        actions.appendChild(undoBtn);
+        actions.appendChild(undoManualBtn);
 
-        const regenBtn = document.createElement("button");
-        regenBtn.type = "button";
-        regenBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
-        regenBtn.textContent = "↻ 다음 후보";
-        regenBtn.title = "이 후보만 같은 전략 안에서 다시 계산합니다.";
-        regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
-        regenBtn.addEventListener("click", async () => {
-          regenBtn.disabled = true;
-          undoBtn.disabled = true;
-          try {
-            // 생성3 자신의 미배정/1회 제한 회원 설정(excludedMemberIds3/onceLimitedMemberIds3)이
-            // 적용되도록 반드시 withSelectionOverride로 감싼다 — 그냥 호출하면 currentExcludedIds()가
-            // (더 이상 UI가 없어 항상 비어있는) 옛 생성1 설정으로 폴백해버린다.
-            await withSelectionOverride(state.excludedMemberIds3, state.onceLimitedMemberIds3, () =>
-              regenerateCandidate(strategyIndex, progress => {
-                regenBtn.textContent = "재생성 중... " + Math.round(progress * 100) + "%";
-              })
-            );
-          } finally {
-            regenBtn.textContent = "↻ 다음 후보";
-            regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
-            undoBtn.disabled = (candidateUndoStack[strategyIndex] || []).length === 0;
-          }
+        if (strategyIndex != null) {
+          const undoStackForThis = candidateUndoStack[strategyIndex] || [];
+          const undoBtn = document.createElement("button");
+          undoBtn.type = "button";
+          undoBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
+          undoBtn.textContent = "↩ 이전 후보";
+          undoBtn.title = "재생성하기 전의 후보로 되돌아갑니다.";
+          undoBtn.disabled = undoStackForThis.length === 0;
+          undoBtn.addEventListener("click", () => {
+            restorePreviousCandidate(strategyIndex);
+          });
+          actions.appendChild(undoBtn);
+
+          const regenBtn = document.createElement("button");
+          regenBtn.type = "button";
+          regenBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
+          regenBtn.textContent = "↻ 다음 후보";
+          regenBtn.title = "이 후보만 같은 전략 안에서 다시 계산합니다.";
+          regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
+          regenBtn.addEventListener("click", async () => {
+            regenBtn.disabled = true;
+            undoBtn.disabled = true;
+            try {
+              // 생성3 자신의 미배정/1회 제한 회원 설정(excludedMemberIds3/onceLimitedMemberIds3)이
+              // 적용되도록 반드시 withSelectionOverride로 감싼다 — 그냥 호출하면 currentExcludedIds()가
+              // (더 이상 UI가 없어 항상 비어있는) 옛 생성1 설정으로 폴백해버린다.
+              await withSelectionOverride(state.excludedMemberIds3, state.onceLimitedMemberIds3, () =>
+                regenerateCandidate(strategyIndex, progress => {
+                  regenBtn.textContent = "재생성 중... " + Math.round(progress * 100) + "%";
+                })
+              );
+            } finally {
+              regenBtn.textContent = "↻ 다음 후보";
+              regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
+              undoBtn.disabled = (candidateUndoStack[strategyIndex] || []).length === 0;
+            }
+          });
+          actions.appendChild(regenBtn);
+        }
+
+        const saveImageBtn = document.createElement("button");
+        saveImageBtn.type = "button";
+        saveImageBtn.className = "btn btn-ghost btn-small regen-candidate-btn";
+        saveImageBtn.textContent = "📷 저장";
+        saveImageBtn.title = "이 후보 카드를 이미지로 저장합니다.";
+        saveImageBtn.addEventListener("click", () => {
+          saveCandidateCardAsImage(card, title);
         });
-        actions.appendChild(regenBtn);
+        actions.appendChild(saveImageBtn);
+
         head.appendChild(actions);
       }
 
@@ -5949,6 +6473,36 @@
         card.appendChild(box);
       }
 
+      // 회원별 배정 세션을 모아 정확히 2회 배정된 회원의 지점(세션마다 다를 수 있어 중복 제거
+      // 후 "(첫 글자)"를 이어붙임)과 이름을 보여준다. candidateA(체인 DP)·B/C(그리디) 모두
+      // result.assigned에 {memberId, locationId} 형태의 세션을 담고 있어 별도 계산 없이 여기서
+      // 바로 집계할 수 있다.
+      const sessionsByMember = new Map();
+      result.assigned.forEach(r => {
+        if (!sessionsByMember.has(r.memberId)) sessionsByMember.set(r.memberId, []);
+        sessionsByMember.get(r.memberId).push(r);
+      });
+      const doubleAssignedMembers = [];
+      sessionsByMember.forEach((sessions, memberId) => {
+        if (sessions.length !== 2) return;
+        const member = memberById(memberId);
+        if (!member) return;
+        const locNames = [...new Set(sessions.map(s => {
+          const loc = locationById(s.locationId);
+          return loc ? loc.name : null;
+        }).filter(Boolean))];
+        const locLabel = locNames.map(name => "(" + name.charAt(0) + ")").join("");
+        doubleAssignedMembers.push({ member, locLabel });
+      });
+      doubleAssignedMembers.sort((a, b) => a.member.name.localeCompare(b.member.name, "ko"));
+      if (doubleAssignedMembers.length > 0) {
+        const box = document.createElement("div");
+        box.className = "unassigned-box double-assigned-box";
+        box.innerHTML = "<b>2회 배정 회원 (" + doubleAssignedMembers.length + "명)</b> · " +
+          doubleAssignedMembers.map(d => d.locLabel + " " + d.member.name).join(", ");
+        card.appendChild(box);
+      }
+
       candidates3El.appendChild(card);
     }
 
@@ -5981,7 +6535,7 @@
       buildCard(
         "후보A - 인원 최대 (빈 시간 허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", a,
         schedule2ToBlocks(a.assigned, { result: a, onDone: renderSchedule3Result }),
-        schedule2ToTravelBlocks(a.assigned).concat(schedule2ToIdleBlocks(a.assigned)),
+        schedule2ToTravelBlocks(a).concat(schedule2ToIdleBlocks(a.assigned)),
         schedule2TotalIdleMinutes(a.assigned),
         null
       );
@@ -5991,14 +6545,14 @@
     const b = candidates[0];
     if (b) {
       buildCard(
-        "후보B - 인원 최대 (빈 시간 미허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", b,
+        "후보B - 인원 최대 (빈 시간 최소화)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", b,
         candidateToBlocks(b, renderSchedule3Result),
         candidateToTravelBlocks(b),
         null,
         0
       );
     } else {
-      buildPlaceholderCard("후보B - 인원 최대 (빈 시간 미허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
+      buildPlaceholderCard("후보B - 인원 최대 (빈 시간 최소화)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
     }
     const c = candidates[1];
     if (c) {
@@ -6123,6 +6677,144 @@
   candidateRulesToggle3El.addEventListener("click", () => {
     const collapsed = candidateRulesBlock3El.classList.toggle("collapsed");
     candidateRulesToggle3El.setAttribute("aria-expanded", String(!collapsed));
+  });
+
+  /* ---------------- 데이터 백업 · 복원 ---------------- */
+  // localStorage는 브라우저·기기별로 분리돼 있어 자동으로 공유되지 않는다. 다른 기기(예: 외부에서
+  // 쓰는 모바일)에서도 같은 데이터를 쓰고 싶을 때, 여기서 만든 백업 코드를 복사해 그 기기에서
+  // 붙여넣어 복원한다. 코드 자체는 PIN으로 암호화되어 있어(AES-GCM, PIN 기반 PBKDF2 키 유도),
+  // PIN을 모르면 코드 텍스트만으로는 내용을 볼 수 없다 — 메모 앱 등에 코드가 남아 있어도,
+  // 또는 공용 기기에서 붙여넣기 화면을 보게 되어도 실제 회원 정보가 그대로 노출되지 않는다.
+  const BACKUP_PBKDF2_ITERATIONS = 100000;
+
+  async function deriveBackupKey(pin, salt, usage) {
+    const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey(
+      { name: "PBKDF2", salt, iterations: BACKUP_PBKDF2_ITERATIONS, hash: "SHA-256" },
+      keyMaterial,
+      { name: "AES-GCM", length: 256 },
+      false,
+      [usage]
+    );
+  }
+
+  function backupBytesToBase64(bytes) {
+    let binary = "";
+    bytes.forEach(b => { binary += String.fromCharCode(b); });
+    return btoa(binary);
+  }
+
+  function backupBase64ToBytes(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  async function encryptBackupText(plainText, pin) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveBackupKey(pin, salt, "encrypt");
+    const cipherBuf = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(plainText));
+    const combined = new Uint8Array(salt.length + iv.length + cipherBuf.byteLength);
+    combined.set(salt, 0);
+    combined.set(iv, salt.length);
+    combined.set(new Uint8Array(cipherBuf), salt.length + iv.length);
+    return backupBytesToBase64(combined);
+  }
+
+  // salt(16B) + iv(12B)가 앞에 오지 않는 텍스트(형식이 다르거나 손상된 코드)는 여기서 걸러진다.
+  async function decryptBackupText(base64Text, pin) {
+    const combined = backupBase64ToBytes(base64Text.trim());
+    if (combined.length <= 28) throw new Error("invalid backup code");
+    const salt = combined.slice(0, 16);
+    const iv = combined.slice(16, 28);
+    const cipherBytes = combined.slice(28);
+    const key = await deriveBackupKey(pin, salt, "decrypt");
+    const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, cipherBytes);
+    return new TextDecoder().decode(plainBuf);
+  }
+
+  const backupExportBtnEl = document.getElementById("backupExportBtn");
+  const backupExportResultEl = document.getElementById("backupExportResult");
+  const backupExportTextareaEl = document.getElementById("backupExportTextarea");
+  const backupExportCopyBtnEl = document.getElementById("backupExportCopyBtn");
+
+  backupExportBtnEl.addEventListener("click", async () => {
+    const pin = window.prompt("백업 코드를 암호화할 PIN을 입력하세요. (복원할 때 동일한 PIN이 필요합니다)");
+    if (!pin) return;
+    const pinConfirm = window.prompt("PIN을 한 번 더 입력해주세요.");
+    if (pinConfirm !== pin) {
+      alert("입력한 PIN이 서로 달라 백업 코드를 만들지 못했습니다. 다시 시도해주세요.");
+      return;
+    }
+    saveState(); // 화면에 아직 반영 중인 최신 상태까지 포함되도록 내보내기 직전에 저장
+    try {
+      const backupCode = await encryptBackupText(localStorage.getItem(STORAGE_KEY) || "{}", pin);
+      backupExportTextareaEl.value = backupCode;
+      backupExportResultEl.style.display = "";
+      showToast("백업 코드를 만들었습니다. PIN도 함께 기억해주세요.", "success");
+    } catch (e) {
+      console.warn("backup export failed", e);
+      alert("백업 코드를 만들지 못했습니다.");
+    }
+  });
+
+  backupExportCopyBtnEl.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(backupExportTextareaEl.value);
+      showToast("백업 코드를 복사했습니다", "success");
+    } catch (e) {
+      backupExportTextareaEl.select();
+      showToast("복사에 실패했습니다. 직접 선택해 복사해주세요.", "error");
+    }
+  });
+
+  const backupImportOverlayEl = document.getElementById("backupImportOverlay");
+  const backupImportOpenBtnEl = document.getElementById("backupImportOpenBtn");
+  const backupImportCloseBtnEl = document.getElementById("backupImportCloseBtn");
+  const backupImportCancelBtnEl = document.getElementById("backupImportCancelBtn");
+  const backupImportApplyBtnEl = document.getElementById("backupImportApplyBtn");
+  const backupImportTextareaEl = document.getElementById("backupImportTextarea");
+  const backupImportPinInputEl = document.getElementById("backupImportPinInput");
+  const backupImportHintEl = document.getElementById("backupImportHint");
+
+  function openBackupImportModal() {
+    backupImportTextareaEl.value = "";
+    backupImportPinInputEl.value = "";
+    backupImportHintEl.textContent = "";
+    backupImportOverlayEl.classList.add("open");
+    setTimeout(() => backupImportTextareaEl.focus(), 0);
+  }
+  function closeBackupImportModal() {
+    backupImportOverlayEl.classList.remove("open");
+  }
+  backupImportOpenBtnEl.addEventListener("click", openBackupImportModal);
+  backupImportCloseBtnEl.addEventListener("click", closeBackupImportModal);
+  backupImportCancelBtnEl.addEventListener("click", closeBackupImportModal);
+  backupImportOverlayEl.addEventListener("click", (e) => {
+    if (e.target === backupImportOverlayEl) closeBackupImportModal();
+  });
+
+  backupImportApplyBtnEl.addEventListener("click", async () => {
+    const code = backupImportTextareaEl.value.trim();
+    const pin = backupImportPinInputEl.value;
+    if (!code || !pin) {
+      backupImportHintEl.textContent = "백업 코드와 PIN을 모두 입력해주세요.";
+      return;
+    }
+    let plainText;
+    try {
+      plainText = await decryptBackupText(code, pin);
+      JSON.parse(plainText); // 형식 검증(손상되거나 PIN이 맞아도 다른 형식의 데이터면 여기서 걸러짐)
+    } catch (e) {
+      backupImportHintEl.textContent = "복원에 실패했습니다. 백업 코드와 PIN을 다시 확인해주세요.";
+      return;
+    }
+    if (!confirm("복원하면 이 기기에 현재 저장된 데이터를 덮어씁니다. 계속할까요?")) return;
+    suppressAutosave = true;
+    localStorage.setItem(STORAGE_KEY, plainText);
+    location.reload();
   });
 
   /* ---------------- Init ---------------- */
