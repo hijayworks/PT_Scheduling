@@ -671,6 +671,56 @@
     });
   }
 
+  // 터치 기기에는 마우스 호버가 없어 cal-block-delete(×) 버튼이 나타날 방법이 없으므로,
+  // 블록을 길게 누르고 있으면(LONG_PRESS_MS) 확인창을 띄우고 확인 시 onDelete를 호출한다.
+  // attachTouchDrag와 같은 패턴(Pointer Events, 이동 시 취소)을 쓰되 드래그를 시작하진 않는다.
+  function attachLongPressDelete(el, onDelete) {
+    let timer = null;
+    let pointerId = null;
+    let startX = 0, startY = 0;
+
+    function cleanup() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      pointerId = null;
+      el.classList.remove("touch-drag-pending");
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onCancel);
+    }
+
+    function onMove(e) {
+      if (e.pointerId !== pointerId) return;
+      const dx = e.clientX - startX, dy = e.clientY - startY;
+      if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_TOLERANCE) cleanup();
+    }
+
+    function onUp(e) {
+      if (e.pointerId !== pointerId) return;
+      cleanup();
+    }
+
+    function onCancel(e) {
+      if (e.pointerId !== pointerId) return;
+      cleanup();
+    }
+
+    el.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse") return; // 마우스는 기존 호버(×) 버튼으로 처리
+      pointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      el.classList.add("touch-drag-pending");
+      el.addEventListener("pointermove", onMove);
+      el.addEventListener("pointerup", onUp);
+      el.addEventListener("pointercancel", onCancel);
+      timer = setTimeout(() => {
+        timer = null;
+        cleanup();
+        if (confirm("해당 가능 시간을 삭제하시겠습니까?")) onDelete();
+      }, LONG_PRESS_MS);
+    });
+  }
+
   /* ---------------- Grid rendering ---------------- */
   // options: { blocks: [{day, startSlot, duration, label, loc, sublabel, color, excluded, onDelete, onMove}],
   //   travelBlocks: [{day, startSlot, duration, label, type: "travel" | "break"}] }
@@ -858,6 +908,7 @@
           b.onDelete();
         });
         block.appendChild(delBtn);
+        attachLongPressDelete(block, b.onDelete);
       }
       if (!b.excluded && b.onClick) {
         block.style.cursor = "pointer";
@@ -1458,12 +1509,6 @@
   const rangeAddBtn = document.getElementById("rangeAddBtn");
   const resetAllSchedulesBtn = document.getElementById("resetAllSchedulesBtn");
   let activeScheduleMemberId = null;
-
-  // 등록된 시간에 마우스를 올리면 나타나는 삭제(×) 버튼은 PC(마우스)에서만 허용. 터치 기기에서는 안내만 띄운다.
-  scheduleGridScrollEl.addEventListener("touchstart", (e) => {
-    e.preventDefault();
-    alert("일정에 마우스를 올렸을 때 나타나는 × 버튼으로 삭제하는 기능은 PC에서만 가능합니다. PC로 접속해서 삭제해주세요.");
-  }, { passive: false });
 
   // "한 번에 추가" 컨트롤: 요일마다 독립된 시작~종료 시간대 선택창을 두고(기본값 "선택안함"),
   // 시간대를 지정한 요일들만 모아 그 범위 안에서 가능한 모든 60분 후보 시작 시각(10분 간격)을
