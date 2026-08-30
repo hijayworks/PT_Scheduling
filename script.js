@@ -270,9 +270,13 @@
         const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
         const file = new File([blob], filename, { type: "image/png" });
         if (isMobile && navigator.canShare && navigator.canShare({ files: [file] })) {
+          // 공유 시트를 열기 직전에 안내 토스트를 띄운다. navigator.share()의 Promise는
+          // 사용자가 시트에서 항목을 선택해 동작이 끝난 뒤에야 resolve되므로, await 이후에
+          // 토스트를 띄우면 "선택하면 저장됩니다"라는 안내가 이미 선택을 마친 뒤에 나타나
+          // 방금 한 행동을 다시 하라는 것처럼 오해를 준다.
+          showToast("공유 시트에서 '이미지 저장'을 선택하면 사진 앱에 저장됩니다", "info");
           try {
             await navigator.share({ files: [file] });
-            showToast("공유 시트에서 '이미지 저장'을 선택하면 사진 앱에 저장됩니다", "success");
             return;
           } catch (err) {
             if (err && err.name === "AbortError") return; // 사용자가 공유 취소
