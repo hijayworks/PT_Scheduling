@@ -245,9 +245,11 @@
 
         // 아이폰 Safari는 <a download>로 저장하면 "사진" 앱이 아닌 "파일" 앱으로 저장된다.
         // navigator.share로 이미지를 공유하면 공유 시트에 "이미지 저장" 항목이 뜨고,
-        // 이를 선택하면 사진 앱에 저장되므로 지원되는 환경에서는 이 방식을 우선 사용한다.
+        // 이를 선택하면 사진 앱에 저장된다. PC 브라우저도 Web Share API를 지원하는 경우가 있어
+        // 모바일 기기에서만 공유 시트를 쓰고, PC에서는 바로 다운로드되게 한다.
+        const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
         const file = new File([blob], filename, { type: "image/png" });
-        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        if (isMobile && navigator.canShare && navigator.canShare({ files: [file] })) {
           try {
             await navigator.share({ files: [file] });
             showToast("공유 시트에서 '이미지 저장'을 선택하면 사진 앱에 저장됩니다", "success");
@@ -3968,7 +3970,13 @@
   }
 
   // 무거운 동기 계산 중간에 브라우저가 화면을 다시 그릴 틈을 준다(로딩 스피너·진행률 갱신용).
+  // 탭이 백그라운드로 가면(다른 탭/앱으로 이동, 화면 잠금 등) requestAnimationFrame 콜백은
+  // 브라우저가 아예 실행하지 않으므로, 그때는 setTimeout만으로 양보해 생성이 멈추지 않고
+  // (다소 느려지더라도) 계속 진행되게 한다.
   function yieldToUI() {
+    if (document.hidden) {
+      return new Promise(resolve => setTimeout(resolve, 0));
+    }
     return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
   }
   // yieldToUI로 화면에 제어권을 넘긴 직후에만 "취소" 버튼 클릭이 실제로 처리됐을 수 있으므로,
