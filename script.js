@@ -1470,6 +1470,13 @@
     name.className = "range-day-name";
     name.textContent = d;
 
+    // 시작~종료 선택창을 하나의 묶음으로 감싸 좁은 화면에서 요일명 옆에 나란히 붙거나
+    // (근무 가능 시간 설정의 .avail-day-time과 동일한 패턴) 필요하면 통째로 다음 줄로
+    // 넘어가게 한다 — 그래야 화면이 좁을 때 시작 선택창과 종료 선택창이 서로 떨어져
+    // 엉뚱한 자리에 걸리지 않는다.
+    const timePair = document.createElement("div");
+    timePair.className = "range-time-pair";
+
     const startSel = document.createElement("select");
     const sep = document.createElement("span");
     sep.className = "sep";
@@ -1485,10 +1492,12 @@
       sel.value = ""; // 기본값: 선택안함 (사용자가 직접 시간을 골라야 함)
     });
 
+    timePair.appendChild(startSel);
+    timePair.appendChild(sep);
+    timePair.appendChild(endSel);
+
     row.appendChild(name);
-    row.appendChild(startSel);
-    row.appendChild(sep);
-    row.appendChild(endSel);
+    row.appendChild(timePair);
     rangeDayListEl.appendChild(row);
 
     return { day: di, startSel, endSel };

@@ -971,6 +971,13 @@ body {
   font-size: 13.5px;
   font-weight: 700;
 }
+.range-time-pair {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .range-add-row select {
   height: 36px;
   box-sizing: border-box;
@@ -1128,6 +1135,23 @@ body {
     overflow-x: auto;
   }
   .nav-item { flex: 1; justify-content: center; text-align: center; white-space: nowrap; }
+
+  /* 요일별 "한 번에 추가" 컨트롤: 데스크톱의 3열 그리드는 이 폭에서 한 칸이 요일명+
+     시작~종료 선택창 두 개를 한 줄에 담기엔 너무 좁아져, 요일마다 선택창이 세로로
+     쌓이며 6개 요일 전체가 화면을 가득 채우는 문제가 있었다. 근무 가능 시간 설정
+     (.avail-day-list/.avail-day-row)과 같은 한 줄짜리 목록 형태로 바꿔 한 요일당
+     한 줄만 차지하게 한다. */
+  .range-day-list {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    gap: 0;
+  }
+  .range-day-row {
+    flex-wrap: nowrap;
+    padding: 8px 0;
+  }
+  .range-day-row + .range-day-row { border-top: 1px solid var(--border); }
+  .range-time-pair select { flex: 1 1 0; min-width: 0; }
 }
 
 @media (max-width: 640px) {
@@ -1143,6 +1167,10 @@ body {
   .avail-day-row { flex-wrap: wrap; row-gap: 8px; }
   .avail-day-time { flex: 1 1 100%; }
   .avail-day-time select { flex: 1 1 0; min-width: 0; }
+
+  /* 아주 좁은 화면에서는 요일별 시작~종료 선택창도 같은 방식으로 다음 줄로 내린다. */
+  .range-day-row { flex-wrap: wrap; row-gap: 8px; }
+  .range-time-pair { flex: 1 1 100%; }
 
   /* 지점/회원구분/이름 칼럼이 좁은 화면에서 한 글자씩 세로로 쪼개져 표시되던 문제 — 표는
      그대로 두고 .table-scroll이 가로로만 스크롤되게 해 글자가 항상 한 줄로 보이게 한다. */
