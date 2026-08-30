@@ -1668,10 +1668,28 @@
   //  - "630~" -> { type:"openStart", mark:{...} } (그 시각부터 마감까지 전부 가능)
   //  - "~730" -> { type:"openEnd", mark:{...} } (마감 이전부터 그 시각까지 전부 가능)
   function parseTimeToken(token) {
-    // "늦은시간"은 트레이너들이 관행적으로 쓰는 표현으로, 영업 마감 직전 시간대인
-    // 오후 10시30분 시작을 뜻한다.
-    if (token === "늦은시간") return { type: "point", marks: [{ hour: 10, minute: 30 }] };
     const originalToken = token;
+    // "늦은시간"은 트레이너들이 관행적으로 쓰는 표현으로, 영업 마감 직전 시간대인
+    // 오후 10시30분 시작을 뜻한다. "금910늦은시간"처럼 다른 시각 표기 뒤에 바로 붙어도
+    // 그 시각들에 더해 22:30을 별도의 희망 시작 시각으로 추가한다.
+    const LATE_MARK = { hour: 10, minute: 30 };
+    let hasLateMark = false;
+    if (token.endsWith("늦은시간")) {
+      hasLateMark = true;
+      token = token.slice(0, -"늦은시간".length);
+    }
+    function withLateMark(result) {
+      if (!hasLateMark || result.error) return result;
+      if (result.type === "point") result.marks = result.marks.concat([LATE_MARK]);
+      else if (result.type === "openStart" || result.type === "openEnd") {
+        result.extraPoints = (result.extraPoints || []).concat([LATE_MARK]);
+      }
+      return result;
+    }
+    if (token === "") {
+      if (hasLateMark) return { type: "point", marks: [LATE_MARK] };
+      return { error: "알 수 없는 시간 표기: \"" + originalToken + "\"" };
+    }
     // "5까지"는 "~5"(마감 이전부터 5시까지), "4부터"·"5이후"는 "4~"·"5~"(그 시각부터 마감까지)와
     // 같은 뜻이라 동일한 물결 표기로 바꿔서 아래 로직을 그대로 재사용한다.
     const suffixMatch = token.match(/^(\d+)(까지|부터|이후)$/);
@@ -1698,7 +1716,7 @@
         }
         const marks = expandHourRange(leftMarks[0], rightMarks[0]);
         if (!marks) return { error: "구간 표기 해석 실패: \"" + originalToken + "\"", warning };
-        return { type: "point", marks, warning };
+        return withLateMark({ type: "point", marks, warning });
       }
       if (rightStr === "") {
         // "6630~"처럼 물결 앞에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 마지막 시각(6시30분)을
@@ -1706,18 +1724,18 @@
         // 시작 시각으로 남긴다.
         const marks = tokenizeHourDigits(leftStr);
         if (!marks || marks.length === 0) return { error: "구간 표기 해석 실패: \"" + originalToken + "\"", warning };
-        return { type: "openStart", mark: marks[marks.length - 1], extraPoints: marks.slice(0, -1), warning };
+        return withLateMark({ type: "openStart", mark: marks[marks.length - 1], extraPoints: marks.slice(0, -1), warning });
       }
       // "~458"처럼 물결 뒤에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 첫 시각(4시)을
       // "마감 이전부터 그 시각까지" 열린 끝점으로 삼고, 그 뒤의 시각들(5시, 8시)은 각각
       // 개별 희망 시작 시각으로 남긴다.
       const marks = tokenizeHourDigits(rightStr);
       if (!marks || marks.length === 0) return { error: "구간 표기 해석 실패: \"" + originalToken + "\"", warning };
-      return { type: "openEnd", mark: marks[0], extraPoints: marks.slice(1), warning };
+      return withLateMark({ type: "openEnd", mark: marks[0], extraPoints: marks.slice(1), warning });
     }
     const marks = tokenizeHourDigits(clean);
     if (!marks) return { error: "시간 해석 실패: \"" + originalToken + "\"", warning };
-    return { type: "point", marks, warning };
+    return withLateMark({ type: "point", marks, warning });
   }
 
   // 한 줄("이름  요일 시간...")을 해석한다.
