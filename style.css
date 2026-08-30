@@ -1164,6 +1164,19 @@ body {
   }
   .range-day-row + .range-day-row { border-top: 1px solid var(--border); }
   .range-time-pair select { flex: 1 1 0; min-width: 0; }
+
+  /* 이 폭부터는 .request-form의 필드들이 한 줄에 못 들어가고 세로로 쌓이는데(각 필드가
+     혼자 한 줄 전체를 차지), 에러 메시지를 absolute로 흐름 밖에 두던 데스크톱 방식을 그대로
+     쓰면 그 아래 다음 필드와 겹친다. 필드가 세로로 쌓일 때는 옆 필드를 밀어낼 걱정이 없으니
+     에러 메시지가 있을 때만(:not(:empty)) 다시 흐름 안으로 넣어 그 필드 자체의 높이를
+     늘려서 아래 필드를 자연스럽게 밀어내리게 한다. */
+  .field .generate-hint:not(:empty) {
+    position: static;
+    padding-top: 0;
+    margin-top: 4px;
+    white-space: normal;
+  }
+  .request-form.has-hint { padding-bottom: 16px; }
 }
 
 @media (max-width: 640px) {
