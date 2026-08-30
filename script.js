@@ -1082,6 +1082,8 @@
     schedule3Result = { candidateA: null };
     Object.keys(candidateHistory).forEach(k => delete candidateHistory[k]);
     Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]);
+    Object.keys(candidatePools).forEach(k => delete candidatePools[k]);
+    candidateAPool = [];
     renderSchedule3Result();
     generateHint3El.textContent = "기본 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
     saveState();
@@ -3977,6 +3979,11 @@
     if (a[2] !== b[2]) return a[2] < b[2];
     return a[3] > b[3];
   }
+  // 두 candidateSearchScore 튜플이 완전히 동점인지("배치 페이저"용 — 미배정/수업 건수/이동
+  // 횟수까지 전부 같아 카드 pill 표시가 동일한 경우만 같은 풀로 묶는다).
+  function isCandidateScoreTie(a, b) {
+    return !isCandidateWorse(a, b) && !isCandidateWorse(b, a);
+  }
   // strategyIndex의 STRATEGIES 정의에서 primary("count" 기본 / "sessions")를 읽어온다.
   // options가 함수(후보I/J)면 strengthenSearch를 쓰지 않으므로 항상 기본값이다.
   function strategyPrimary(strategyIndex) {
@@ -4083,6 +4090,18 @@
   // candidateHistory와 마찬가지로 새로고침하면 초기화되는 세션 한정 기록.
   const candidateUndoStack = {}; // strategyIndex -> Candidate[]
 
+  // "배치 페이저"용: 미배정/수업 건수/이동 횟수(후보A는 이동 시간·빈 시간까지) 지표가 완전히
+  // 동점인 배치를 최대 이만큼만 서로 다른 배정(서명 기준)으로 모아둔다 — 화면이 지저분해지지
+  // 않게 상한을 둔다.
+  const MAX_POOL_VARIANTS = 6;
+  // strategyIndex별 동점 배치 풀(후보B/C). candidates[strategyIndex]는 항상 이 풀의 한 항목과
+  // 같은 객체 참조를 가리킨다 — 페이저가 pool.indexOf(현재 후보)로 현재 위치를 찾기 때문이다.
+  // candidateHistory와 마찬가지로 저장하지 않는 세션 한정 기록(새로고침하면 초기화).
+  const candidatePools = {}; // strategyIndex -> Candidate[]
+  // 후보A(체인 DP)의 동점 배치 풀. schedule3Result.candidateA는 항상 이 배열의 한 항목과
+  // 같은 객체 참조를 가리킨다. 세션 한정 기록.
+  let candidateAPool = [];
+
   function candidateSignature(cand) {
     return cand.assigned.map(r => r.id).slice().sort().join(",");
   }
@@ -4133,7 +4152,7 @@
     }
     onProgress(1);
 
-    const built = STRATEGIES.map((strategy, idx) => {
+    const builtPairs = STRATEGIES.map((strategy, idx) => {
       const myPrimary = strategyPrimary(idx);
       const strategyOptions = strategy.options;
       const myWeeklyCap = (strategyOptions && typeof strategyOptions !== "function" && typeof strategyOptions.maxTravelsPerWeek === "number")
@@ -4146,10 +4165,29 @@
         const score = candidateSearchScore(cand, myPrimary, myMaxUnassigned);
         if (!best || isCandidateWorse(bestScore, score)) { best = cand; bestScore = score; }
       });
-      return Object.assign({}, best, { title: strategy.title, desc: strategy.desc, strategyIndex: idx });
+      const builtCand = Object.assign({}, best, { title: strategy.title, desc: strategy.desc, strategyIndex: idx });
+      // 동점 배치 풀: best와 점수가 완전히 같은 항목들을 서명 중복 제거해 모은다. best 자신은
+      // builtCand(같은 배정에 title/desc/strategyIndex만 덧붙인 새 객체)로 바꿔 넣어야, 카드가
+      // 참조하는 candidates[idx]와 풀 안의 항목이 같은 객체가 되어 페이저의
+      // pool.indexOf(현재 후보) 판별이 성립한다.
+      const tied = [];
+      const seenSig = new Set();
+      pool.forEach(cand => {
+        if (myWeeklyCap != null && totalTravelCount(cand.assigned) > myWeeklyCap) return;
+        const score = candidateSearchScore(cand, myPrimary, myMaxUnassigned);
+        if (!isCandidateScoreTie(score, bestScore)) return;
+        const sig = candidateSignature(cand);
+        if (seenSig.has(sig)) return;
+        seenSig.add(sig);
+        if (tied.length < MAX_POOL_VARIANTS) tied.push(cand === best ? builtCand : cand);
+      });
+      return { builtCand, tied };
     });
 
-    return built;
+    return {
+      built: builtPairs.map(p => p.builtCand),
+      pools: builtPairs.map(p => p.tied)
+    };
   }
 
   // 후보 카드 하나만 같은 전략 안에서 다시 계산한다 (동점인 신청들의 순서를 랜덤으로 바꿔 다른 배정을 시도).
@@ -4247,6 +4285,27 @@
     }
 
     newCand.confirmedIds = [...confirmedIds];
+    // 배치 페이저용: newCand와 완전히 동점인 배치를 모아 풀로 저장한다. 재생성은 확정된 세션을
+    // 고정한 채 탐색하므로(pinned), 풀의 모든 항목에 같은 confirmedIds를 설정해야 페이저로
+    // 넘나들어도 확정 표시가 유지된다. newCand 자신과 서명이 같은 자리는 (같은 배정을 만든
+    // 다른 시도 객체가 아니라) newCand 참조 그대로 넣어야 페이저의 pool.indexOf(현재 후보)
+    // 판별이 성립한다.
+    {
+      const newCandSig = candidateSignature(newCand);
+      const tied = [];
+      const seenTieSig = new Set();
+      pool.forEach(cand => {
+        const score = candidateSearchScore(cand, myPrimary, myMaxUnassigned);
+        if (!isCandidateScoreTie(score, newScore)) return;
+        const sig = candidateSignature(cand);
+        if (seenTieSig.has(sig)) return;
+        seenTieSig.add(sig);
+        const entry = sig === newCandSig ? newCand : cand;
+        entry.confirmedIds = [...confirmedIds];
+        if (tied.length < MAX_POOL_VARIANTS) tied.push(entry);
+      });
+      candidatePools[strategyIndex] = tied;
+    }
     if (prevCand) {
       if (!candidateUndoStack[strategyIndex]) candidateUndoStack[strategyIndex] = [];
       candidateUndoStack[strategyIndex].push(prevCand);
@@ -6123,9 +6182,11 @@
     // 서로 비교해 실제로 가장 좋은 결과를 택한다.
     const perAttemptBudget = Math.max(MIN_POLISH_BUDGET_MS, Math.floor(TOTAL_POLISH_BUDGET_MS / attempts.length));
     let polished = null;
+    const polishedAll = []; // "배치 페이저"용: 다듬은 시도를 전부 기억해뒀다가 동점인 것들을 풀로 묶는다
     for (let i = 0; i < attempts.length; i++) {
       const attempt = await runSchedule2Pipeline(
         eligibleReqs, reqsByDay, daysWithReqs, attempts[i].order, true, true, perAttemptBudget, attempts[i].seedOffset);
+      polishedAll.push(attempt);
       if (!polished || isSchedule2ResultBetter(attempt, polished)) polished = attempt;
       if (onProgress) {
         onProgress(0.55 + (i + 1) / attempts.length * 0.45);
@@ -6133,7 +6194,21 @@
         checkGenerationCancelled();
       }
     }
-    return polished;
+    // polished와 완전히 동점(미배정 → 수업 수 → 이동 횟수 → 이동 시간 → 빈 시간 전부 동일)인
+    // 시도들을 서명 중복 제거해 최대 MAX_POOL_VARIANTS개까지 모은다. polished 자신과 서명이
+    // 같은 자리는 (동일 배정을 만든 다른 시도 객체가 아니라) polished 참조 그대로 넣어야,
+    // 페이저가 pool.indexOf(result)로 현재 위치를 찾을 수 있다.
+    const polishedSig = schedule2Signature(polished);
+    const tied = [];
+    const seenTieSig = new Set();
+    polishedAll.forEach(cand => {
+      if (isSchedule2ResultBetter(cand, polished) || isSchedule2ResultBetter(polished, cand)) return;
+      const sig = schedule2Signature(cand);
+      if (seenTieSig.has(sig)) return;
+      seenTieSig.add(sig);
+      if (tied.length < MAX_POOL_VARIANTS) tied.push(sig === polishedSig ? polished : cand);
+    });
+    return { result: polished, pool: tied };
   }
 
   // result/onDone: 생성3의 후보A 카드에서 항상 그 결과 객체와 renderSchedule3Result를 명시적으로 넘겨받아 쓴다.
@@ -6278,6 +6353,8 @@
         schedule3Result = { candidateA: null };
         Object.keys(candidateHistory).forEach(k => delete candidateHistory[k]);
         Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]);
+        Object.keys(candidatePools).forEach(k => delete candidatePools[k]);
+        candidateAPool = [];
         renderSchedule3Result();
         saveState();
         generateHint3El.textContent = "신청 시간이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
@@ -6427,6 +6504,8 @@
       schedule3Result = { candidateA: null };
       Object.keys(candidateHistory).forEach(k => delete candidateHistory[k]);
       Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]);
+      Object.keys(candidatePools).forEach(k => delete candidatePools[k]);
+      candidateAPool = [];
       renderSchedule3Result();
       generateHint3El.textContent = "회원 선택이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
     } else {
@@ -6484,9 +6563,11 @@
     }
     onProgress(1);
     return {
-      candidateB: v1Built ? (v1Built[0] || null) : null, // 생성1의 후보A(전략 0, 인원 최대)
-      candidateC: v1Built ? (v1Built[1] || null) : null, // 생성1의 후보B(전략 1, 수업 횟수 최대)
-      candidateA: v2Result,
+      candidateB: v1Built ? (v1Built.built[0] || null) : null, // 생성1의 후보A(전략 0, 인원 최대)
+      candidateC: v1Built ? (v1Built.built[1] || null) : null, // 생성1의 후보B(전략 1, 수업 횟수 최대)
+      poolsBC: v1Built ? v1Built.pools : null, // strategyIndex -> 배치 페이저용 동점 풀
+      candidateA: v2Result ? v2Result.result : null,
+      candidateAPool: v2Result ? v2Result.pool : null,
       genA, genBC
     };
   }
@@ -6514,7 +6595,7 @@
     candidates3El.innerHTML = "";
     const gridRange = businessHoursGridRange();
 
-    function buildCard(title, desc, result, blocks, travelBlocks, idleMinutes, strategyIndex) {
+    function buildCard(title, desc, result, blocks, travelBlocks, idleMinutes, strategyIndex, pool) {
       const card = document.createElement("div");
       card.className = "candidate-card";
 
@@ -6615,6 +6696,53 @@
       descEl.className = "candidate-desc";
       descEl.textContent = desc;
       card.appendChild(descEl);
+
+      // "배치 페이저": 미배정/수업 건수/이동 횟수(후보A는 이동 시간·빈 시간까지) 지표가 완전히
+      // 동점인 다른 배치가 있으면(pool.length > 1), 재계산 없이 그 풀 안에서 넘나들 수 있게
+      // 한다. pool.indexOf(result)가 -1이면(드래그 등 수동 편집으로 지금 화면이 풀의 어떤
+      // 항목과도 더 이상 같은 배치가 아니거나, "이전 후보"로 되돌아간 경우) 페이저를 그리지
+      // 않는다 — 별도 무효화 로직 없이 참조 동일성만으로 자연스럽게 처리된다.
+      if (pool && pool.length > 1) {
+        const poolIdx = pool.indexOf(result);
+        if (poolIdx !== -1) {
+          const pager = document.createElement("div");
+          pager.className = "candidate-pool-pager";
+
+          function selectPoolVariant(newIdx) {
+            if (strategyIndex != null) candidates[strategyIndex] = pool[newIdx];
+            else schedule3Result.candidateA = pool[newIdx];
+            saveState();
+            renderSchedule3Result();
+          }
+
+          const prevBtn = document.createElement("button");
+          prevBtn.type = "button";
+          prevBtn.className = "btn btn-ghost icon-btn pool-pager-btn";
+          prevBtn.setAttribute("aria-label", "이전 배치");
+          prevBtn.title = "같은 조건의 다른 배치를 봅니다.";
+          prevBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+          prevBtn.disabled = poolIdx === 0;
+          prevBtn.addEventListener("click", () => selectPoolVariant(poolIdx - 1));
+
+          const label = document.createElement("span");
+          label.className = "pool-pager-label";
+          label.textContent = "배치 " + (poolIdx + 1) + "/" + pool.length;
+
+          const nextBtn = document.createElement("button");
+          nextBtn.type = "button";
+          nextBtn.className = "btn btn-ghost icon-btn pool-pager-btn";
+          nextBtn.setAttribute("aria-label", "다음 배치");
+          nextBtn.title = "같은 조건의 다른 배치를 봅니다.";
+          nextBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
+          nextBtn.disabled = poolIdx === pool.length - 1;
+          nextBtn.addEventListener("click", () => selectPoolVariant(poolIdx + 1));
+
+          pager.appendChild(prevBtn);
+          pager.appendChild(label);
+          pager.appendChild(nextBtn);
+          card.appendChild(pager);
+        }
+      }
 
       const stats = document.createElement("div");
       stats.className = "candidate-stats";
@@ -6741,7 +6869,8 @@
         schedule2ToBlocks(a.assigned, { result: a, onDone: renderSchedule3Result }),
         schedule2ToTravelBlocks(a).concat(schedule2ToIdleBlocks(a.assigned)),
         schedule2TotalIdleMinutes(a.assigned),
-        null
+        null,
+        candidateAPool
       );
     } else {
       buildPlaceholderCard("후보A - 인원 최대 (빈 시간 허용)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
@@ -6753,7 +6882,8 @@
         candidateToBlocks(b, renderSchedule3Result),
         candidateToTravelBlocks(b),
         schedule2TotalIdleMinutes(b.assigned),
-        0
+        0,
+        candidatePools[0]
       );
     } else {
       buildPlaceholderCard("후보B - 인원 최대 (빈 시간 최소화)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.");
@@ -6765,7 +6895,8 @@
         candidateToBlocks(c, renderSchedule3Result),
         candidateToTravelBlocks(c),
         schedule2TotalIdleMinutes(c.assigned),
-        1
+        1,
+        candidatePools[1]
       );
     } else {
       buildPlaceholderCard("후보C - 수업 횟수 최대", "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.");
@@ -6823,14 +6954,20 @@
         progressWrapEl.setAttribute("aria-valuenow", String(pct));
       }, { genA, genBC });
       requestsChangedSinceGenerate3 = false;
-      const candidateA = result.genA
-        ? ((prevCandidateA && !isSchedule2ResultBetter(result.candidateA, prevCandidateA)) ? prevCandidateA : result.candidateA)
-        : prevCandidateA;
+      const usedNewCandidateA = result.genA && (!prevCandidateA || isSchedule2ResultBetter(result.candidateA, prevCandidateA));
+      const candidateA = usedNewCandidateA ? result.candidateA : prevCandidateA;
+      // 배치 페이저용 풀: 새 후보A가 실제로 채택됐을 때만 새 풀로 교체한다 — 이전 결과를
+      // 그대로 지킨 경우엔 그 후보에 맞는 풀(candidateAPool)이 이미 들어있으므로 건드리지 않는다.
+      if (usedNewCandidateA) candidateAPool = result.candidateAPool || [];
       if (result.genBC) {
         candidates = [result.candidateB, result.candidateC].filter(Boolean);
         Object.keys(candidateHistory).forEach(k => delete candidateHistory[k]);
         Object.keys(candidateUndoStack).forEach(k => delete candidateUndoStack[k]);
-        candidates.forEach((cand, idx) => { candidateHistory[idx] = new Set([candidateSignature(cand)]); });
+        Object.keys(candidatePools).forEach(k => delete candidatePools[k]);
+        candidates.forEach((cand, idx) => {
+          candidateHistory[idx] = new Set([candidateSignature(cand)]);
+          if (result.poolsBC && result.poolsBC[idx]) candidatePools[idx] = result.poolsBC[idx];
+        });
       }
       schedule3Result = { candidateA };
       renderSchedule3Result();

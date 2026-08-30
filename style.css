@@ -1090,6 +1090,13 @@ body {
 }
 .action-divider { width: 1px; height: 18px; background: var(--border); margin: 0 2px; flex: 0 0 auto; }
 .candidate-desc { font-size: 12px; color: var(--text-mute); margin: 0 0 10px; }
+/* "배치 페이저": 미배정/수업/이동 지표가 동점인 다른 배치를 재계산 없이 넘나보는 컨트롤. */
+.candidate-pool-pager {
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  margin: 0 0 10px;
+}
+.pool-pager-btn { width: 24px; height: 24px; }
+.pool-pager-label { font-size: 12px; font-weight: 700; color: var(--text-mute); min-width: 64px; text-align: center; }
 .candidate-stats {
   display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0;
   font-size: 12.5px;
