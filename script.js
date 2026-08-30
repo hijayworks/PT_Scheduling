@@ -6701,7 +6701,7 @@
         "후보B - 인원 최대 (빈 시간 최소화)", "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.", b,
         candidateToBlocks(b, renderSchedule3Result),
         candidateToTravelBlocks(b),
-        null,
+        schedule2TotalIdleMinutes(b.assigned),
         0
       );
     } else {
@@ -6713,7 +6713,7 @@
         "후보C - 수업 횟수 최대", "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.", c,
         candidateToBlocks(c, renderSchedule3Result),
         candidateToTravelBlocks(c),
-        null,
+        schedule2TotalIdleMinutes(c.assigned),
         1
       );
     } else {
