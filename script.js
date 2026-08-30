@@ -218,6 +218,16 @@
       showToast("이미지 저장 기능을 불러오지 못했습니다.", "error");
       return;
     }
+    // 좁은 모바일 화면에서는 요일별 그리드(.grid-scroll)가 화면 폭보다 넓어 가로 스크롤이
+    // 걸리는데, html2canvas는 스크롤로 가려진 부분을 그리지 못해 화·수 등 뒤쪽 요일이 잘려
+    // 저장된다. 캡처 전 실제로 필요한 전체 폭을 원본 DOM에서 측정해 두고, 캡처용 복제
+    // 문서에서만 카드 폭을 그만큼 넓혀 스크롤 없이 월~토 전체가 한 번에 담기게 한다.
+    const gridWrap = cardEl.querySelector(".grid-scroll");
+    const neededWidth = gridWrap
+      ? cardEl.offsetWidth + Math.max(0, gridWrap.scrollWidth - gridWrap.clientWidth)
+      : null;
+    const CAPTURE_ATTR = "data-capture-card";
+    cardEl.setAttribute(CAPTURE_ATTR, "");
     try {
       const canvas = await html2canvas(cardEl, {
         backgroundColor: "#ffffff",
@@ -233,6 +243,16 @@
           clonedDoc.querySelectorAll(".cal-block.excluded").forEach(el => {
             el.style.background = "#e5e7eb";
           });
+          if (neededWidth) {
+            const clonedCard = clonedDoc.querySelector(`[${CAPTURE_ATTR}]`);
+            if (clonedCard) {
+              clonedCard.style.width = neededWidth + "px";
+              clonedCard.style.maxWidth = "none";
+            }
+            clonedDoc.querySelectorAll(".grid-scroll").forEach(el => {
+              el.style.overflow = "visible";
+            });
+          }
         }
       });
       canvas.toBlob(async blob => {
@@ -272,6 +292,8 @@
       }, "image/png");
     } catch (err) {
       showToast("이미지 저장에 실패했습니다.", "error");
+    } finally {
+      cardEl.removeAttribute(CAPTURE_ATTR);
     }
   }
 
@@ -1574,10 +1596,10 @@
   }
 
   // 숫자만 이어진 문자열을 "시(오후 기준, 1~12)"들의 나열로 되돌린다. 예: "8910" -> 8시·9시·10시,
-  // "730" -> 7시30분, "1030" -> 10시30분, "640" -> 6시40분. 앞에서부터 그리디하게 2자리(10/11/12)를
-  // 먼저 시도하고, 뒤에 "30"이나 "40"이 바로 붙으면 그 분으로 묶는다(백트래킹으로 전체 문자열이
-  // 소진되는 경우만 채택).
-  const HOUR_DIGIT_MINUTE_SUFFIXES = [30, 40];
+  // "730" -> 7시30분, "1030" -> 10시30분, "640" -> 6시40분, "650" -> 6시50분. 앞에서부터 그리디하게
+  // 2자리(10/11/12)를 먼저 시도하고, 뒤에 "30"·"40"·"50"이 바로 붙으면 그 분으로 묶는다(백트래킹으로
+  // 전체 문자열이 소진되는 경우만 채택).
+  const HOUR_DIGIT_MINUTE_SUFFIXES = [30, 40, 50];
   function tokenizeHourDigits(digits) {
     function rec(s) {
       if (s === "") return [];
