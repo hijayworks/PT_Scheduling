@@ -610,9 +610,15 @@ body {
 .cal-block.draggable { cursor: grab; }
 .cal-block.dragging { opacity: 0.4; cursor: grabbing; }
 /* 모바일 롱프레스 드래그(attachTouchDrag, script.js): 길게 눌러 대기 중인 동안 눌린 걸 알 수
-   있게 살짝 확대해 보여주고, 드래그가 실제로 시작되면 touch-action: none으로 그 포인터의
-   화면 스크롤을 막아 카드 이동과 화면 스크롤 제스처가 서로 뺏기지 않게 한다. */
+   있게 살짝 확대해 보여준다. touch-action: none은 반드시 여기(.draggable, 터치가 시작되는
+   시점부터 이미 붙어있는 클래스)에 있어야 한다 — 브라우저는 한 터치 제스처의 touch-action을
+   그 터치가 시작되는 순간(pointerdown) 기준으로 고정해버려서, 롱프레스가 끝나 .dragging이
+   붙는 시점에 뒤늦게 touch-action을 바꿔봐야 이미 시작된 제스처에는 적용되지 않는다 — 그러면
+   드래그 중 손가락을 움직이는 순간 브라우저가 그 제스처를 화면 스크롤로 채가 버려(대개
+   pointercancel로 이어짐) 드롭이 씹힌다 — "롱프레스로 드래그는 시작되는데 놓아도 안 옮겨진다"는
+   증상과 정확히 일치한다. */
 .cal-block.draggable, .cal-travel-block.draggable {
+  touch-action: none;
   -webkit-touch-callout: none;
   -webkit-user-select: none;
   user-select: none;
@@ -623,7 +629,6 @@ body {
   box-shadow: 0 4px 12px rgba(0,0,0,0.28);
   z-index: 5;
 }
-.cal-block.dragging, .cal-travel-block.dragging { touch-action: none; }
 .cal-block.excluded {
   background: repeating-linear-gradient(45deg, #d1d5db, #d1d5db 6px, #e5e7eb 6px, #e5e7eb 12px);
   color: #4b5563;
@@ -1037,23 +1042,23 @@ body {
    doesn't overlap whatever comes right after the form (e.g. the table below). Only added
    while a hint is actually showing, so the form doesn't carry dead space normally. */
 .request-form.has-hint { padding-bottom: 40px; }
+/* 후보A(체인 DP) 카드들은 왼쪽 열, 후보B·C(그리디) 카드들은 오른쪽 열에 고정한다 —
+   렌더링 시 script.js가 .candidates-col 두 개(왼쪽/오른쪽)를 만들어 각 열에 맞는 카드만
+   채워 넣으므로, 여기서는 그 두 열을 나란히 배치하기만 하면 된다. 폭이 좁아지면
+   (min(400px,100%) 트랙이 800px+gap을 넘지 못하는 지점) 자연히 위아래로 쌓인다. */
 .candidates {
-  display: grid;
-  /* min(400px, 100%): 컨테이너가 400px보다 좁은 모바일 화면에서도 트랙이 100%를
-     넘지 않게 해 카드가 뷰포트 밖으로 넘치지 않는다(그 폭에서는 자연히 1열이 된다). */
-  grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
   gap: 16px;
   margin-top: 18px;
-  container-type: inline-size;
 }
-/* 후보A·B가 한 줄을 채우고 후보C만 다음 줄에 혼자 남는 2열 구간에서는, 왼쪽에 붙어 빈
-   오른쪽 공간을 남기는 대신 후보B 밑(2번째 열)으로 옮겨 그리디 결과(후보B·C)를 오른쪽에
-   묶어 보여준다. 경계값은 minmax(400px,1fr) auto-fit가 2열로 계산되는 컨테이너 폭 구간
-   (400*2+16 ~ 400*3+32-1)과 맞춘 것이다. */
-@container (min-width: 816px) and (max-width: 1231px) {
-  .candidates > .candidate-card:last-child {
-    grid-column: 2;
-  }
+.candidates-col {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex: 1 1 min(400px, 100%);
+  min-width: min(400px, 100%);
 }
 .candidate-card {
   border: 2px solid var(--border);
