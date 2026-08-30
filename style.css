@@ -673,7 +673,13 @@ body {
   box-shadow: 0 1px 3px rgba(0,0,0,0.35);
   z-index: 1;
 }
-.cal-block:hover .cal-block-delete { display: flex; }
+/* 실제 마우스 호버가 가능한 기기에서만 ×버튼을 보여준다. 터치 기기는 (hover: hover)가
+   거짓이라 여기 안 걸리므로, 탭 한 번에 :hover가 "고정"되어 ×버튼부터 뜨고 지점 추가
+   메뉴는 두 번째 탭에야 열리던 문제가 사라진다 — 터치 기기의 삭제는 지점 추가 메뉴 맨
+   아래의 "가능 시간 삭제하기" 항목으로 처리한다. */
+@media (hover: hover) and (pointer: fine) {
+  .cal-block:hover .cal-block-delete { display: flex; }
+}
 .cal-block-delete:hover { background: var(--danger); color: #fff; }
 
 .block-context-menu {

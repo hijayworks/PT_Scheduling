@@ -671,56 +671,6 @@
     });
   }
 
-  // 터치 기기에는 마우스 호버가 없어 cal-block-delete(×) 버튼이 나타날 방법이 없으므로,
-  // 블록을 길게 누르고 있으면(LONG_PRESS_MS) 확인창을 띄우고 확인 시 onDelete를 호출한다.
-  // attachTouchDrag와 같은 패턴(Pointer Events, 이동 시 취소)을 쓰되 드래그를 시작하진 않는다.
-  function attachLongPressDelete(el, onDelete) {
-    let timer = null;
-    let pointerId = null;
-    let startX = 0, startY = 0;
-
-    function cleanup() {
-      if (timer) { clearTimeout(timer); timer = null; }
-      pointerId = null;
-      el.classList.remove("touch-drag-pending");
-      el.removeEventListener("pointermove", onMove);
-      el.removeEventListener("pointerup", onUp);
-      el.removeEventListener("pointercancel", onCancel);
-    }
-
-    function onMove(e) {
-      if (e.pointerId !== pointerId) return;
-      const dx = e.clientX - startX, dy = e.clientY - startY;
-      if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_TOLERANCE) cleanup();
-    }
-
-    function onUp(e) {
-      if (e.pointerId !== pointerId) return;
-      cleanup();
-    }
-
-    function onCancel(e) {
-      if (e.pointerId !== pointerId) return;
-      cleanup();
-    }
-
-    el.addEventListener("pointerdown", (e) => {
-      if (e.pointerType === "mouse") return; // 마우스는 기존 호버(×) 버튼으로 처리
-      pointerId = e.pointerId;
-      startX = e.clientX;
-      startY = e.clientY;
-      el.classList.add("touch-drag-pending");
-      el.addEventListener("pointermove", onMove);
-      el.addEventListener("pointerup", onUp);
-      el.addEventListener("pointercancel", onCancel);
-      timer = setTimeout(() => {
-        timer = null;
-        cleanup();
-        if (confirm("해당 가능 시간을 삭제하시겠습니까?")) onDelete();
-      }, LONG_PRESS_MS);
-    });
-  }
-
   /* ---------------- Grid rendering ---------------- */
   // options: { blocks: [{day, startSlot, duration, label, loc, sublabel, color, excluded, onDelete, onMove}],
   //   travelBlocks: [{day, startSlot, duration, label, type: "travel" | "break"}] }
@@ -908,7 +858,6 @@
           b.onDelete();
         });
         block.appendChild(delBtn);
-        attachLongPressDelete(block, b.onDelete);
       }
       if (!b.excluded && b.onClick) {
         block.style.cursor = "pointer";
@@ -2907,9 +2856,11 @@
     showToast("지점이 제거되었습니다", "info");
   }
 
-  // 좌클릭 시 뜨는 메뉴: 지점 추가하기(이 시간대만 다른 지점에서도 배정 가능해짐 — 회원의
-  // 기본 지점과 이미 추가된 지점을 뺀 나머지 지점을 바로 항목으로 보여준다), 이미
-  // 추가해둔 지점 제거하기.
+  // 좌클릭(터치는 탭) 시 뜨는 메뉴: 지점 추가하기(이 시간대만 다른 지점에서도 배정 가능해짐 —
+  // 회원의 기본 지점과 이미 추가된 지점을 뺀 나머지 지점을 바로 항목으로 보여준다), 이미
+  // 추가해둔 지점 제거하기, 그리고 맨 아래에 구분선과 함께 이 가능 시간 자체를 삭제하는 항목을
+  // danger 스타일로 넣는다 — 터치 기기는 마우스 호버(×버튼)를 쓸 수 없으므로 이 메뉴가 유일한
+  // 삭제 경로이고, PC에서도 호버 ×버튼과 별개로 똑같이 쓸 수 있다.
   function buildRequestRunMenu(member, run, x, y) {
     const excluded = new Set((member.locationIds || []).concat(requestRunExtraLocationIds(run)));
     const addableLocations = state.locations.filter(l => !excluded.has(l.id));
@@ -2925,6 +2876,8 @@
         items.push({ label: loc.name + " 제거하기", danger: true, onClick: () => removeExtraLocationFromRun(run, id) });
       });
     }
+    items.push({ separator: true });
+    items.push({ label: "가능 시간 삭제하기", danger: true, onClick: () => removeRequests(run.reqs.map(r => r.id)) });
     return items;
   }
 
