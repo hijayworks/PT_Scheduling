@@ -109,6 +109,31 @@
   let generationCancelRequested = false;
   class GenerationCancelledError extends Error {}
 
+  // 후보 생성 중(수 초~수 분) 모바일 화면이 꺼져 진행이 중단된 것처럼 보이지 않도록 Wake Lock을
+  // 건다. 브라우저가 탭 전환/화면 잠금 시 잠금을 자동 해제하므로, 다시 보이는 시점에
+  // generationInProgress가 여전히 true면 재요청한다. 미지원 브라우저에서는 조용히 무시한다.
+  let wakeLockSentinel = null;
+  async function acquireWakeLock() {
+    if (!("wakeLock" in navigator)) return;
+    try {
+      wakeLockSentinel = await navigator.wakeLock.request("screen");
+    } catch (err) {
+      wakeLockSentinel = null;
+    }
+  }
+  async function releaseWakeLock() {
+    const sentinel = wakeLockSentinel;
+    wakeLockSentinel = null;
+    if (sentinel) {
+      try { await sentinel.release(); } catch (err) {}
+    }
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && generationInProgress) {
+      acquireWakeLock();
+    }
+  });
+
   // "수업 스케줄 생성3"이 생성1·생성2의 엔진 함수(greedyAssign, runSchedule2Pipeline 등)를
   // 코드 복제 없이 그대로 재사용하기 위한 장치. 그 엔진들은 "미배정 회원"/"1회 제한 회원" 목록을
   // state.excludedMemberIds(2)/state.onceLimitedMemberIds(2)에서 직접(파라미터가 아니라) 읽는
@@ -210,16 +235,33 @@
           });
         }
       });
-      canvas.toBlob(blob => {
+      canvas.toBlob(async blob => {
         if (!blob) {
           showToast("이미지 저장에 실패했습니다.", "error");
           return;
         }
+        const dateLabel = new Date().toISOString().slice(0, 10);
+        const filename = title.replace(/[\\/:*?"<>|]/g, "") + "_" + dateLabel + ".png";
+
+        // 아이폰 Safari는 <a download>로 저장하면 "사진" 앱이 아닌 "파일" 앱으로 저장된다.
+        // navigator.share로 이미지를 공유하면 공유 시트에 "이미지 저장" 항목이 뜨고,
+        // 이를 선택하면 사진 앱에 저장되므로 지원되는 환경에서는 이 방식을 우선 사용한다.
+        const file = new File([blob], filename, { type: "image/png" });
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          try {
+            await navigator.share({ files: [file] });
+            showToast("공유 시트에서 '이미지 저장'을 선택하면 사진 앱에 저장됩니다", "success");
+            return;
+          } catch (err) {
+            if (err && err.name === "AbortError") return; // 사용자가 공유 취소
+            // 공유 실패 시 아래 다운로드 방식으로 대체
+          }
+        }
+
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        const dateLabel = new Date().toISOString().slice(0, 10);
         a.href = url;
-        a.download = title.replace(/[\\/:*?"<>|]/g, "") + "_" + dateLabel + ".png";
+        a.download = filename;
         document.body.appendChild(a);
         a.click();
         a.remove();
@@ -514,6 +556,119 @@
   let draggingValidator = null;
   let draggingSourceContainer = null;
 
+  // 모바일 등 터치 환경에는 네이티브 HTML5 드래그(draggable/dragstart)가 아예 붙지 않으므로,
+  // Pointer Events로 같은 흐름(누르고 있으면 시작 → 이동 중 미리보기 → 놓으면 커밋)을 별도
+  // 구현해 보완한다. 마우스는 이미 네이티브 드래그가 잘 동작하니 그대로 두고(pointerType이
+  // "mouse"면 바로 리턴), 터치/펜일 때만 개입한다. 스크롤과 드래그가 똑같이 "손가락으로 누르고
+  // 움직이기"라 즉시 드래그를 시작하면 목록을 내리려던 손가락까지 매번 드래그로 뺏어가므로,
+  // 일정 시간(LONG_PRESS_MS) 움직임 없이 눌려 있어야만 드래그가 시작되게 해 스크롤과 구분한다.
+  const LONG_PRESS_MS = 450;
+  const LONG_PRESS_MOVE_TOLERANCE = 10; // px - 대기 중 이만큼 움직이면 스크롤 의도로 보고 드래그 시작을 취소
+
+  // el: 드래그 가능한 블록(cal-block/cal-travel-block) 엘리먼트. container: 그 블록이 속한
+  // cal-grid(renderGrid가 그린 컨테이너) - renderGrid가 컨테이너에 심어둔 _dndHelpers(cellAtPoint·
+  // showDropPreview·clearDropPreview·clearDropTargets·paintDropTargets)를 그대로 재사용해
+  // dragover/drop 네이티브 이벤트 리스너와 동일한 판정 로직을 탄다. meta: { onMove, durationSlots,
+  // validator } - 네이티브 dragstart가 draggingMoveHandler 등에 채워 넣던 값과 동일하다.
+  function attachTouchDrag(el, container, meta) {
+    let timer = null;
+    let pointerId = null;
+    let startX = 0, startY = 0;
+    let active = false;
+
+    function findDropCell(x, y) {
+      const helpers = container._dndHelpers;
+      if (!helpers) return null;
+      const cell = helpers.cellAtPoint(x, y);
+      // elementsFromPoint는 화면 전체에서 찾으므로, 후보A/B/C처럼 여러 그리드가 동시에 떠 있을 때
+      // 다른 컨테이너의 칸이 잡히지 않도록 이 드래그를 시작한 컨테이너 소속인지 반드시 확인한다.
+      return cell && container.contains(cell) ? cell : null;
+    }
+
+    function cleanup() {
+      if (timer) { clearTimeout(timer); timer = null; }
+      pointerId = null;
+      // active(이 인스턴스가 실제로 beginDrag까지 진행한 경우)일 때만 전역 드래그 상태를 지운다.
+      // 그러지 않으면(멀티터치로 다른 블록을 동시에 누르다 이쪽이 취소되는 경우) 실제로 진행 중인
+      // 다른 드래그의 draggingMoveHandler 등을 여기서 지워버려 그 드롭이 조용히 무시될 수 있다.
+      if (active) {
+        draggingMoveHandler = null;
+        draggingValidator = null;
+        draggingDurationSlots = 1;
+        draggingSourceContainer = null;
+        const helpers = container._dndHelpers;
+        if (helpers) { helpers.clearDropPreview(); helpers.clearDropTargets(); }
+      }
+      active = false;
+      el.classList.remove("dragging", "touch-drag-pending");
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup", onUp);
+      el.removeEventListener("pointercancel", onCancel);
+    }
+
+    function beginDrag() {
+      active = true;
+      draggingMoveHandler = meta.onMove;
+      draggingDurationSlots = meta.durationSlots;
+      draggingValidator = meta.validator;
+      draggingSourceContainer = container;
+      el.classList.remove("touch-drag-pending");
+      el.classList.add("dragging");
+      const helpers = container._dndHelpers;
+      if (helpers) helpers.paintDropTargets();
+    }
+
+    function onMove(e) {
+      if (e.pointerId !== pointerId) return;
+      if (!active) {
+        const dx = e.clientX - startX, dy = e.clientY - startY;
+        if (Math.hypot(dx, dy) > LONG_PRESS_MOVE_TOLERANCE) cleanup();
+        return;
+      }
+      e.preventDefault();
+      const cell = findDropCell(e.clientX, e.clientY);
+      const helpers = container._dndHelpers;
+      if (cell) {
+        const day = parseInt(cell.dataset.day, 10);
+        const slot = parseInt(cell.dataset.slot, 10);
+        const kind = draggingValidator ? draggingValidator(day, slot).kind : "move";
+        helpers.showDropPreview(day, slot, kind);
+      } else {
+        helpers.clearDropPreview();
+      }
+    }
+
+    function onUp(e) {
+      if (e.pointerId !== pointerId) return;
+      if (!active) { cleanup(); return; }
+      const cell = findDropCell(e.clientX, e.clientY);
+      const handler = draggingMoveHandler;
+      cleanup();
+      if (cell && handler) handler(parseInt(cell.dataset.day, 10), parseInt(cell.dataset.slot, 10));
+    }
+
+    function onCancel(e) {
+      if (e.pointerId !== pointerId) return;
+      cleanup();
+    }
+
+    el.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse") return; // 마우스는 네이티브 드래그(draggable)로 처리
+      pointerId = e.pointerId;
+      startX = e.clientX;
+      startY = e.clientY;
+      el.classList.add("touch-drag-pending");
+      el.setPointerCapture(pointerId);
+      el.addEventListener("pointermove", onMove);
+      el.addEventListener("pointerup", onUp);
+      el.addEventListener("pointercancel", onCancel);
+      timer = setTimeout(() => {
+        timer = null;
+        beginDrag();
+      }, LONG_PRESS_MS);
+    });
+  }
+
   /* ---------------- Grid rendering ---------------- */
   // options: { blocks: [{day, startSlot, duration, label, loc, sublabel, color, excluded, onDelete, onMove}],
   //   travelBlocks: [{day, startSlot, duration, label, type: "travel" | "break"}] }
@@ -607,6 +762,11 @@
           clearDropPreview();
           clearDropTargets();
         });
+        attachTouchDrag(travel, container, {
+          onMove: t.onMove,
+          durationSlots: t.moveDurationSlots || durationToSlots(t.duration),
+          validator: t.canMoveTo || null
+        });
       }
       if (t.contextMenuItems) {
         travel.style.cursor = "pointer";
@@ -677,6 +837,11 @@
           draggingSourceContainer = null;
           clearDropPreview();
           clearDropTargets();
+        });
+        attachTouchDrag(block, container, {
+          onMove: b.onMove,
+          durationSlots: durationToSlots(b.duration),
+          validator: b.canMoveTo || null
         });
       }
       if (!b.excluded && b.onDelete) {
@@ -774,7 +939,7 @@
     // 이전 렌더의 리스너가 계속 쌓여 메모리가 새므로, dataset 플래그로 한 번만 붙인다. 대신
     // cellAtPoint/showDropPreview 등은 이번 렌더의 최신 클로저를 container._dndHelpers에
     // 매 렌더마다 갱신해두고, 리스너는 항상 그 최신 값을 통해서만 호출한다.
-    container._dndHelpers = { cellAtPoint, clearDropPreview, clearDropTargets, showDropPreview };
+    container._dndHelpers = { cellAtPoint, clearDropPreview, clearDropTargets, showDropPreview, paintDropTargets };
     if (!container.dataset.dndBound) {
       container.dataset.dndBound = "1";
       container.addEventListener("dragover", (e) => {
@@ -6590,6 +6755,7 @@
     cancelEl.disabled = false;
     cancelEl.textContent = "생성 취소";
 
+    await acquireWakeLock();
     try {
       const result = await generateSchedule3Async(progress => {
         const pct = Math.round(progress * 100);
@@ -6627,6 +6793,7 @@
       cancelEl.style.display = "none";
       generationInProgress = false;
       generationCancelRequested = false;
+      releaseWakeLock();
     }
   }
 
