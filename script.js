@@ -4100,6 +4100,10 @@
   // 동점인 배치를 최대 이만큼만 서로 다른 배정(서명 기준)으로 모아둔다 — 화면이 지저분해지지
   // 않게 상한을 둔다.
   const MAX_POOL_VARIANTS = 9;
+  // 후보A 다듬기(이동 횟수 vs 빈 시간 트레이드오프)에서 "이동 1번을 줄이는 대가로 받아들일
+  // 수 있는 빈 시간 증가"의 상한(분). 이보다 더 큰 빈 시간을 대가로 이동을 줄이는 배치는
+  // 채택하지 않는다 — 이동 1번의 가치를 최대 이 값만큼으로만 쳐준다는 뜻.
+  const TRAVEL_VALUE_MINUTES = 60;
   // strategyIndex별 동점 배치 풀(후보B/C). candidates[strategyIndex]는 항상 이 풀의 한 항목과
   // 같은 객체 참조를 가리킨다 — 페이저가 pool.indexOf(현재 후보)로 현재 위치를 찾기 때문이다.
   // candidateHistory와 마찬가지로 저장하지 않는 세션 한정 기록(새로고침하면 초기화).
@@ -4187,6 +4191,12 @@
         seenSig.add(sig);
         if (tied.length < MAX_POOL_VARIANTS) tied.push(cand === best ? builtCand : cand);
       });
+      // 캡에 먼저 도달하면 builtCand(best) 자신이 못 들어갈 수 있다 — best는 정의상
+      // 항상 자기 자신과 동점이므로, 페이저가 현재 위치를 찾으려면 반드시 pool에 있어야 한다.
+      if (!tied.includes(builtCand)) {
+        if (tied.length >= MAX_POOL_VARIANTS) tied.length = MAX_POOL_VARIANTS - 1;
+        tied.unshift(builtCand);
+      }
       return { builtCand, tied };
     });
 
@@ -4310,6 +4320,12 @@
         entry.confirmedIds = [...confirmedIds];
         if (tied.length < MAX_POOL_VARIANTS) tied.push(entry);
       });
+      // 캡에 먼저 도달하면 newCand 자신이 못 들어갈 수 있다 — newCand는 정의상 항상
+      // 자기 자신과 동점이므로, 페이저가 현재 위치를 찾으려면 반드시 pool에 있어야 한다.
+      if (!tied.includes(newCand)) {
+        if (tied.length >= MAX_POOL_VARIANTS) tied.length = MAX_POOL_VARIANTS - 1;
+        tied.unshift(newCand);
+      }
       candidatePools[strategyIndex] = tied;
     }
     if (prevCand) {
@@ -5471,11 +5487,23 @@
         }
         return idle;
       }
-      // (travelA, idleA)가 (travelB, idleB)보다 나은지 — 이동 횟수를 먼저 보고, 같으면 빈
-      // 시간이 더 적은 쪽을 우선한다.
+      // (travelA, idleA)가 (travelB, idleB)보다 나은지 — 이동 1번의 가치를 빈 시간
+      // TRAVEL_VALUE_MINUTES분으로 쳐서 하나의 점수로 합쳐 비교한다(이동이 줄어도 그 대가로
+      // 늘어난 빈 시간이 너무 크면 더 나은 것으로 치지 않는다).
       function isTravelIdleBetter(travelA, idleA, travelB, idleB) {
+        const scoreA = travelA * TRAVEL_VALUE_MINUTES + idleA;
+        const scoreB = travelB * TRAVEL_VALUE_MINUTES + idleB;
+        if (scoreA !== scoreB) return scoreA < scoreB;
         if (travelA !== travelB) return travelA < travelB;
         return idleA < idleB;
+      }
+      // (deltaTravel, deltaIdle) 변화가 실제로 개선인지: 이동이 늘면 무조건 거부, 이동이
+      // 그대로면 빈 시간이 줄 때만, 이동이 줄면 그 대가로 늘어난 빈 시간이 이동 1번당
+      // TRAVEL_VALUE_MINUTES분을 넘지 않을 때만 개선으로 친다.
+      function travelIdleImproves(deltaTravel, deltaIdle) {
+        if (deltaTravel > 0) return false;
+        if (deltaTravel === 0) return deltaIdle < 0;
+        return deltaIdle <= -deltaTravel * TRAVEL_VALUE_MINUTES;
       }
 
       function tryRelocateSession(node) {
@@ -5527,8 +5555,7 @@
               deltaTravel = (currentDayWithoutTravel + totalTravelCount(newChain)) - (beforeCurrentDayTravel + beforeTargetDayTravel);
               deltaIdle = (currentDayWithoutIdle + dayIdleMinutes(newChain)) - (beforeCurrentDayIdle + beforeTargetDayIdle);
             }
-            // 이동이 늘면 절대 받아들이지 않고, 이동이 그대로면 빈 시간이 줄 때만 받아들인다.
-            const improves = deltaTravel < 0 || (deltaTravel === 0 && deltaIdle < 0);
+            const improves = travelIdleImproves(deltaTravel, deltaIdle);
             if (improves && (!bestMove || isTravelIdleBetter(deltaTravel, deltaIdle, bestMove.deltaTravel, bestMove.deltaIdle))) {
               bestMove = { sameDay: day === currentDay, targetDay: day, newTargetChain: newChain, deltaTravel, deltaIdle };
             }
@@ -5604,9 +5631,7 @@
         const afterTravel = totalTravelCount(chain1) + totalTravelCount(chain2);
         const beforeIdle = dayIdleMinutes(dayChains.get(day1) || []) + dayIdleMinutes(dayChains.get(day2) || []);
         const afterIdle = dayIdleMinutes(chain1) + dayIdleMinutes(chain2);
-        // 이동이 늘면 받아들이지 않고, 이동이 그대로면 빈 시간이 줄 때만 받아들인다.
-        if (afterTravel > beforeTravel) return false;
-        if (afterTravel === beforeTravel && afterIdle >= beforeIdle) return false;
+        if (!travelIdleImproves(afterTravel - beforeTravel, afterIdle - beforeIdle)) return false;
 
         uncommit(day1, node1);
         uncommit(day2, node2);
@@ -5828,11 +5853,9 @@
           dayChains.forEach(chain => { sum += dayIdleMinutes(chain); });
           return sum;
         }
-        // 이동 1번의 "무게"를 빈 시간 240분(4시간)과 같게 쳐서 비용을 하나의 숫자로 합친다 —
-        // 이동이 훨씬 더 중요하지만, 너무 크게 잡으면 온도 스케일과 안 맞아 이동이 늘어나는
-        // 이동은 사실상 전부 거부돼버려 담금질의 의미(가끔 나빠지는 이동도 받아들이기)가
-        // 없어진다.
-        const SA_TRAVEL_WEIGHT = 240;
+        // 이동 1번의 "무게"를 TRAVEL_VALUE_MINUTES분과 같게 쳐서 비용을 하나의 숫자로
+        // 합친다 — 이동 1번을 줄이는 대가로 이보다 더 큰 빈 시간이 필요하면 손해로 친다.
+        const SA_TRAVEL_WEIGHT = TRAVEL_VALUE_MINUTES;
 
         function pickRandomNode(randomFn) {
           const all = Array.from(dayChains.values()).flat();
@@ -5980,7 +6003,12 @@
           if (applied) {
             const curTravel = saTotalTravel();
             const curIdle = saTotalIdle();
-            if (curTravel < bestTravelSA || (curTravel === bestTravelSA && curIdle < bestIdleSA)) {
+            // "지금까지 최선"도 이동-빈 시간 트레이드오프에 같은 상한을 적용해 비교한다 —
+            // 안 그러면 담금질이 잠깐 받아들인, 이동은 줄었지만 빈 시간이 과도하게 늘어난
+            // 상태가 최종 결과로 굳어버릴 수 있다.
+            const curScore = curTravel * TRAVEL_VALUE_MINUTES + curIdle;
+            const bestScore = bestTravelSA * TRAVEL_VALUE_MINUTES + bestIdleSA;
+            if (curScore < bestScore || (curScore === bestScore && curTravel < bestTravelSA)) {
               bestTravelSA = curTravel;
               bestIdleSA = curIdle;
               bestSnapshotSA = new Map(dayChains);
@@ -6014,7 +6042,7 @@
           if (tryRelocateSession(node)) { improvedInPass = true; continue; }
           // 빈 자리로 바로 옮길 수 없으면, 3자 연쇄 재배치(자리를 내주고 그 사람은 다른
           // 자리로 보내는 식)로도 개선이 되는지 마지막으로 확인한다.
-          if (tryEjectChainMove(node, (dt, di) => dt < 0 || (dt === 0 && di < 0))) improvedInPass = true;
+          if (tryEjectChainMove(node, travelIdleImproves)) improvedInPass = true;
         }
         if (now() >= POLISH_DEADLINE) break;
         // 맞바꾸기: 모든 (서로 다른 요일의) 세션 쌍을 무작위 순서로 훑으며 시도한다.
@@ -6035,7 +6063,7 @@
         // 대신 태워보는 조합도 개선이 되는지 확인한다(trySessionCountSwap 주석 참고).
         for (let attempt = 0; attempt < 60 && now() < POLISH_DEADLINE; attempt++) {
           await maybeYield();
-          if (trySessionCountSwap(relocateRandomFn, (dt, di) => dt < 0 || (dt === 0 && di < 0))) improvedInPass = true;
+          if (trySessionCountSwap(relocateRandomFn, travelIdleImproves)) improvedInPass = true;
         }
       }
 
@@ -6106,10 +6134,18 @@
     }
     if (a.assigned.length !== b.assigned.length) return a.assigned.length > b.assigned.length;
     const travelCountA = totalTravelCount(a.assigned), travelCountB = totalTravelCount(b.assigned);
-    if (travelCountA !== travelCountB) return travelCountA < travelCountB;
+    const idleA = schedule2TotalIdleMinutes(a.assigned), idleB = schedule2TotalIdleMinutes(b.assigned);
+    if (travelCountA !== travelCountB) {
+      // 이동 횟수가 다르면 무조건 이동이 적은 쪽을 이기게 하지 않고, 이동 1번의 가치를
+      // 빈 시간 TRAVEL_VALUE_MINUTES분으로 쳐서 하나의 점수로 합쳐 비교한다 — 이동을
+      // 줄이는 대가로 늘어난 빈 시간이 그보다 크면 오히려 더 나쁜 것으로 친다.
+      const netA = travelCountA * TRAVEL_VALUE_MINUTES + idleA;
+      const netB = travelCountB * TRAVEL_VALUE_MINUTES + idleB;
+      if (netA !== netB) return netA < netB;
+    }
     const travelMinA = totalTravelMinutes(a.assigned), travelMinB = totalTravelMinutes(b.assigned);
     if (travelMinA !== travelMinB) return travelMinA < travelMinB;
-    return schedule2TotalIdleMinutes(a.assigned) < schedule2TotalIdleMinutes(b.assigned);
+    return idleA < idleB;
   }
 
   // isSchedule2ResultBetter 중 앞 두 기준(미배정 수 → 수업 수)만으로 a가 b보다 나은지 본다.
@@ -6387,6 +6423,13 @@
       seenTieSig.add(sig);
       if (tied.length < MAX_POOL_VARIANTS) tied.push(sig === bestSig ? bestPolished : cand);
     });
+    // 위 루프는 캡(MAX_POOL_VARIANTS)에 먼저 도달하면 bestPolished 자신의 서명이
+    // 뒤늦게 나와도 못 들어갈 수 있다. bestPolished는 정의상 항상 자기 자신과 동점이므로
+    // pool에 반드시 포함되어야 페이저가 현재 위치(pool.indexOf(result))를 찾을 수 있다.
+    if (!tied.includes(bestPolished)) {
+      if (tied.length >= MAX_POOL_VARIANTS) tied.length = MAX_POOL_VARIANTS - 1;
+      tied.unshift(bestPolished);
+    }
     return { result: bestPolished, pool: tied };
   }
 
@@ -7193,7 +7236,14 @@
       // 은 "풀을 건드리지 않는다"는 신호).
       function pickCandidateASlot(prev, freshResult, freshPool) {
         const newIsBetter = !prev || isSchedule2ResultBetter(freshResult, prev);
-        if (newIsBetter) return { candidate: freshResult, pool: freshPool || [] };
+        if (newIsBetter) {
+          const pool = freshPool || [];
+          if (!pool.includes(freshResult)) {
+            if (pool.length >= MAX_POOL_VARIANTS) pool.length = MAX_POOL_VARIANTS - 1;
+            pool.unshift(freshResult);
+          }
+          return { candidate: freshResult, pool };
+        }
         const newIsWorse = prev && isSchedule2ResultBetter(prev, freshResult);
         if (!newIsWorse) {
           const prevSig = schedule2Signature(prev);
