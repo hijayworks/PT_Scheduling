@@ -5961,8 +5961,18 @@
         }
 
         const saRandomFn = mulberry32(552233 + seedOffset);
-        let temperature = 200;
-        const COOLING_RATE = 0.999;
+        // 온도를 반복 횟수가 아니라 "SA 예산 중 실제로 흐른 시간의 비율"로 낮춘다. 반복
+        // 한 번마다 곱하는 방식(예전 COOLING_RATE)은 느린 기기(특히 모바일)에서 같은
+        // 시간 동안 반복 횟수 자체가 훨씬 적게 돌기 때문에, 마감 시각이 됐을 때 온도가
+        // 전혀 식지 않은 채(뜨거운/무작위에 가까운 상태로) 잘려나가 결과 품질이 기기
+        // 성능에 따라 들쭉날쭉해지는 문제가 있었다(실제로 확인됨 — 인위적으로 반복 한
+        // 번당 처리 시간을 늘려보니 온도가 200에서 거의 안 식은 채 마감돼 빈 시간이
+        // 눈에 띄게 나빠졌다). 경과 시간 비율로 식히면 반복 횟수와 무관하게 마감
+        // 시각에는 항상 최저 온도(1) 근처까지 식어 있어, 느린 기기도 답이 튀지 않는다.
+        const SA_START_TEMP = 200, SA_END_TEMP = 1;
+        const saStart = now();
+        const saDuration = Math.max(1, SA_DEADLINE - saStart);
+        let temperature = SA_START_TEMP;
         let bestSnapshotSA = new Map(dayChains);
         let bestTravelSA = saTotalTravel();
         let bestIdleSA = saTotalIdle();
@@ -5970,6 +5980,8 @@
         while (now() < SA_DEADLINE) {
           await maybeYield();
           iter++;
+          const elapsedFrac = Math.min(1, (now() - saStart) / saDuration);
+          temperature = SA_START_TEMP * Math.pow(SA_END_TEMP / SA_START_TEMP, elapsedFrac);
           // 20% 확률로는 3자 연쇄 재배치(tryEjectChainMove)를 시도한다 — 자리 하나만 옮기거나
           // 두 회원만 맞바꾸는 것보다 훨씬 비싸지만(체인이 이어질 때까지 여러 자리를 훑어야
           // 함), 그것만으로는 절대 못 찾는 3자 이상 조합을 찾는 유일한 방법이라 일정 비율을
@@ -6014,7 +6026,6 @@
               bestSnapshotSA = new Map(dayChains);
             }
           }
-          temperature = Math.max(1, temperature * COOLING_RATE);
         }
         dayChains.forEach((chain, day) => chain.forEach(node => uncommit(day, node)));
         bestSnapshotSA.forEach((chain, day) => {
