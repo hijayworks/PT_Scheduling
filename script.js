@@ -6266,8 +6266,6 @@
         }
       });
     let evaluated = primary.evaluated, best = primary.best, bestOrder = primary.bestOrder, bestSeedOffset = primary.bestSeedOffset;
-    console.log("[PT-DEBUG] group", groupIndex, "primary base:", best ? { unassigned: best.unassignedMembers.length, sessions: best.assigned.length } : null,
-      "targetFloor:", targetFloor ? { unassigned: targetFloor.unassignedMembers.length, sessions: targetFloor.assigned.length } : null);
 
     // 카드 간 목표 공유: 앞서 끝난 카드가 이미 도달한 수준(targetFloor)에 기본 골격 탐색으로는
     // 못 미쳤다면, 그 수준이 이 데이터에서 실제로 달성 가능하다는 뜻이므로 곧장 다듬기로
@@ -6278,7 +6276,6 @@
     // 결과를 찾으면 그 골격으로 완전히 갈아탄다. 그래도 못 미치면 그 시점까지 찾은 가장 좋은
     // 결과로 넘어간다 — 최댓값이 이 그룹의 시드 공간에서 사실상 못 닿는 경우도 있을 수 있어서다.
     if (targetFloor && best && floorIsBetter(targetFloor, best)) {
-      console.log("[PT-DEBUG] group", groupIndex, "목표 미달 - 대안 골격 탐색 시작");
       const extraDeadline = performance.now() + TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS;
       let altRestartCount = 0;
       while (performance.now() < extraDeadline && floorIsBetter(targetFloor, best)) {
@@ -6298,10 +6295,6 @@
             }
           });
         const improved = alt.best && isSchedule2ResultBetter(alt.best, best);
-        console.log("[PT-DEBUG] group", groupIndex, "대안 골격 #" + altRestartCount,
-          "평가수:", alt.evaluated.length, "budget:", Math.round(altBudget) + "ms",
-          "결과:", alt.best ? { unassigned: alt.best.unassignedMembers.length, sessions: alt.best.assigned.length } : null,
-          improved ? "(채택)" : "(미채택)");
         if (improved) {
           eligibleReqs = altReqs;
           reqsByDay = altGrouping.reqsByDay;
@@ -6312,8 +6305,6 @@
           bestSeedOffset = alt.bestSeedOffset;
         }
       }
-      console.log("[PT-DEBUG] group", groupIndex, "대안 골격 탐색 종료 - 시도", altRestartCount, "회, 최종:",
-        { unassigned: best.unassignedMembers.length, sessions: best.assigned.length });
     }
     if (!bestOrder) return null;
 
@@ -6382,9 +6373,6 @@
         checkGenerationCancelled();
       }
     }
-    console.log("[PT-DEBUG] group", groupIndex, "다듬기 전:", { unassigned: best.unassignedMembers.length, sessions: best.assigned.length },
-      "다듬기 후:", { unassigned: bestPolished.unassignedMembers.length, sessions: bestPolished.assigned.length },
-      bestPolished.assigned.length < best.assigned.length ? "!! 수업 건수 감소 !!" : "");
     // 배치 페이저용: bestPolished와 완전히 동점(미배정 → 수업 수 → 이동 횟수 → 이동 시간 →
     // 빈 시간 전부 동일)인 다른 시도를 서명 중복 제거해 최대 MAX_POOL_VARIANTS개까지 모은다.
     // bestPolished 자신과 서명이 같은 자리는 (같은 배정을 만든 다른 시도 객체가 아니라)
@@ -6424,9 +6412,6 @@
       const card = await runSchedule2RestartGroup(eligibleReqs, groupSeed, g,
         p => { if (onProgress) onProgress(groupStart + p / SCHEDULE2_CARD_COUNT); }, targetFloor);
       cards.push(card || { result: { assigned: [], unassignedMembers: [] }, pool: [] });
-      console.log("[PT-DEBUG] === 카드 A-" + (g + 1) + " 최종 ===",
-        card && card.result ? { unassigned: card.result.unassignedMembers.length, sessions: card.result.assigned.length } : null,
-        "풀 크기:", card ? card.pool.length : 0);
       if (card && card.result && floorIsBetter(card.result, targetFloor)) targetFloor = card.result;
     }
     if (onProgress) onProgress(1);
@@ -7234,12 +7219,6 @@
           const picked = pickCandidateASlot(prev, fresh, result.candidateAPools && result.candidateAPools[i]);
           candidateAList.push(picked.candidate);
           if (picked.pool !== null) candidateAPools[i] = picked.pool;
-          console.log("[PT-DEBUG] === 카드 A-" + (i + 1) + " 재생성 판정 ===",
-            "prev:", prev ? { sessions: prev.assigned.length, unassigned: prev.unassignedMembers.length } : null,
-            "fresh:", { sessions: fresh.assigned.length, unassigned: fresh.unassignedMembers.length },
-            "선택:", picked.candidate === fresh ? "fresh" : "prev",
-            "최종 풀 크기:", candidateAPools[i] ? candidateAPools[i].length : 0,
-            "풀에 선택된 후보 포함?:", candidateAPools[i] ? candidateAPools[i].includes(picked.candidate) : "N/A(풀 미변경)");
         } else {
           candidateAList.push(prev);
         }
