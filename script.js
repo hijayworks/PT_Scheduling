@@ -6112,6 +6112,18 @@
     return schedule2TotalIdleMinutes(a.assigned) < schedule2TotalIdleMinutes(b.assigned);
   }
 
+  // isSchedule2ResultBetter 중 앞 두 기준(미배정 수 → 수업 수)만으로 a가 b보다 나은지 본다.
+  // 후보A-1/A-2/A-3(runSchedule2RestartGroup)가 "카드 간 목표 공유"에 쓴다 — 이동 횟수 등
+  // 나머지 지표는 카드마다 골격 자체가 달라 서로 비교할 대상이 아니기 때문에 뺀다. b가 없으면
+  // (아직 어떤 카드도 끝나지 않았으면) 항상 true.
+  function floorIsBetter(a, b) {
+    if (!b) return true;
+    if (a.unassignedMembers.length !== b.unassignedMembers.length) {
+      return a.unassignedMembers.length < b.unassignedMembers.length;
+    }
+    return a.assigned.length > b.assigned.length;
+  }
+
   // 다듬기(5~9단계, 특히 담금질 기법)는 "미배정 수·수업 수는 그대로 둔 채 이동·빈 시간만
   // 줄이는" 국소 탐색이라, 다듬은 뒤 결과가 실제로 얼마나 좋아지는지는 다듬기 전 배치의
   // 구조(누가 어느 요일에 배정됐는지)에 따라 달라진다 — 다듬기 전 지표(미배정·수업 수·이동
@@ -6153,60 +6165,155 @@
   const PER_GROUP_MAX_POLISH_ATTEMPTS = 48; // 요일 순서와 담금질 시드 재시작을 합쳐 그룹당 최대 이만큼만 다듬어본다
   const PER_GROUP_TOTAL_POLISH_BUDGET_MS = 420000;
   const MIN_POLISH_BUDGET_MS = 6000; // 시도가 여럿이어도 담금질이 의미 있으려면 한 시도당 최소한 이 정도는 필요하다
+  // 카드 간 목표 공유: 이 카드가, 앞서 끝난 카드가 이미 도달한 "미배정 없음 → 수업 횟수"
+  // 수준(targetFloor)에 정규 탐색 예산(PER_GROUP_SEARCH_DEADLINE_MS) 안에 못 미치면, 그
+  // 수준이 이 데이터에서 실제로 달성 가능하다는 뜻이므로 곧장 다듬기로 넘어가지 않고 더
+  // 탐색해본다(실제로 A-1은 수업 30건에 닿았는데 A-2·A-3는 서로 다른 시드 탓에 29건에
+  // 머무는 사례로 확인됨). 그래도 못 미치면 그 시점까지 찾은 가장 좋은 결과로 넘어간다 —
+  // 최댓값이 이 그룹의 시드 공간에서 사실상 못 닿는 경우도 있을 수 있어서다.
+  //
+  // 그리디 1·2단계의 지터(stage1RandomFn)는 "동점일 때만"(runSchedule2Pipeline 근처 주석
+  // 참고) 신청 순서를 바꾼다 — 즉 요일 순서만 더 섞어서는 신청 배열 자체의 순서가 30건
+  // 배치에 필요한 순서가 아니면 아무리 시도해도 못 찾는다(실제로 요일 순서만 늘려서는 이
+  // 문제가 해결되지 않는 사례로 확인됨). 그래서 목표에 못 미치면 신청 배열 자체를 통째로
+  // 다시 섞은 "대안 골격"(alt base)을 여러 번 새로 만들어, 그 골격 안에서 짧게 요일 순서를
+  // 탐색해보고 더 나은 결과를 찾으면 그 골격으로 완전히 갈아탄다.
+  const TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = 90000;
+  const TARGET_MATCH_ALT_BASE_BUDGET_MS = 8000; // 대안 골격 하나에 쓸 수 있는 시간 상한
+  const TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40; // 대안 골격 하나에서 시도할 무작위 요일 순서 수
 
   // 재시작 그룹 하나를 처음부터 끝까지(요일 순서 탐색 → 다듬기) 돌려 그 그룹의 최종 결과
   // 하나를 반환한다. groupSeed가 요일 순서 무작위 셔플을 결정하고, groupIndex는 다듬기
   // 단계의 담금질 시드가 그룹끼리 겹치지 않도록 seedOffset의 밑변을 벌려준다.
-  async function runSchedule2RestartGroup(eligibleReqsMaster, groupSeed, groupIndex, onProgress) {
+  async function runSchedule2RestartGroup(eligibleReqsMaster, groupSeed, groupIndex, onProgress, targetFloor) {
     const randomFn = mulberry32(groupSeed);
-    // 회원 스케줄을 지우고 다시 추가하면(사용자가 "같은 스케줄을 추가하고 후보 생성하기를
-    // 눌러도 항상 같은 후보가 나오는 게 아니다"라고 확인한 바로 그 상황) 신청 배열 자체의
-    // 순서가 달라진다 — 그리디 1·2단계가 "동점인 신청들 중 배열에서 먼저 나온 것을 우선
-    // 채택"하는 지점들이 있어(예: 요일 안에서 하루에 배정 가능한 회원 후보를 훑는 순서),
-    // 요일 순서·지터만 그룹마다 다르게 줘서는 이 경로로만 나오는 배치(실제로 골격 자체가
-    // 크게 다른 배치)를 못 찾는다. 그룹마다 신청 배열 자체의 순서도 섞어, 스케줄을 지우고
-    // 다시 추가했을 때와 같은 효과를 재현한다.
-    const eligibleReqs = shuffled(eligibleReqsMaster, randomFn);
-    const reqsByDay = new Map();
-    DAYS.forEach((_, d) => reqsByDay.set(d, []));
-    eligibleReqs.forEach(r => reqsByDay.get(r.day).push(r));
-    const daysWithReqs = Array.from(reqsByDay.keys()).filter(d => reqsByDay.get(d).length > 0);
 
-    const memberCountOf = day => new Set(reqsByDay.get(day).map(r => r.memberId)).size;
-    const leastFirst = daysWithReqs.slice().sort((a, b) => memberCountOf(a) - memberCountOf(b));
-    const mostFirst = daysWithReqs.slice().sort((a, b) => memberCountOf(b) - memberCountOf(a));
-    const ascending = daysWithReqs.slice().sort((a, b) => a - b);
-    const descending = daysWithReqs.slice().sort((a, b) => b - a);
-    const dayOrdersToTry = [leastFirst, mostFirst, ascending, descending];
-    for (let i = 0; i < PER_GROUP_DAY_ORDER_SHUFFLES; i++) dayOrdersToTry.push(shuffled(daysWithReqs, randomFn));
+    // 신청 배열 순서(base) 하나를 요일별로 묶는다.
+    function groupByDay(reqs) {
+      const reqsByDay = new Map();
+      DAYS.forEach((_, d) => reqsByDay.set(d, []));
+      reqs.forEach(r => reqsByDay.get(r.day).push(r));
+      const daysWithReqs = Array.from(reqsByDay.keys()).filter(d => reqsByDay.get(d).length > 0);
+      return { reqsByDay, daysWithReqs };
+    }
+    function fixedDayOrders(daysWithReqs, reqsByDay) {
+      const memberCountOf = day => new Set(reqsByDay.get(day).map(r => r.memberId)).size;
+      return [
+        daysWithReqs.slice().sort((a, b) => memberCountOf(a) - memberCountOf(b)),
+        daysWithReqs.slice().sort((a, b) => memberCountOf(b) - memberCountOf(a)),
+        daysWithReqs.slice().sort((a, b) => a - b),
+        daysWithReqs.slice().sort((a, b) => b - a)
+      ];
+    }
+    // base(신청 배열 순서) 하나를 고정해두고, 그 안에서 요일 순서를 최대한 탐색해 이 base의
+    // 최선 결과를 찾는다. 회원·신청이 아주 많으면 요일 순서 후보 하나를 시도하는 데도 시간이
+    // 걸리므로(복구 단계 포함), 시간 예산을 둔다 — 예산을 넘기면 그때까지 찾은 가장 좋은
+    // 순서로 넘어간다. seedBase는 그리디 1·2단계 지터 시드의 밑변(호출하는 쪽에서 base·시도
+    // 끼리 겹치지 않도록 충분히 벌려서 넘긴다).
+    async function searchWithinBase(reqs, reqsByDay, daysWithReqs, shuffleCount, deadlineMs, seedBase, onEval) {
+      const dayOrdersToTry = fixedDayOrders(daysWithReqs, reqsByDay);
+      for (let k = 0; k < shuffleCount; k++) dayOrdersToTry.push(shuffled(daysWithReqs, randomFn));
+      const deadline = performance.now() + deadlineMs;
+      let best = null, bestOrder = null, bestSeedOffset = null;
+      const evaluated = [];
+      for (let i = 0; i < dayOrdersToTry.length; i++) {
+        // seedOffset을 안 넘기면(undefined→0) 그리디 1·2단계의 지터(stage1RandomFn, 하루 안에서
+        // 동점인 회원들 중 누구를 먼저 배정할지 정하는 값)가 요일 순서·그룹과 무관하게 항상 같은
+        // 고정 시드로 고정돼버린다 — 그러면 그룹마다 "요일을 처리하는 순서"만 다를 뿐, "그 요일
+        // 안에서 동점인 회원 중 누구를 고를지"는 항상 같아서, 실제로는 한두 명만 자리가 바뀐
+        // 정도의 배치만 나온다(실제로 이 문제로 확인됨 — 페이저에 뜬 배치들이 골격은 거의 같고
+        // 소수만 자리를 바꾼 수준이었음). base·시도 번호로 벌린 시드를 넘겨, base마다는 물론
+        // 한 base 안의 요일 순서 시도끼리도 하루 안 배정이 서로 다르게 갈리도록 한다.
+        const seedOffset = seedBase + i;
+        const result = await runSchedule2Pipeline(
+          reqs, reqsByDay, daysWithReqs, dayOrdersToTry[i], true, false, undefined, seedOffset);
+        // seedOffset을 결과와 함께 기억해둔다 — 다듬기 단계가 이 요일 순서를 다시 쓸 때 시드까지
+        // 그대로 재현해야, 그리디 1·2단계의 동점 처리가 달라져 수업 건수 자체가 바뀌는 일 없이
+        // "이 결과"를 다듬을 수 있다(아래 다듬기 후보 구성부 참고 — seedOffset을 안 넘겨주면
+        // 다듬기가 매번 새 시드로 그리디 1·2단계를 다시 돌려, 탐색에서 찾은 최고 수업 건수를
+        // 다듬은 결과가 재현하지 못하고 잃어버리는 문제가 있었다: 실제로 탐색 단계에서 30건을
+        // 찾고도 다듬은 최종 결과는 29건으로 떨어지는 사례로 확인됨).
+        evaluated.push({ order: dayOrdersToTry[i], seedOffset, result });
+        if (!best || isSchedule2ResultBetter(result, best)) {
+          best = result;
+          bestOrder = dayOrdersToTry[i];
+          bestSeedOffset = seedOffset;
+        }
+        if (onEval) await onEval();
+        if (performance.now() >= deadline) break;
+      }
+      return { evaluated, best, bestOrder, bestSeedOffset };
+    }
 
-    // 회원·신청이 아주 많으면 요일 순서 후보 하나를 시도하는 데도 시간이 걸리므로(복구
-    // 단계 포함), 전체 탐색에 시간 예산을 둔다 — 예산을 넘기면 그때까지 찾은 가장 좋은
-    // 순서로 넘어간다.
-    const searchDeadline = performance.now() + PER_GROUP_SEARCH_DEADLINE_MS;
-    let best = null, bestOrder = null;
-    const evaluated = [];
-    for (let i = 0; i < dayOrdersToTry.length; i++) {
-      // seedOffset을 안 넘기면(undefined→0) 그리디 1·2단계의 지터(stage1RandomFn, 하루 안에서
-      // 동점인 회원들 중 누구를 먼저 배정할지 정하는 값)가 요일 순서·그룹과 무관하게 항상 같은
-      // 고정 시드로 고정돼버린다 — 그러면 그룹마다 "요일을 처리하는 순서"만 다를 뿐, "그 요일
-      // 안에서 동점인 회원 중 누구를 고를지"는 항상 같아서, 실제로는 한두 명만 자리가 바뀐
-      // 정도의 배치만 나온다(실제로 이 문제로 확인됨 — 페이저에 뜬 배치들이 골격은 거의 같고
-      // 소수만 자리를 바꾼 수준이었음). 그룹·시도 번호로 벌린 시드를 넘겨, 그룹마다는 물론
-      // 한 그룹 안의 요일 순서 시도끼리도 하루 안 배정이 서로 다르게 갈리도록 한다.
-      const result = await runSchedule2Pipeline(
-        eligibleReqs, reqsByDay, daysWithReqs, dayOrdersToTry[i], true, false, undefined, groupIndex * 5000000 + i);
-      evaluated.push({ order: dayOrdersToTry[i], result });
-      if (!best || isSchedule2ResultBetter(result, best)) {
-        best = result;
-        bestOrder = dayOrdersToTry[i];
+    // ---- 기본 골격(primary base): 카드 고유의 시드로 신청 배열을 한 번 섞는다(사용자가
+    // "같은 스케줄을 추가하고 후보 생성하기를 눌러도 항상 같은 후보가 나오는 게 아니다"라고
+    // 확인한 바로 그 상황을 재현 — 그리디 1·2단계가 "동점인 신청들 중 배열에서 먼저 나온
+    // 것을 우선 채택"하는 지점들이 있어, 요일 순서·지터만 그룹마다 다르게 줘서는 이 경로로만
+    // 나오는 배치(골격 자체가 크게 다른 배치)를 못 찾는다). ----
+    let eligibleReqs = shuffled(eligibleReqsMaster, randomFn);
+    let grouping = groupByDay(eligibleReqs);
+    let reqsByDay = grouping.reqsByDay, daysWithReqs = grouping.daysWithReqs;
+
+    let progressMax = 0;
+    const primary = await searchWithinBase(
+      eligibleReqs, reqsByDay, daysWithReqs, PER_GROUP_DAY_ORDER_SHUFFLES, PER_GROUP_SEARCH_DEADLINE_MS,
+      groupIndex * 5000000, async () => {
+        if (onProgress) {
+          progressMax = Math.min(0.55, progressMax + 0.55 / (PER_GROUP_DAY_ORDER_SHUFFLES + 4));
+          onProgress(progressMax);
+          await yieldToUI();
+          checkGenerationCancelled();
+        }
+      });
+    let evaluated = primary.evaluated, best = primary.best, bestOrder = primary.bestOrder, bestSeedOffset = primary.bestSeedOffset;
+    console.log("[PT-DEBUG] group", groupIndex, "primary base:", best ? { unassigned: best.unassignedMembers.length, sessions: best.assigned.length } : null,
+      "targetFloor:", targetFloor ? { unassigned: targetFloor.unassignedMembers.length, sessions: targetFloor.assigned.length } : null);
+
+    // 카드 간 목표 공유: 앞서 끝난 카드가 이미 도달한 수준(targetFloor)에 기본 골격 탐색으로는
+    // 못 미쳤다면, 그 수준이 이 데이터에서 실제로 달성 가능하다는 뜻이므로 곧장 다듬기로
+    // 넘어가지 않고 더 탐색해본다. 그리디 1·2단계의 지터는 "동점일 때만" 신청 순서를 바꾸므로
+    // (runSchedule2Pipeline 근처 주석 참고), 기본 골격 안에서 요일 순서만 더 섞어서는 신청
+    // 배열 자체의 순서가 그 수준에 필요한 순서가 아닌 경우 못 찾는다 — 그래서 신청 배열
+    // 자체를 통째로 다시 섞은 "대안 골격"을 여러 번 새로 만들어(짧게) 탐색해보고, 더 나은
+    // 결과를 찾으면 그 골격으로 완전히 갈아탄다. 그래도 못 미치면 그 시점까지 찾은 가장 좋은
+    // 결과로 넘어간다 — 최댓값이 이 그룹의 시드 공간에서 사실상 못 닿는 경우도 있을 수 있어서다.
+    if (targetFloor && best && floorIsBetter(targetFloor, best)) {
+      console.log("[PT-DEBUG] group", groupIndex, "목표 미달 - 대안 골격 탐색 시작");
+      const extraDeadline = performance.now() + TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS;
+      let altRestartCount = 0;
+      while (performance.now() < extraDeadline && floorIsBetter(targetFloor, best)) {
+        altRestartCount++;
+        const altReqs = shuffled(eligibleReqsMaster, randomFn);
+        const altGrouping = groupByDay(altReqs);
+        const altBudget = Math.min(TARGET_MATCH_ALT_BASE_BUDGET_MS, Math.max(0, extraDeadline - performance.now()));
+        const alt = await searchWithinBase(
+          altReqs, altGrouping.reqsByDay, altGrouping.daysWithReqs,
+          TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES, altBudget,
+          groupIndex * 5000000 + altRestartCount * 1000000, async () => {
+            if (onProgress) {
+              progressMax = Math.min(0.549, progressMax + 0.002);
+              onProgress(progressMax);
+              await yieldToUI();
+              checkGenerationCancelled();
+            }
+          });
+        const improved = alt.best && isSchedule2ResultBetter(alt.best, best);
+        console.log("[PT-DEBUG] group", groupIndex, "대안 골격 #" + altRestartCount,
+          "평가수:", alt.evaluated.length, "budget:", Math.round(altBudget) + "ms",
+          "결과:", alt.best ? { unassigned: alt.best.unassignedMembers.length, sessions: alt.best.assigned.length } : null,
+          improved ? "(채택)" : "(미채택)");
+        if (improved) {
+          eligibleReqs = altReqs;
+          reqsByDay = altGrouping.reqsByDay;
+          daysWithReqs = altGrouping.daysWithReqs;
+          evaluated = alt.evaluated;
+          best = alt.best;
+          bestOrder = alt.bestOrder;
+          bestSeedOffset = alt.bestSeedOffset;
+        }
       }
-      if (onProgress) {
-        onProgress((i + 1) / (dayOrdersToTry.length + 1) * 0.55);
-        await yieldToUI();
-        checkGenerationCancelled();
-      }
-      if (performance.now() >= searchDeadline) break;
+      console.log("[PT-DEBUG] group", groupIndex, "대안 골격 탐색 종료 - 시도", altRestartCount, "회, 최종:",
+        { unassigned: best.unassignedMembers.length, sessions: best.assigned.length });
     }
     if (!bestOrder) return null;
 
@@ -6225,26 +6332,32 @@
     });
     const seenSignatures = new Set();
     const polishCandidates = [];
-    for (const { order, result } of ranked) {
+    for (const { order, seedOffset, result } of ranked) {
       const sig = schedule2Signature(result);
       if (seenSignatures.has(sig)) continue;
       seenSignatures.add(sig);
-      polishCandidates.push(order);
+      polishCandidates.push({ order, seedOffset });
       if (polishCandidates.length >= PER_GROUP_MAX_POLISH_CANDIDATES) break;
     }
-    if (polishCandidates.length === 0) polishCandidates.push(bestOrder);
+    if (polishCandidates.length === 0) polishCandidates.push({ order: bestOrder, seedOffset: bestSeedOffset });
 
     // 요일 순서 후보만으로는 부족하다 — 담금질 기법은 시드가 고정돼 있으면 매번 정확히 같은
     // 무작위 경로만 훑어보므로, 사람이 손으로 짠 배치처럼 3명 이상이 요일을 넘나들며 동시에
     // 자리를 맞바꿔야만 나오는 조합은 그 경로를 우연히 밟지 못하면 몇 번을 다시 생성해도
     // 계속 같은 결과에 머문다(실제로 이 문제로 확인됨). 그래서 각 요일 순서 후보를 서로 다른
-    // 시드로 여러 번 재시작해서 다듬어본다 — 먼저 후보마다 한 번씩(round 0)을 채우고, 그러고도
-    // PER_GROUP_MAX_POLISH_ATTEMPTS에 못 미치면 후보를 돌아가며 시드를 바꿔 재시작을 추가한다.
+    // 시드로 여러 번 재시작해서 다듬어본다 — 후보를 돌아가며 시드를 바꿔 재시작을 추가한다.
     // groupIndex * 5,000,000을 더해 다른 재시작 그룹과 담금질 시드가 겹치지 않게 한다.
-    const attempts = [];
-    for (let round = 0; attempts.length < PER_GROUP_MAX_POLISH_ATTEMPTS; round++) {
-      for (const order of polishCandidates) {
-        attempts.push({ order, seedOffset: groupIndex * 5000000 + round * 97711 });
+    //
+    // round 0(첫 바퀴)은 각 후보가 "탐색 단계에서 실제로 그 지표(수업 수 포함)를 만들어낸"
+    // 원래 seedOffset을 그대로 재사용한다 — 새 시드를 굴리면 그리디 1·2단계의 동점 처리가
+    // 달라져 같은 요일 순서라도 수업 건수 자체가 바뀔 수 있어서, round 0을 재시드해버리면
+    // 탐색 단계에서 찾은 최고 수업 건수를 다듬은 결과가 재현하지 못하고 잃어버린다(실제로
+    // 확인됨: 탐색 단계에서 30건을 찾고도 다듬은 최종 결과는 29건으로 떨어짐). round 1부터는
+    // 원래 방식대로 새 시드로 재시작해 다양성을 넓힌다.
+    const attempts = polishCandidates.map(c => ({ order: c.order, seedOffset: c.seedOffset }));
+    for (let round = 1; attempts.length < PER_GROUP_MAX_POLISH_ATTEMPTS; round++) {
+      for (const c of polishCandidates) {
+        attempts.push({ order: c.order, seedOffset: groupIndex * 5000000 + round * 97711 });
         if (attempts.length >= PER_GROUP_MAX_POLISH_ATTEMPTS) break;
       }
     }
@@ -6269,6 +6382,9 @@
         checkGenerationCancelled();
       }
     }
+    console.log("[PT-DEBUG] group", groupIndex, "다듬기 전:", { unassigned: best.unassignedMembers.length, sessions: best.assigned.length },
+      "다듬기 후:", { unassigned: bestPolished.unassignedMembers.length, sessions: bestPolished.assigned.length },
+      bestPolished.assigned.length < best.assigned.length ? "!! 수업 건수 감소 !!" : "");
     // 배치 페이저용: bestPolished와 완전히 동점(미배정 → 수업 수 → 이동 횟수 → 이동 시간 →
     // 빈 시간 전부 동일)인 다른 시도를 서명 중복 제거해 최대 MAX_POOL_VARIANTS개까지 모은다.
     // bestPolished 자신과 서명이 같은 자리는 (같은 배정을 만든 다른 시도 객체가 아니라)
@@ -6296,14 +6412,22 @@
     // 출발) — 카드끼리 동점일 필요는 없다. 각 카드는 자기 자신의 탐색(runSchedule2RestartGroup)
     // 안에서 나온 동점만 배치 페이저로 보여준다.
     const cards = [];
+    // 카드 간 목표 공유: 먼저 끝난 카드가 도달한 "미배정 없음 → 수업 횟수" 최고 수준을
+    // 기억해뒀다가 다음 카드에 넘긴다 — 못 미치는 카드가 나오면 그 카드가 더 탐색하도록
+    // runSchedule2RestartGroup의 targetFloor 처리(TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS)로 이어진다.
+    let targetFloor = null;
     for (let g = 0; g < SCHEDULE2_CARD_COUNT; g++) {
       // 카드마다 서로 다른 소수 간격으로 시드를 벌려, 요일 순서·신청 배열 순서 무작위 셔플이
       // 카드끼리 겹치지 않고 완전히 다른 골격에서 출발하게 한다.
       const groupSeed = 20260823 + g * 104729;
       const groupStart = g / SCHEDULE2_CARD_COUNT;
       const card = await runSchedule2RestartGroup(eligibleReqs, groupSeed, g,
-        p => { if (onProgress) onProgress(groupStart + p / SCHEDULE2_CARD_COUNT); });
+        p => { if (onProgress) onProgress(groupStart + p / SCHEDULE2_CARD_COUNT); }, targetFloor);
       cards.push(card || { result: { assigned: [], unassignedMembers: [] }, pool: [] });
+      console.log("[PT-DEBUG] === 카드 A-" + (g + 1) + " 최종 ===",
+        card && card.result ? { unassigned: card.result.unassignedMembers.length, sessions: card.result.assigned.length } : null,
+        "풀 크기:", card ? card.pool.length : 0);
+      if (card && card.result && floorIsBetter(card.result, targetFloor)) targetFloor = card.result;
     }
     if (onProgress) onProgress(1);
     return cards; // [{result, pool}, {result, pool}, {result, pool}]
@@ -7088,7 +7212,17 @@
         const newIsWorse = prev && isSchedule2ResultBetter(prev, freshResult);
         if (!newIsWorse) {
           const prevSig = schedule2Signature(prev);
-          return { candidate: prev, pool: (freshPool || []).map(c => schedule2Signature(c) === prevSig ? prev : c) };
+          const pool = (freshPool || []).map(c => schedule2Signature(c) === prevSig ? prev : c);
+          // freshPool이 이번 탐색에서 찾은 "다른" 동점 배치들이라 prev와 서명이 겹치는 자리가
+          // 하나도 없을 수 있다(지표는 완전히 같지만 구체적인 배치는 다른 경우) — 그러면 위
+          // map이 아무것도 못 바꿔 pool에 prev가 참조로 들어있지 않게 되고, 페이저가
+          // pool.indexOf(prev)로 현재 위치를 못 찾아 조용히 사라진다(실제로 이 문제로
+          // 확인됨). prev를 앞에 직접 추가해 항상 pool 안에 있도록 보장한다.
+          if (!pool.includes(prev)) {
+            pool.unshift(prev);
+            if (pool.length > MAX_POOL_VARIANTS) pool.length = MAX_POOL_VARIANTS;
+          }
+          return { candidate: prev, pool };
         }
         return { candidate: prev, pool: null };
       }
@@ -7100,6 +7234,12 @@
           const picked = pickCandidateASlot(prev, fresh, result.candidateAPools && result.candidateAPools[i]);
           candidateAList.push(picked.candidate);
           if (picked.pool !== null) candidateAPools[i] = picked.pool;
+          console.log("[PT-DEBUG] === 카드 A-" + (i + 1) + " 재생성 판정 ===",
+            "prev:", prev ? { sessions: prev.assigned.length, unassigned: prev.unassignedMembers.length } : null,
+            "fresh:", { sessions: fresh.assigned.length, unassigned: fresh.unassignedMembers.length },
+            "선택:", picked.candidate === fresh ? "fresh" : "prev",
+            "최종 풀 크기:", candidateAPools[i] ? candidateAPools[i].length : 0,
+            "풀에 선택된 후보 포함?:", candidateAPools[i] ? candidateAPools[i].includes(picked.candidate) : "N/A(풀 미변경)");
         } else {
           candidateAList.push(prev);
         }
