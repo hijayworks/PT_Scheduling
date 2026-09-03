@@ -3,14 +3,20 @@
   "version": "1.0.0",
   "main": "script.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node tests/smoke.js",
+    "lint": "eslint .",
+    "format": "prettier --write src tests scripts",
+    "build": "node scripts/build.js",
     "bump-version": "node scripts/bump-cache-version.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "description": "",
-  "dependencies": {
-    "playwright": "^1.62.1"
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "eslint": "^10.9.1",
+    "playwright": "^1.62.1",
+    "prettier": "^3.9.6"
   }
 }
