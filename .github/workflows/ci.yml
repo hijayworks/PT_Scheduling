@@ -22,5 +22,7 @@ jobs:
             exit 1;
           }
       - run: npm run lint
+      - name: Playwright 브라우저 설치 (스모크 테스트가 사용하는 Chromium)
+        run: npx playwright install --with-deps chromium
       - name: 스모크 테스트 (체인DP/후보A는 시간이 오래 걸려 건너뜀)
         run: SMOKE_SKIP_A=1 npm test
