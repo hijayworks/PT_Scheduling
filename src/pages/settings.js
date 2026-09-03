@@ -10,12 +10,7 @@ import {
 import { cellKey, minutesLabel, uid, showToast } from "../utils.js";
 import { state, runtime, saveState } from "../state.js";
 import { pairKey } from "../domain.js";
-import {
-  candidateHistory,
-  candidateUndoStack,
-  candidatePools,
-  candidateAPools,
-} from "../engine/greedy.js";
+import { resetCandidateSession } from "../engine/greedy.js";
 import { renderSchedule3Result, generateHint3El } from "../schedule3.js";
 import {
   populateMemberLocationSelect,
@@ -46,10 +41,7 @@ export function invalidateCandidates() {
   if (!hasResult) return;
   runtime.candidates = [];
   runtime.schedule3Result = { candidateAList: [null, null, null] };
-  Object.keys(candidateHistory).forEach((k) => delete candidateHistory[k]);
-  Object.keys(candidateUndoStack).forEach((k) => delete candidateUndoStack[k]);
-  Object.keys(candidatePools).forEach((k) => delete candidatePools[k]);
-  Object.keys(candidateAPools).forEach((k) => delete candidateAPools[k]);
+  resetCandidateSession();
   renderSchedule3Result();
   generateHint3El.textContent =
     "기본 설정이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";

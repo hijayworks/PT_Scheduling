@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "script.js",
   "scripts": {
+    "prepare": "node scripts/install-git-hooks.js",
     "test": "node tests/smoke.js",
     "lint": "eslint .",
     "format": "prettier --write src tests scripts",

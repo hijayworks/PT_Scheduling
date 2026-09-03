@@ -15,8 +15,10 @@ const OUTFILE = path.join(ROOT, "script.js");
 
 const GENERATED_HEADER =
   "// 이 파일은 자동 생성됩니다 — src/ 아래 파일을 수정한 뒤 `npm run build`를 실행하세요.\n" +
-  "// (git commit 시 pre-commit 훅이 자동으로 다시 빌드합니다.) 이 파일을 직접 고치면 다음\n" +
-  "// 빌드에서 조용히 덮어써집니다.\n";
+  "// (`npm install`이 pre-commit 훅을 설치해두면, git commit 시 이 훅이 자동으로 다시\n" +
+  "// 빌드합니다 — scripts/install-git-hooks.js, README 참고. 훅이 없다면 CI가 이 파일이\n" +
+  "// src/와 어긋난 채 커밋되는 것을 잡아준다.) 이 파일을 직접 고치면 다음 빌드에서 조용히\n" +
+  "// 덮어써집니다.\n";
 
 async function main() {
   const result = await esbuild.build({

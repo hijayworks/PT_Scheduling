@@ -24,8 +24,11 @@
 
 ```sh
 npm install
-cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 ```
+
+`npm install`이 `prepare` 스크립트(`scripts/install-git-hooks.js`)로 pre-commit 훅을
+`.git/hooks/pre-commit`에 자동 설치합니다. (훅을 직접 다시 설치하고 싶다면
+`node scripts/install-git-hooks.js`를 실행하세요.)
 
 `src/`를 고친 뒤에는:
 
@@ -38,6 +41,10 @@ npm run format  # Prettier
 
 git commit 시 pre-commit 훅이 `npm run build`와 캐시 버스팅 버전(`?v=`) 갱신을 자동으로
 실행하므로, 평소에는 `src/`만 고치고 커밋하면 됩니다.
+
+훅이 어떤 이유로든 설치돼 있지 않은 채 `script.js`가 `src/`와 어긋난 상태로 커밋되면,
+GitHub Actions CI(`.github/workflows/ci.yml`)가 `npm run build` 후 `script.js` diff를
+검사해 실패시킵니다 — 훅은 예방, CI는 안전망입니다.
 
 `npm test`가 실행하는 후보A(체인DP) 생성 검증은 담금질 다듬기가 시간 예산제(카드 3장 ×
 최대 90초)라 데이터가 아주 적어도 실측 몇 분~십수 분이 걸릴 수 있습니다 — 빠르게 반복

@@ -33,6 +33,7 @@ import {
   candidateUndoStack,
   candidatePools,
   candidateAPools,
+  resetCandidateSession,
   MAX_POOL_VARIANTS,
   candidateSignature,
   candidateLocationsForRequest,
@@ -46,8 +47,6 @@ import {
   isSchedule2ResultBetter,
   schedule2Signature,
   SCHEDULE2_CARD_COUNT,
-  schedule2ToBlocks,
-  schedule2ToTravelBlocks,
   schedule2ToIdleBlocks,
   schedule2TotalIdleMinutes,
 } from "./engine/chainDp.js";
@@ -543,6 +542,77 @@ export function travelShiftMenuItems(container, nextReq, onDone) {
   ];
 }
 
+// "수업 스케줄 생성2"(engine/chainDp.js) 결과를 그리드에 그릴 수 있는, 드래그·컨텍스트메뉴가
+// 달린 블록 객체로 바꾸는 어댑터. moveOrSwapSession 등 이 파일의 편집 함수에 의존하므로
+// 여기에 둔다(engine/chainDp.js에 두면 엔진이 페이지를 import하는 순환이 생긴다).
+// result/onDone: 생성3의 후보A 카드에서 항상 그 결과 객체와 renderSchedule3Result를 명시적으로 넘겨받아 쓴다.
+export function schedule2ToBlocks(assigned, { result, onDone } = {}) {
+  const confirmedIds = new Set((result && result.confirmedIds) || []);
+  return assigned.map((r) => {
+    const m = memberById(r.memberId);
+    const loc = locationById(r.locationId);
+    const label = m
+      ? m.name + ((m.category || "상담") === "상담" ? " (상담)" : "")
+      : "?";
+    const isConfirmed = confirmedIds.has(r.id);
+    return {
+      day: r.day,
+      startSlot: r.startSlot,
+      duration: r.duration,
+      label,
+      loc: loc ? loc.name : "",
+      sublabel:
+        slotLabel(r.startSlot) + "~" + endLabel(r.startSlot, r.duration),
+      color: m ? memberColor(m.id) : BLOCK_COLOR,
+      confirmed: isConfirmed,
+      contextMenuItems: () =>
+        sessionSwapMenuItems(result, r, isConfirmed, onDone),
+      onMove: (targetDay, targetSlot) =>
+        moveOrSwapSession(result, r, targetDay, targetSlot, onDone),
+      canMoveTo: (targetDay, targetSlot) =>
+        canMoveOrSwapTo(result, r, targetDay, targetSlot),
+    };
+  });
+}
+
+// 같은 요일 안에서 연속된 두 세션 사이, 지점이 달라 실제로 이동이 필요한 구간만 표시한다
+// (쉬는 시간 없음이 규칙이므로 같은 지점이면 표시할 것이 없다). onDone은 호출부가 항상
+// 명시적으로 넘긴다(재생성용 렌더 함수를 기본값으로 암묵 참조하지 않는다).
+export function schedule2ToTravelBlocks(container, onDone) {
+  const assigned = container.assigned;
+  const byDay = new Map();
+  assigned.forEach((r) => {
+    if (!byDay.has(r.day)) byDay.set(r.day, []);
+    byDay.get(r.day).push(r);
+  });
+  const travelBlocks = [];
+  byDay.forEach((reqs) => {
+    const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+    for (let i = 1; i < sorted.length; i++) {
+      const prev = sorted[i - 1],
+        cur = sorted[i];
+      const startSlot = prev.startSlot + durationToSlots(prev.duration);
+      const mins = travelMinutes(prev.locationId, cur.locationId);
+      if (mins > 0) {
+        travelBlocks.push({
+          day: prev.day,
+          startSlot,
+          duration: mins,
+          label: "이동 " + mins + "분",
+          type: "travel",
+          moveDurationSlots: durationToSlots(cur.duration),
+          onMove: (targetDay, targetSlot) =>
+            moveOrSwapSession(container, cur, targetDay, targetSlot, onDone),
+          canMoveTo: (targetDay, targetSlot) =>
+            canMoveOrSwapTo(container, cur, targetDay, targetSlot),
+          contextMenuItems: () => travelShiftMenuItems(container, cur, onDone),
+        });
+      }
+    }
+  });
+  return travelBlocks;
+}
+
 // req와 같은 요일·같은 지점에 배정된 다른 회원들 중, req의 자리로 맞바꿔도 되는(prepareSwap
 // 통과) 회원만 골라낸다 — "다른 회원으로 교체"(eligibleSwapMembersFor)와 달리 시작 시각이
 // 같을 필요는 없다(자리를 서로 맞바꾸는 것이므로 각자 원래 자리로 옮겨가면 그만이다). 같은
@@ -732,12 +802,7 @@ export function goToPage(pageId) {
     ) {
       runtime.candidates = [];
       runtime.schedule3Result = { candidateAList: [null, null, null] };
-      Object.keys(candidateHistory).forEach((k) => delete candidateHistory[k]);
-      Object.keys(candidateUndoStack).forEach(
-        (k) => delete candidateUndoStack[k],
-      );
-      Object.keys(candidatePools).forEach((k) => delete candidatePools[k]);
-      Object.keys(candidateAPools).forEach((k) => delete candidateAPools[k]);
+      resetCandidateSession();
       renderSchedule3Result();
       saveState();
       generateHint3El.textContent =
@@ -904,12 +969,7 @@ export function onSchedule3SelectionChanged() {
   ) {
     runtime.candidates = [];
     runtime.schedule3Result = { candidateAList: [null, null, null] };
-    Object.keys(candidateHistory).forEach((k) => delete candidateHistory[k]);
-    Object.keys(candidateUndoStack).forEach(
-      (k) => delete candidateUndoStack[k],
-    );
-    Object.keys(candidatePools).forEach((k) => delete candidatePools[k]);
-    Object.keys(candidateAPools).forEach((k) => delete candidateAPools[k]);
+    resetCandidateSession();
     renderSchedule3Result();
     generateHint3El.textContent =
       "회원 선택이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
@@ -1121,7 +1181,7 @@ export function renderSchedule3Result() {
         );
         undoBtn.disabled = undoStackForThis.length === 0;
         undoBtn.addEventListener("click", () => {
-          restorePreviousCandidate(strategyIndex);
+          restorePreviousCandidate(strategyIndex, renderSchedule3Result);
         });
         actions.appendChild(undoBtn);
 
@@ -1146,9 +1206,13 @@ export function renderSchedule3Result() {
               state.excludedMemberIds3,
               state.onceLimitedMemberIds3,
               () =>
-                regenerateCandidate(strategyIndex, (progress) => {
-                  regenBtn.textContent = Math.round(progress * 100) + "%";
-                }),
+                regenerateCandidate(
+                  strategyIndex,
+                  (progress) => {
+                    regenBtn.textContent = Math.round(progress * 100) + "%";
+                  },
+                  renderSchedule3Result,
+                ),
             );
           } finally {
             regenBtn.classList.remove("icon-btn-loading");
@@ -1395,7 +1459,9 @@ export function renderSchedule3Result() {
           result: a,
           onDone: renderSchedule3Result,
         }),
-        schedule2ToTravelBlocks(a).concat(schedule2ToIdleBlocks(a.assigned)),
+        schedule2ToTravelBlocks(a, renderSchedule3Result).concat(
+          schedule2ToIdleBlocks(a.assigned),
+        ),
         schedule2TotalIdleMinutes(a.assigned),
         null,
         candidateAPools[i],

@@ -22,7 +22,6 @@ import {
   travelMinutes,
 } from "../domain.js";
 import { currentExcludedIds } from "../selectionOverride.js";
-import { renderSchedule3Result } from "../schedule3.js";
 
 export function requestCells(req) {
   const cells = [];
@@ -1443,6 +1442,17 @@ export const candidatePools = {}; // strategyIndex -> Candidate[]
 // candidateAPools[i]의 한 항목과 같은 객체 참조를 가리킨다. 세션 한정 기록.
 export const candidateAPools = {}; // 카드 인덱스(0/1/2) -> Candidate[]
 
+// 위 네 기록을 모두 비운다("전체 재생성" 등 지금까지의 재생성/되돌리기 이력이 더 이상
+// 유효하지 않을 때 호출). 호출부(schedule3.js 등)가 각자 Object.keys(...).forEach(delete)로
+// 직접 비우면 이 네 기록이 정확히 어떤 세트인지가 엔진 밖 여러 곳에 흩어져 있어야 해서,
+// 하나를 추가/제거할 때 어느 한 곳을 빠뜨리기 쉽다 — 이 함수로 한곳에 모아둔다.
+export function resetCandidateSession() {
+  Object.keys(candidateHistory).forEach((k) => delete candidateHistory[k]);
+  Object.keys(candidateUndoStack).forEach((k) => delete candidateUndoStack[k]);
+  Object.keys(candidatePools).forEach((k) => delete candidatePools[k]);
+  Object.keys(candidateAPools).forEach((k) => delete candidateAPools[k]);
+}
+
 export function candidateSignature(cand) {
   return cand.assigned
     .map((r) => r.id)
@@ -1596,7 +1606,10 @@ export function hasRegenerableEligible(strategyIndex) {
   );
 }
 
-export async function regenerateCandidate(strategyIndex, onProgress) {
+// onDone: 재생성이 끝나 화면을 다시 그려야 할 때 호출부가 넘겨주는 콜백(항상 명시적으로
+// 넘겨받는다 — chainDp.js의 schedule2ToBlocks 등과 같은 관례. 엔진이 페이지 렌더 함수를
+// 직접 import하면 페이지 ↔ 엔진 순환 의존이 생기므로 피한다).
+export async function regenerateCandidate(strategyIndex, onProgress, onDone) {
   const prevCand = runtime.candidates[strategyIndex];
   if (!candidateHistory[strategyIndex]) {
     candidateHistory[strategyIndex] = new Set(
@@ -1710,7 +1723,7 @@ export async function regenerateCandidate(strategyIndex, onProgress) {
     }
     runtime.candidates[strategyIndex] = newCand;
     saveState();
-    renderSchedule3Result();
+    onDone();
     showToast("더 나은 조합을 찾지 못해 다시 탐색합니다", "info");
     return;
   }
@@ -1750,17 +1763,18 @@ export async function regenerateCandidate(strategyIndex, onProgress) {
   }
   runtime.candidates[strategyIndex] = newCand;
   saveState();
-  renderSchedule3Result();
+  onDone();
   showToast("후보가 재생성되었습니다", "success");
 }
 
 // "이전 후보 다시보기": 재생성으로 덮어쓰기 전의 후보로 되돌아간다(여러 번 눌러 여러 단계
 // 되돌아갈 수 있음). 되돌아간 후보를 다시 재생성하면, 그 시점부터 새 이력이 쌓인다.
-export function restorePreviousCandidate(strategyIndex) {
+// onDone: regenerateCandidate와 같은 이유로 호출부가 명시적으로 넘겨준다.
+export function restorePreviousCandidate(strategyIndex, onDone) {
   const stack = candidateUndoStack[strategyIndex];
   if (!stack || stack.length === 0) return;
   runtime.candidates[strategyIndex] = stack.pop();
   saveState();
-  renderSchedule3Result();
+  onDone();
   showToast("이전 후보로 되돌아갔습니다", "info");
 }

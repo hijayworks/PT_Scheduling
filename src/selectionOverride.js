@@ -39,6 +39,10 @@ export function currentOnceLimitIds() {
     ? selectionOverride.onceLimitIds
     : state.onceLimitedMemberIds3;
 }
+// currentExcludedIds/currentOnceLimitIds와 지금은 내용이 완전히 같지만, 별도 함수로 관리한다.
+// domain.js(생성1·3)와 engine/chainDp.js(생성2, constants.js의 SESSION_DURATION_MIN_2 등과
+// 같은 이유)가 서로 다른 엔진이 쓰는 값을 갖고 있어서 한쪽만 바뀌어도 다른 쪽에 영향이 없도록
+// 하려는 의도적인 분리다 — 우연한 중복이 아니므로 병합하지 않는다.
 export function currentExcludedIds2() {
   return selectionOverride
     ? selectionOverride.excludedIds

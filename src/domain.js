@@ -16,9 +16,12 @@ export function memberById(id) {
 }
 
 // 상담 회원은 확보 시간이 짧다(30분) — 그 외(등록 회원)는 기본 수업 시간(60분).
-// 구분이 비어있으면 상담으로 취급한다(다른 곳의 기본값과 동일).
+// 구분이 비어있으면 상담으로 취급한다(다른 곳의 기본값과 동일). 회원을 못 찾은 경우(member가
+// null/undefined, 예: 신청은 남아있는데 회원이 삭제된 경우)도 같은 이유로 상담 취급한다 —
+// maxSessionsFor의 null 처리(최대 1회)와 일관되게, 가장 보수적인 값을 준다.
 export function sessionDurationFor(member) {
-  return (member && (member.category || "상담")) === "상담"
+  if (!member) return CONSULT_DURATION_MIN;
+  return (member.category || "상담") === "상담"
     ? CONSULT_DURATION_MIN
     : SESSION_DURATION_MIN;
 }

@@ -3,23 +3,12 @@ import {
   SLOT_MIN,
   MAX_TRAVELS_PER_DAY,
   MAX_SESSIONS_PER_MEMBER,
-  BLOCK_COLOR,
   CONSULT_DURATION_MIN_2,
   SESSION_DURATION_MIN_2,
 } from "../constants.js";
-import {
-  cellKey,
-  durationToSlots,
-  slotLabel,
-  endLabel,
-} from "../utils.js";
+import { cellKey, durationToSlots } from "../utils.js";
 import { state, runtime } from "../state.js";
-import {
-  memberById,
-  locationById,
-  memberColor,
-  travelMinutes,
-} from "../domain.js";
+import { memberById, travelMinutes } from "../domain.js";
 import {
   currentExcludedIds2,
   currentOnceLimitIds2,
@@ -34,13 +23,6 @@ import {
   TRAVEL_VALUE_MINUTES,
   MAX_POOL_VARIANTS,
 } from "./greedy.js";
-import {
-  renderSchedule3Result,
-  sessionSwapMenuItems,
-  moveOrSwapSession,
-  canMoveOrSwapTo,
-  travelShiftMenuItems,
-} from "../schedule3.js";
 
 /* ---------------- "수업 스케줄 생성2": 새 후보 생성 알고리즘 ----------------
      기존 "수업 스케줄 생성1"(greedyAssign 등)과는 완전히 별개의, 훨씬 단순한 그리디
@@ -2399,75 +2381,10 @@ export async function generateSchedule2Async(onProgress) {
   return cards; // [{result, pool}, {result, pool}, {result, pool}]
 }
 
-// result/onDone: 생성3의 후보A 카드에서 항상 그 결과 객체와 renderSchedule3Result를 명시적으로 넘겨받아 쓴다.
-export function schedule2ToBlocks(assigned, { result, onDone } = {}) {
-  const confirmedIds = new Set((result && result.confirmedIds) || []);
-  return assigned.map((r) => {
-    const m = memberById(r.memberId);
-    const loc = locationById(r.locationId);
-    const label = m
-      ? m.name + ((m.category || "상담") === "상담" ? " (상담)" : "")
-      : "?";
-    const isConfirmed = confirmedIds.has(r.id);
-    return {
-      day: r.day,
-      startSlot: r.startSlot,
-      duration: r.duration,
-      label,
-      loc: loc ? loc.name : "",
-      sublabel:
-        slotLabel(r.startSlot) + "~" + endLabel(r.startSlot, r.duration),
-      color: m ? memberColor(m.id) : BLOCK_COLOR,
-      confirmed: isConfirmed,
-      contextMenuItems: () =>
-        sessionSwapMenuItems(result, r, isConfirmed, onDone),
-      onMove: (targetDay, targetSlot) =>
-        moveOrSwapSession(result, r, targetDay, targetSlot, onDone),
-      canMoveTo: (targetDay, targetSlot) =>
-        canMoveOrSwapTo(result, r, targetDay, targetSlot),
-    };
-  });
-}
-
-// 같은 요일 안에서 연속된 두 세션 사이, 지점이 달라 실제로 이동이 필요한 구간만 표시한다
-// (쉬는 시간 없음이 규칙이므로 같은 지점이면 표시할 것이 없다).
-export function schedule2ToTravelBlocks(
-  container,
-  onDone = renderSchedule3Result,
-) {
-  const assigned = container.assigned;
-  const byDay = new Map();
-  assigned.forEach((r) => {
-    if (!byDay.has(r.day)) byDay.set(r.day, []);
-    byDay.get(r.day).push(r);
-  });
-  const travelBlocks = [];
-  byDay.forEach((reqs) => {
-    const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
-    for (let i = 1; i < sorted.length; i++) {
-      const prev = sorted[i - 1],
-        cur = sorted[i];
-      const startSlot = prev.startSlot + durationToSlots(prev.duration);
-      const mins = travelMinutes(prev.locationId, cur.locationId);
-      if (mins > 0) {
-        travelBlocks.push({
-          day: prev.day,
-          startSlot,
-          duration: mins,
-          label: "이동 " + mins + "분",
-          type: "travel",
-          moveDurationSlots: durationToSlots(cur.duration),
-          onMove: (targetDay, targetSlot) =>
-            moveOrSwapSession(container, cur, targetDay, targetSlot, onDone),
-          canMoveTo: (targetDay, targetSlot) =>
-            canMoveOrSwapTo(container, cur, targetDay, targetSlot),
-          contextMenuItems: () => travelShiftMenuItems(container, cur, onDone),
-        });
-      }
-    }
-  });
-  return travelBlocks;
-}
+// schedule2ToBlocks/schedule2ToTravelBlocks(생성2 결과를 드래그·컨텍스트메뉴 가능한 그리드
+// 블록으로 바꾸는 어댑터)는 schedule3.js가 정의하는 moveOrSwapSession 등 페이지 레이어의
+// 편집 함수에 의존하므로, 엔진 파일이 페이지를 import하는 순환을 피하기 위해 schedule3.js
+// 쪽으로 옮겼다(schedule2ToIdleBlocks/schedule2TotalIdleMinutes는 순수 계산이라 그대로 둠).
 
 // 같은 요일 안에서 연속된 두 세션 사이, 이동 블록이 차지하는 구간을 뺀 나머지
 // "진짜 빈 시간"을 회색 배경의 빈 시간 블록으로 그리드에 표시하기 위한 좌표를 만든다.
