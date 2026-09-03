@@ -6025,9 +6025,9 @@
     candidates3El.innerHTML = "";
     const gridRange = businessHoursGridRange();
     const colLeft = document.createElement("div");
-    colLeft.className = "runtime.candidates-col";
+    colLeft.className = "candidates-col";
     const colRight = document.createElement("div");
-    colRight.className = "runtime.candidates-col";
+    colRight.className = "candidates-col";
     candidates3El.appendChild(colLeft);
     candidates3El.appendChild(colRight);
     function buildCard(title, desc, result, blocks, travelBlocks, idleMinutes, strategyIndex, pool, onSelectPoolVariant, columnEl) {

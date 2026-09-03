@@ -1102,9 +1102,9 @@ export function renderSchedule3Result() {
   // 컨테이너로 분리한다 — 하나의 CSS auto-fit 그리드에 순서대로 흘려보내면 폭에 따라
   // 후보A와 후보B·C가 같은 열에 섞여버리기 때문이다.
   const colLeft = document.createElement("div");
-  colLeft.className = "runtime.candidates-col";
+  colLeft.className = "candidates-col";
   const colRight = document.createElement("div");
-  colRight.className = "runtime.candidates-col";
+  colRight.className = "candidates-col";
   candidates3El.appendChild(colLeft);
   candidates3El.appendChild(colRight);
 

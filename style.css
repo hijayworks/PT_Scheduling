@@ -321,15 +321,18 @@ body {
   border-radius: 12px;
   background: #fff;
 }
+/* grid를 쓰는 이유: flex(flex:1 1 240px)로는 두 칸의 내용물(칩 개수 등)에 따라 두 칸이
+   같은 비율로 자라야 함에도 브라우저에 따라 폭이 미묘하게 어긋나 보이는 경우가 있었다.
+   grid는 두 칸을 항상 정확히 동일한 폭(1fr씩)으로 강제하고, 폭이 480px(240*2)보다 좁아지면
+   auto-fit이 자동으로 한 칸씩 세로로 쌓는다. */
 .day-start-block-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 18px;
   margin-top: 18px;
   margin-bottom: 18px;
 }
 .day-start-block-row .day-start-block {
-  flex: 1 1 240px;
   min-width: 0;
   margin-bottom: 0;
 }
@@ -1044,12 +1047,14 @@ body {
 .request-form.has-hint { padding-bottom: 40px; }
 /* 후보A(체인 DP) 카드들은 왼쪽 열, 후보B·C(그리디) 카드들은 오른쪽 열에 고정한다 —
    렌더링 시 script.js가 .candidates-col 두 개(왼쪽/오른쪽)를 만들어 각 열에 맞는 카드만
-   채워 넣으므로, 여기서는 그 두 열을 나란히 배치하기만 하면 된다. 폭이 좁아지면
-   (min(400px,100%) 트랙이 800px+gap을 넘지 못하는 지점) 자연히 위아래로 쌓인다. */
+   채워 넣으므로, 여기서는 그 두 열을 나란히 배치하기만 하면 된다. grid로 두 열의 폭을
+   항상 정확히 동일하게(1fr씩) 고정한다 — flex는 카드 개수·내용에 따라 두 열의 폭이 미묘하게
+   어긋나 보일 수 있었다. 폭이 좁아지면(minmax(400px,1fr) 트랙이 800px+gap을 넘지 못하는
+   지점) auto-fit이 자연히 위아래로 쌓는다. */
 .candidates {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  align-items: start;
   gap: 16px;
   margin-top: 18px;
 }
@@ -1057,8 +1062,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  flex: 1 1 min(400px, 100%);
-  min-width: min(400px, 100%);
+  min-width: 0;
 }
 .candidate-card {
   border: 2px solid var(--border);
