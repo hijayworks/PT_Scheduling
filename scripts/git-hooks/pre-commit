@@ -1,0 +1,9 @@
+#!/bin/sh
+# script.js / style.css의 캐시 버스팅 버전(?v=)을 커밋 직전에 자동 갱신한다.
+# 설치: cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+
+node scripts/bump-cache-version.js
+
+if ! git diff --quiet -- index.html; then
+  git add index.html
+fi

@@ -13,3 +13,13 @@
 - `index.html` — 화면 구조
 - `style.css` — 스타일
 - `script.js` — 로직 (상태 저장, 스케줄 후보 계산 등)
+
+## 개발 환경 설정
+
+`index.html`이 참조하는 `script.js`/`style.css`의 캐시 버스팅 버전(`?v=`)은 커밋 시
+`scripts/bump-cache-version.js`가 파일 해시로 자동 갱신합니다. 새로 클론한 환경에서는
+아래 명령을 한 번만 실행해 pre-commit 훅을 설치하세요.
+
+```sh
+cp scripts/git-hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+```

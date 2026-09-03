@@ -1102,6 +1102,7 @@ body {
 }
 .pool-pager-btn { width: 24px; height: 24px; }
 .pool-pager-label { font-size: 12px; font-weight: 700; color: var(--text-mute); min-width: 64px; text-align: center; }
+.pool-pager-hint { font-size: 10.5px; color: var(--text-mute); text-align: center; margin: -6px 0 10px; }
 .candidate-stats {
   display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0;
   font-size: 12.5px;

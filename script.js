@@ -78,12 +78,7 @@
     travelTimes: {},       // { "locIdA|locIdB": minutes }
     members: [],          // {id, name, locationIds: [locId, ...]}
     requests: [],         // {id, memberId, locationId, day, startSlot, duration}
-    onceLimitedMemberIds: [],  // 이번 후보 생성에서 최대 1회만 배정되어야 하는 회원 id 목록
-    excludedMemberIds: [],  // "미배정 회원": 후보 생성에서 아예 제외할 회원 id 목록
-    // "수업 스케줄 생성2" 전용 설정 (새 후보 생성 알고리즘용, 기존 스케줄 생성과는 별개로 관리)
-    onceLimitedMemberIds2: [],  // 스케줄 생성2에서 최대 1회만 배정되어야 하는 회원 id 목록
-    excludedMemberIds2: [],  // 스케줄 생성2에서 후보 생성 시 아예 제외할 회원 id 목록
-    // "수업 스케줄 생성3" 전용 설정 (생성1·생성2 엔진을 그대로 재사용해 후보 3개를 한 화면에 보여줌)
+    // "수업 스케줄 생성3" 전용 설정 (생성1·생성2 엔진을 withSelectionOverride로 재사용해 후보 3개를 한 화면에 보여줌)
     onceLimitedMemberIds3: [],  // 스케줄 생성3에서 최대 1회만 배정되어야 하는 회원 id 목록
     excludedMemberIds3: []  // 스케줄 생성3에서 후보 생성 시 아예 제외할 회원 id 목록
   };
@@ -98,9 +93,7 @@
   let schedule3Result = { candidateAList: [null, null, null] };
   // 회원 스케줄 추가(신청 시간 추가/삭제) 등 신청 데이터가 바뀌면 true로 표시해둔다.
   // "수업 스케줄 생성" 메뉴로 들어올 때 이 값이 true면, 최신 신청과 맞지 않는 옛 후보를 자동으로 비운다.
-  let requestsChangedSinceGenerate = false;
-  let requestsChangedSinceGenerate2 = false; // 위와 동일하지만 "수업 스케줄 생성2" 전용
-  let requestsChangedSinceGenerate3 = false; // 위와 동일하지만 "수업 스케줄 생성3" 전용
+  let requestsChangedSinceGenerate3 = false;
   // 세 생성 버튼 중 하나라도 계산 중이면 true — 동시에 두 계산이 겹치면 selectionOverride가
   // 서로 다른 페이지의 회원 선택 목록을 잘못 참조할 수 있어(withSelectionOverride 참고), 이 플래그로 막는다.
   let generationInProgress = false;
@@ -138,18 +131,13 @@
 
   // "수업 스케줄 생성3"이 생성1·생성2의 엔진 함수(greedyAssign, runSchedule2Pipeline 등)를
   // 코드 복제 없이 그대로 재사용하기 위한 장치. 그 엔진들은 "미배정 회원"/"1회 제한 회원" 목록을
-  // state.excludedMemberIds(2)/state.onceLimitedMemberIds(2)에서 직접(파라미터가 아니라) 읽는
-  // 지점이 여러 곳(엔진 얕은 진입점뿐 아니라 그리디 DP·체인 DP 내부 깊숙이도) 있다. 그 모든
-  // 지점을 일일이 파라미터로 바꾸는 대신, 이 오버라이드가 활성화된 동안만 "지금 봐야 할 목록"을
-  // 바꿔치기한다 — 활성화하는 쪽(generateSchedule3Async)이 항상 동기 호출을 감싸는 형태로만
-  // 쓰고 finally에서 즉시 되돌리므로, generationInProgress 가드와 함께 있으면 생성1·생성2 자신의
-  // 계산(오버라이드 없음)에는 전혀 영향이 없다.
+  // 파라미터가 아니라 이 오버라이드에서 직접 읽는 지점이 여러 곳(엔진 얕은 진입점뿐 아니라
+  // 그리디 DP·체인 DP 내부 깊숙이도) 있다. 그 모든 지점을 일일이 파라미터로 바꾸는 대신,
+  // generateSchedule3Async가 호출을 감싸는 동안만 "지금 봐야 할 목록"을 여기에 담아두고
+  // finally에서 즉시 비운다.
   let selectionOverride = null; // { excludedIds: string[], onceLimitIds: string[] } | null
   async function withSelectionOverride(excludedIds, onceLimitIds, asyncFn) {
     const prev = selectionOverride;
-    // state.excludedMemberIds(2)/onceLimitedMemberIds(2)는 배열이라 .includes()로 조회한다 —
-    // 오버라이드도 같은 타입(배열)이어야 currentExcludedIds() 등의 호출부가 오버라이드 유무와
-    // 무관하게 동일한 코드로 동작한다.
     selectionOverride = { excludedIds: excludedIds.slice(), onceLimitIds: onceLimitIds.slice() };
     try {
       return await asyncFn();
@@ -157,12 +145,12 @@
       selectionOverride = prev;
     }
   }
-  // 오버라이드가 활성화돼 있으면 그 목록을, 아니면 원래 각 페이지의 state 필드를 그대로 돌려준다 —
-  // 오버라이드가 없을 때(생성1·생성2 자신의 호출)는 기존 동작과 완전히 동일하다.
-  function currentExcludedIds() { return selectionOverride ? selectionOverride.excludedIds : state.excludedMemberIds; }
-  function currentOnceLimitIds() { return selectionOverride ? selectionOverride.onceLimitIds : state.onceLimitedMemberIds; }
-  function currentExcludedIds2() { return selectionOverride ? selectionOverride.excludedIds : state.excludedMemberIds2; }
-  function currentOnceLimitIds2() { return selectionOverride ? selectionOverride.onceLimitIds : state.onceLimitedMemberIds2; }
+  // 엔진 함수들은 항상 withSelectionOverride로 감싼 호출 안에서만 실행되므로 selectionOverride는
+  // 여기서 항상 채워져 있다.
+  function currentExcludedIds() { return selectionOverride.excludedIds; }
+  function currentOnceLimitIds() { return selectionOverride.onceLimitIds; }
+  function currentExcludedIds2() { return selectionOverride.excludedIds; }
+  function currentOnceLimitIds2() { return selectionOverride.onceLimitIds; }
   const PAGE_IDS = ["settings", "schedule3", "members", "memberSchedule"];
   // Pages from before the sidebar redesign ("requests"/"candidates"/"confirm"), and "schedule"/"schedule2"
   // from before those menus were removed, all live under "schedule3" now.
@@ -332,7 +320,7 @@
   // Pre-page-nav saves stored a numeric wizard step (1~5); map it onto the closest page.
   function pageFromLegacyStep(step) {
     if (step <= 2) return "settings";
-    return "schedule";
+    return OLD_PAGE_TO_NEW.schedule;
   }
 
   // 옛 30분 슬롯 데이터를 새 10분 슬롯 인덱스로 환산 (근무 가능 시간 1칸 -> 3칸으로 확장)
@@ -385,10 +373,6 @@
         state.travelTimes = parsed.travelTimes || {};
         state.members = parsed.members || [];
         state.requests = parsed.requests || [];
-        state.onceLimitedMemberIds = parsed.onceLimitedMemberIds || [];
-        state.excludedMemberIds = parsed.excludedMemberIds || [];
-        state.onceLimitedMemberIds2 = parsed.onceLimitedMemberIds2 || [];
-        state.excludedMemberIds2 = parsed.excludedMemberIds2 || [];
         state.onceLimitedMemberIds3 = parsed.onceLimitedMemberIds3 || [];
         state.excludedMemberIds3 = parsed.excludedMemberIds3 || [];
         availableCells = new Set(parsed.availableCells || []);
@@ -470,13 +454,6 @@
     // 나므로, 그런 후보가 하나라도 있으면 전체를 비워 다시 생성하게 한다.
     if (candidates.some(c => !STRATEGIES[c.strategyIndex])) candidates = [];
     // 삭제된 회원이나 상담 회원(이미 항상 1회로 제한됨)을 가리키는 1회 제한 설정은 정리한다.
-    state.onceLimitedMemberIds = state.onceLimitedMemberIds.filter(id => isOnceLimitEligible(memberById(id)));
-    // 삭제된 회원을 가리키는 "미배정 회원" 설정은 정리한다.
-    state.excludedMemberIds = state.excludedMemberIds.filter(id => !!memberById(id));
-    // 스케줄 생성2 전용 설정도 동일하게 정리한다.
-    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.filter(id => isOnceLimitEligible(memberById(id)));
-    state.excludedMemberIds2 = state.excludedMemberIds2.filter(id => !!memberById(id));
-    // 스케줄 생성3 전용 설정도 동일하게 정리한다.
     state.onceLimitedMemberIds3 = state.onceLimitedMemberIds3.filter(id => isOnceLimitEligible(memberById(id)));
     state.excludedMemberIds3 = state.excludedMemberIds3.filter(id => !!memberById(id));
     // 일요일 기능이 제거되어(DAYS에서 빠짐), 옛 요일 인덱스 6(일요일)을 가리키던 데이터가 남아있다면 정리한다.
@@ -1568,8 +1545,6 @@
       return;
     }
     configuredRows.forEach(r => { r.startSel.value = ""; r.endSel.value = ""; });
-    requestsChangedSinceGenerate = true;
-    requestsChangedSinceGenerate2 = true;
     requestsChangedSinceGenerate3 = true;
     saveState();
     renderRequestList();
@@ -1579,8 +1554,6 @@
   function resetAllRequests() {
     if (state.requests.length === 0) return;
     state.requests = [];
-    requestsChangedSinceGenerate = true;
-    requestsChangedSinceGenerate2 = true;
     requestsChangedSinceGenerate3 = true;
     saveState();
     renderRequestList();
@@ -1888,6 +1861,10 @@
   }
 
   bulkImportOpenBtn.addEventListener("click", () => {
+    if (state.requests.length === 0) {
+      openBulkImportModal();
+      return;
+    }
     bulkImportConfirmOverlayEl.classList.add("open");
   });
   bulkImportConfirmCloseBtn.addEventListener("click", closeBulkImportConfirmModal);
@@ -2144,8 +2121,6 @@
       }
     });
 
-    requestsChangedSinceGenerate = true;
-    requestsChangedSinceGenerate2 = true;
     requestsChangedSinceGenerate3 = true;
     saveState();
     renderMemberTable();
@@ -2343,14 +2318,8 @@
     if (!confirm(msg)) return;
     state.members = state.members.filter(m => m.id !== member.id);
     state.requests = state.requests.filter(r => r.memberId !== member.id);
-    state.onceLimitedMemberIds = state.onceLimitedMemberIds.filter(id => id !== member.id);
-    state.excludedMemberIds = state.excludedMemberIds.filter(id => id !== member.id);
-    state.onceLimitedMemberIds2 = state.onceLimitedMemberIds2.filter(id => id !== member.id);
-    state.excludedMemberIds2 = state.excludedMemberIds2.filter(id => id !== member.id);
     state.onceLimitedMemberIds3 = state.onceLimitedMemberIds3.filter(id => id !== member.id);
     state.excludedMemberIds3 = state.excludedMemberIds3.filter(id => id !== member.id);
-    requestsChangedSinceGenerate = true;
-    requestsChangedSinceGenerate2 = true;
     requestsChangedSinceGenerate3 = true;
     saveState();
     renderMemberTable();
@@ -2372,8 +2341,6 @@
     // 그리드에는 옛 길이만큼만 자리가 확보된 것처럼 보인다.
     const newDuration = sessionDurationFor(member);
     state.requests.forEach(r => { if (r.memberId === member.id) r.duration = newDuration; });
-    requestsChangedSinceGenerate = true;
-    requestsChangedSinceGenerate2 = true;
     requestsChangedSinceGenerate3 = true;
     saveState();
     renderRequestList();
@@ -2851,8 +2818,6 @@
   function removeRequests(reqIds) {
     const idSet = new Set(reqIds);
     state.requests = state.requests.filter(r => !idSet.has(r.id));
-    requestsChangedSinceGenerate = true;
-    requestsChangedSinceGenerate2 = true;
     requestsChangedSinceGenerate3 = true;
     renderRequestList();
     saveState();
@@ -2899,8 +2864,6 @@
     const current = requestRunExtraLocationIds(run);
     if (current.includes(locId)) return;
     setRunExtraLocationIds(run, current.concat([locId]));
-    requestsChangedSinceGenerate = true;
-    requestsChangedSinceGenerate2 = true;
     requestsChangedSinceGenerate3 = true;
     saveState();
     renderRequestList();
@@ -2909,8 +2872,6 @@
 
   function removeExtraLocationFromRun(run, locId) {
     setRunExtraLocationIds(run, requestRunExtraLocationIds(run).filter(id => id !== locId));
-    requestsChangedSinceGenerate = true;
-    requestsChangedSinceGenerate2 = true;
     requestsChangedSinceGenerate3 = true;
     saveState();
     renderRequestList();
@@ -7011,6 +6972,13 @@
           pager.appendChild(label);
           pager.appendChild(nextBtn);
           card.appendChild(pager);
+
+          // 동점 풀(candidateAPools/poolsBC)은 새로고침하면 사라지는 세션 한정 기록이라
+          // (state에 저장되지 않음), 페이저가 뜬 김에 그 사실을 안내해 둔다.
+          const pagerHint = document.createElement("p");
+          pagerHint.className = "pool-pager-hint";
+          pagerHint.textContent = "새로고침하면 이 목록은 사라질 수 있어요.";
+          card.appendChild(pagerHint);
         }
       }
 
