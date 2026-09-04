@@ -1400,6 +1400,7 @@ export async function searchStrategyPool(
     if (onProgress && (i + 1) % PROGRESS_YIELD_EVERY === 0) {
       onProgress((i + 1) / (attempts + 1));
       await yieldToUI();
+      checkGenerationCancelled();
     }
   }
   if (onProgress) onProgress(1);
@@ -1523,6 +1524,7 @@ export async function generateCandidatesAsync(onProgress) {
       if (completed % PROGRESS_YIELD_EVERY === 0) {
         onProgress(completed / totalBuilds);
         await yieldToUI();
+        checkGenerationCancelled();
       }
     }
   }

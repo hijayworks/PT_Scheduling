@@ -1892,16 +1892,22 @@ export function renderRequestList() {
   scheduleInteractiveEl.style.display = "";
 
   // 지점 등록 순서(state.locations)를 기준으로 회원 탭을 첫 번째 지점별로 묶어서 표시한다.
+  // 같은 지점 안에서는 회원을 실제로 등록한 순서(먼저 등록한 회원이 먼저)로 정렬한다 —
+  // state.members 배열 자체는 새 회원이 맨 앞에 추가되는(unshift) 방식이라 배열 순서가
+  // 최근 등록순이므로, 배열 인덱스를 거꾸로(큰 인덱스 = 먼저 등록함) 써서 뒤집는다.
   const locOrder = new Map(state.locations.map((l, i) => [l.id, i]));
-  const sortedMembers = state.members.slice().sort((a, b) => {
-    const ao = locOrder.has(a.locationIds[0])
-      ? locOrder.get(a.locationIds[0])
-      : Infinity;
-    const bo = locOrder.has(b.locationIds[0])
-      ? locOrder.get(b.locationIds[0])
-      : Infinity;
-    return ao - bo;
-  });
+  const sortedMembers = state.members
+    .map((member, index) => ({ member, index }))
+    .sort((a, b) => {
+      const ao = locOrder.has(a.member.locationIds[0])
+        ? locOrder.get(a.member.locationIds[0])
+        : Infinity;
+      const bo = locOrder.has(b.member.locationIds[0])
+        ? locOrder.get(b.member.locationIds[0])
+        : Infinity;
+      return ao - bo || b.index - a.index;
+    })
+    .map((entry) => entry.member);
 
   if (
     !activeScheduleMemberId ||

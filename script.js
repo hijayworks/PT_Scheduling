@@ -1776,6 +1776,7 @@
       if (onProgress && (i + 1) % PROGRESS_YIELD_EVERY === 0) {
         onProgress((i + 1) / (attempts + 1));
         await yieldToUI();
+        checkGenerationCancelled();
       }
     }
     if (onProgress) onProgress(1);
@@ -1839,6 +1840,7 @@
         if (completed % PROGRESS_YIELD_EVERY === 0) {
           onProgress(completed / totalBuilds);
           await yieldToUI();
+          checkGenerationCancelled();
         }
       }
     }
@@ -5141,11 +5143,11 @@
     }
     scheduleInteractiveEl.style.display = "";
     const locOrder = new Map(state.locations.map((l, i) => [l.id, i]));
-    const sortedMembers = state.members.slice().sort((a, b) => {
-      const ao = locOrder.has(a.locationIds[0]) ? locOrder.get(a.locationIds[0]) : Infinity;
-      const bo = locOrder.has(b.locationIds[0]) ? locOrder.get(b.locationIds[0]) : Infinity;
-      return ao - bo;
-    });
+    const sortedMembers = state.members.map((member, index) => ({ member, index })).sort((a, b) => {
+      const ao = locOrder.has(a.member.locationIds[0]) ? locOrder.get(a.member.locationIds[0]) : Infinity;
+      const bo = locOrder.has(b.member.locationIds[0]) ? locOrder.get(b.member.locationIds[0]) : Infinity;
+      return ao - bo || b.index - a.index;
+    }).map((entry) => entry.member);
     if (!activeScheduleMemberId || !state.members.some((m) => m.id === activeScheduleMemberId)) {
       activeScheduleMemberId = null;
     }
