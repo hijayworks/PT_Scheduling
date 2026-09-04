@@ -615,7 +615,7 @@
       );
       if (clippedEnd <= clippedStart) return;
       const travel = document.createElement("div");
-      travel.className = t.type === "break" ? "cal-break-block" : "cal-travel-block";
+      travel.className = t.type === "idle" ? "cal-idle-block" : t.type === "break" ? "cal-break-block" : "cal-travel-block";
       travel.style.gridColumn = String(t.day + 2);
       travel.style.gridRow = clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
       travel.title = t.label;
@@ -3594,7 +3594,7 @@
             startSlot: idleStartSlot,
             duration: mins,
             label: "빈 시간 " + mins + "분",
-            type: "break"
+            type: "idle"
           });
         }
       }
@@ -6314,7 +6314,7 @@
         "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.",
         b,
         candidateToBlocks(b, renderSchedule3Result),
-        candidateToTravelBlocks(b),
+        candidateToTravelBlocks(b).concat(schedule2ToIdleBlocks(b.assigned)),
         schedule2TotalIdleMinutes(b.assigned),
         0,
         candidatePools[0],
@@ -6337,7 +6337,7 @@
         "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.",
         c,
         candidateToBlocks(c, renderSchedule3Result),
-        candidateToTravelBlocks(c),
+        candidateToTravelBlocks(c).concat(schedule2ToIdleBlocks(c.assigned)),
         schedule2TotalIdleMinutes(c.assigned),
         1,
         candidatePools[1],

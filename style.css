@@ -762,6 +762,23 @@ body {
   z-index: 1;
 }
 
+.cal-idle-block {
+  margin: 0 3px;
+  border-radius: 7px;
+  background: var(--danger-soft);
+  border: 1px solid #fecaca;
+  color: var(--danger);
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  overflow: hidden;
+  line-height: 1.15;
+  z-index: 1;
+}
+
 /* Request form */
 .request-form {
   display: flex; flex-wrap: wrap; align-items: end; gap: 12px;
@@ -1117,7 +1134,7 @@ body {
 }
 .stat-pill-danger { background: var(--danger-soft); color: var(--danger); }
 .stat-pill-muted { color: var(--text-mute); font-weight: 500; font-size: 11px; }
-.stat-pill-idle { background: #dbeafe; color: #1d4ed8; }
+.stat-pill-idle { background: var(--danger-soft); color: var(--danger); }
 .unassigned-box {
   margin-top: 10px; font-size: 12px; color: var(--text-mute);
   background: #fafbfe; border: 1px dashed var(--border);

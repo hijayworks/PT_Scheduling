@@ -2415,7 +2415,7 @@ export function schedule2ToIdleBlocks(assigned) {
           startSlot: idleStartSlot,
           duration: mins,
           label: "빈 시간 " + mins + "분",
-          type: "break",
+          type: "idle",
         });
       }
     }

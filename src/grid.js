@@ -207,7 +207,11 @@ export function renderGrid(container, availableSet, options) {
     if (clippedEnd <= clippedStart) return;
     const travel = document.createElement("div");
     travel.className =
-      t.type === "break" ? "cal-break-block" : "cal-travel-block";
+      t.type === "idle"
+        ? "cal-idle-block"
+        : t.type === "break"
+          ? "cal-break-block"
+          : "cal-travel-block";
     travel.style.gridColumn = String(t.day + 2);
     travel.style.gridRow =
       clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
