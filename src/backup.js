@@ -122,7 +122,7 @@ backupExportCopyBtnEl.addEventListener("click", async () => {
   try {
     await navigator.clipboard.writeText(backupExportTextareaEl.value);
     showToast("백업 코드를 복사했습니다", "success");
-  } catch (e) {
+  } catch {
     backupExportTextareaEl.select();
     showToast("복사에 실패했습니다. 직접 선택해 복사해주세요.", "error");
   }
@@ -179,7 +179,7 @@ backupImportApplyBtnEl.addEventListener("click", async () => {
   try {
     plainText = await decryptBackupText(code, pin);
     JSON.parse(plainText); // 형식 검증(손상되거나 PIN이 맞아도 다른 형식의 데이터면 여기서 걸러짐)
-  } catch (e) {
+  } catch {
     backupImportHintEl.textContent =
       "복원에 실패했습니다. 백업 코드와 PIN을 다시 확인해주세요.";
     return;

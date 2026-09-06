@@ -1829,7 +1829,7 @@ export function removeExtraLocationFromRun(run, locId) {
 // 추가해둔 지점 제거하기, 그리고 맨 아래에 구분선과 함께 이 가능 시간 자체를 삭제하는 항목을
 // danger 스타일로 넣는다 — 터치 기기는 마우스 호버(×버튼)를 쓸 수 없으므로 이 메뉴가 유일한
 // 삭제 경로이고, PC에서도 호버 ×버튼과 별개로 똑같이 쓸 수 있다.
-export function buildRequestRunMenu(member, run, x, y) {
+export function buildRequestRunMenu(member, run) {
   const excluded = new Set(
     (member.locationIds || []).concat(requestRunExtraLocationIds(run)),
   );
@@ -2053,8 +2053,7 @@ export function renderRequestList() {
           minutesLabel(START_MIN + displayEndSlot * SLOT_MIN),
         color,
         onDelete: () => removeRequests(run.reqs.map((r) => r.id)),
-        contextMenuItems: (x, y) =>
-          buildRequestRunMenu(activeMember, run, x, y),
+        contextMenuItems: () => buildRequestRunMenu(activeMember, run),
       };
     }),
     rangeStartSlot,

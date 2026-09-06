@@ -86,6 +86,7 @@ export async function saveCandidateCardAsImage(cardEl, title) {
       showToast("후보를 이미지로 저장했습니다", "success");
     }, "image/png");
   } catch (err) {
+    console.warn("이미지 저장 실패", err);
     showToast("이미지 저장에 실패했습니다.", "error");
   } finally {
     cardEl.removeAttribute(CAPTURE_ATTR);

@@ -633,7 +633,7 @@ export async function runSchedule2Pipeline(
       existingChain.forEach((node) => uncommit(day, node));
       const nodes = buildDayNodes(
         reqsByDay.get(day),
-        (mId, startSlot, locationId) => {
+        (mId) => {
           if (mId === memberId) return REBUILD_TARGET_WEIGHT;
           return isEligibleForDay(mId, day) ? 1 : 0;
         },
@@ -731,7 +731,7 @@ export async function runSchedule2Pipeline(
       existingChain.forEach((node) => uncommit(day, node));
       const nodes = buildDayNodes(
         reqsByDay.get(day),
-        (mId, startSlot, locationId) => (isEligibleForDay(mId, day) ? 1 : 0),
+        (mId) => (isEligibleForDay(mId, day) ? 1 : 0),
       );
       const newChain = runChainDP(nodes);
       newChain.forEach((node) => commit(day, node));
@@ -1752,10 +1752,8 @@ export async function runSchedule2Pipeline(
       let bestSnapshotSA = new Map(dayChains);
       let bestTravelSA = saTotalTravel();
       let bestIdleSA = saTotalIdle();
-      let iter = 0;
       while (now() < SA_DEADLINE) {
         await maybeYield();
-        iter++;
         const elapsedFrac = Math.min(1, (now() - saStart) / saDuration);
         temperature =
           SA_START_TEMP * Math.pow(SA_END_TEMP / SA_START_TEMP, elapsedFrac);

@@ -75,7 +75,7 @@ export async function acquireWakeLock() {
   if (!("wakeLock" in navigator)) return;
   try {
     wakeLockSentinel = await navigator.wakeLock.request("screen");
-  } catch (err) {
+  } catch {
     wakeLockSentinel = null;
   }
 }
@@ -85,7 +85,9 @@ export async function releaseWakeLock() {
   if (sentinel) {
     try {
       await sentinel.release();
-    } catch (err) {}
+    } catch {
+      // 이미 해제된 잠금을 다시 해제하려 할 때 등 — 무해하므로 무시한다.
+    }
   }
 }
 document.addEventListener("visibilitychange", () => {

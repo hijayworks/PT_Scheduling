@@ -253,7 +253,7 @@
     if (!("wakeLock" in navigator)) return;
     try {
       wakeLockSentinel = await navigator.wakeLock.request("screen");
-    } catch (err) {
+    } catch {
       wakeLockSentinel = null;
     }
   }
@@ -263,7 +263,7 @@
     if (sentinel) {
       try {
         await sentinel.release();
-      } catch (err) {
+      } catch {
       }
     }
   }
@@ -966,6 +966,7 @@
         showToast("후보를 이미지로 저장했습니다", "success");
       }, "image/png");
     } catch (err) {
+      console.warn("이미지 저장 실패", err);
       showToast("이미지 저장에 실패했습니다.", "error");
     } finally {
       cardEl.removeAttribute(CAPTURE_ATTR);
@@ -2412,7 +2413,7 @@
         existingChain.forEach((node) => uncommit(day, node));
         const nodes = buildDayNodes(
           reqsByDay.get(day),
-          (mId, startSlot, locationId) => {
+          (mId) => {
             if (mId === memberId) return REBUILD_TARGET_WEIGHT;
             return isEligibleForDay(mId, day) ? 1 : 0;
           }
@@ -2869,7 +2870,7 @@
         existingChain.forEach((node) => uncommit(day, node));
         const nodes = buildDayNodes(
           reqsByDay.get(day),
-          (mId, startSlot, locationId) => isEligibleForDay(mId, day) ? 1 : 0
+          (mId) => isEligibleForDay(mId, day) ? 1 : 0
         );
         const newChain = runChainDP(nodes);
         newChain.forEach((node) => commit(day, node));
@@ -3185,10 +3186,8 @@
         let bestSnapshotSA = new Map(dayChains);
         let bestTravelSA = saTotalTravel();
         let bestIdleSA = saTotalIdle();
-        let iter = 0;
         while (now() < SA_DEADLINE) {
           await maybeYield();
-          iter++;
           const elapsedFrac = Math.min(1, (now() - saStart) / saDuration);
           temperature = SA_START_TEMP * Math.pow(SA_END_TEMP / SA_START_TEMP, elapsedFrac);
           let applied = false;
@@ -5090,7 +5089,7 @@
     renderRequestList();
     showToast("지점이 제거되었습니다", "info");
   }
-  function buildRequestRunMenu(member, run, x, y) {
+  function buildRequestRunMenu(member, run) {
     const excluded = new Set(
       (member.locationIds || []).concat(requestRunExtraLocationIds(run))
     );
@@ -5241,7 +5240,7 @@
           sublabel: slotLabel(run.startSlot) + "~" + minutesLabel(START_MIN + displayEndSlot * SLOT_MIN),
           color,
           onDelete: () => removeRequests(run.reqs.map((r) => r.id)),
-          contextMenuItems: (x, y) => buildRequestRunMenu(activeMember, run, x, y)
+          contextMenuItems: () => buildRequestRunMenu(activeMember, run)
         };
       }),
       rangeStartSlot,
@@ -6992,7 +6991,7 @@
     try {
       await navigator.clipboard.writeText(backupExportTextareaEl.value);
       showToast("백업 코드를 복사했습니다", "success");
-    } catch (e) {
+    } catch {
       backupExportTextareaEl.select();
       showToast("복사에 실패했습니다. 직접 선택해 복사해주세요.", "error");
     }
@@ -7046,7 +7045,7 @@
     try {
       plainText = await decryptBackupText(code, pin);
       JSON.parse(plainText);
-    } catch (e) {
+    } catch {
       backupImportHintEl.textContent = "복원에 실패했습니다. 백업 코드와 PIN을 다시 확인해주세요.";
       return;
     }
