@@ -2018,6 +2018,21 @@ export function schedule2Signature(result) {
 // 필요가 없고, 카드 안의 배치 페이저만 그 카드 자신의 탐색(allPolished)에서 나온 진짜
 // 동점을 다룬다. SCHEDULE2_CARD_COUNT가 곧 카드 수이자 독립 탐색 그룹 수다.
 export const SCHEDULE2_CARD_COUNT = 3;
+// 담금질 계열 시간 예산은 전부 실측정 시간(ms) 기준이라, 데이터 크기와 무관하게 회원 1명짜리
+// 입력에서도 그대로 다 소모된다(schedule3.js 등에서 실제로 확인됨 — 카드당 최대 7분+α).
+// 스모크 테스트가 매번 이 시간을 다 기다리면 CI에서 못 돌리므로(현재 CI는 그래서
+// SMOKE_SKIP_A로 이 구간 전체를 건너뜀), 테스트 하네스가 명시적으로 지정했을 때만
+// window.__PT_TEST_BUDGET_SCALE__(0보다 크고 1 이하)로 아래 모든 시간 예산을 비례
+// 축소한다. 지정하지 않으면 항상 1이라 실제 사용 중인 운영 동작은 전혀 바뀌지 않는다.
+const TEST_BUDGET_SCALE =
+  (typeof window !== "undefined" &&
+    window.__PT_TEST_BUDGET_SCALE__ > 0 &&
+    window.__PT_TEST_BUDGET_SCALE__ <= 1 &&
+    window.__PT_TEST_BUDGET_SCALE__) ||
+  1;
+function scaledBudgetMs(fullMs, minMs) {
+  return Math.max(minMs, Math.round(fullMs * TEST_BUDGET_SCALE));
+}
 // 카드 3장을 도입하며 "총 대기 시간을 비슷하게" 유지하려고 그룹당 예산을 통짜 탐색의 1/3로
 // 줄였었는데, 그러면 실제(회원 수가 많은) 데이터에서는 카드마다 도달하는 최적화 수준이
 // 달라진다(예: 수업 30/27/29건처럼 카드마다 실제로 다른 결과에 머묾 — 실제로 이 문제로
@@ -2025,11 +2040,11 @@ export const SCHEDULE2_CARD_COUNT = 3;
 // 가능한 최댓값에 확실히 닿아야 의미가 있다. 그래서 카드당 예산을 통짜 탐색이 쓰던 값
 // 그대로 되돌렸다 — 총 대기 시간은 카드 수(3)에 비례해 늘어난다(최악의 경우 약 20분대).
 export const PER_GROUP_DAY_ORDER_SHUFFLES = 400; // 그룹마다 시도할 무작위 요일 순서 수
-export const PER_GROUP_SEARCH_DEADLINE_MS = 30000;
+export const PER_GROUP_SEARCH_DEADLINE_MS = scaledBudgetMs(30000, 50);
 export const PER_GROUP_MAX_POLISH_CANDIDATES = 16; // 다듬기 전 지표 상위권 요일 순서 중 그룹당 최대 이만큼만 서로 다른 시작점으로 쓴다
 export const PER_GROUP_MAX_POLISH_ATTEMPTS = 48; // 요일 순서와 담금질 시드 재시작을 합쳐 그룹당 최대 이만큼만 다듬어본다
-export const PER_GROUP_TOTAL_POLISH_BUDGET_MS = 420000;
-export const MIN_POLISH_BUDGET_MS = 6000; // 시도가 여럿이어도 담금질이 의미 있으려면 한 시도당 최소한 이 정도는 필요하다
+export const PER_GROUP_TOTAL_POLISH_BUDGET_MS = scaledBudgetMs(420000, 480);
+export const MIN_POLISH_BUDGET_MS = scaledBudgetMs(6000, 10); // 시도가 여럿이어도 담금질이 의미 있으려면 한 시도당 최소한 이 정도는 필요하다
 // 카드 간 목표 공유: 이 카드가, 앞서 끝난 카드가 이미 도달한 "미배정 없음 → 수업 횟수"
 // 수준(targetFloor)에 정규 탐색 예산(PER_GROUP_SEARCH_DEADLINE_MS) 안에 못 미치면, 그
 // 수준이 이 데이터에서 실제로 달성 가능하다는 뜻이므로 곧장 다듬기로 넘어가지 않고 더
@@ -2043,8 +2058,8 @@ export const MIN_POLISH_BUDGET_MS = 6000; // 시도가 여럿이어도 담금질
 // 문제가 해결되지 않는 사례로 확인됨). 그래서 목표에 못 미치면 신청 배열 자체를 통째로
 // 다시 섞은 "대안 골격"(alt base)을 여러 번 새로 만들어, 그 골격 안에서 짧게 요일 순서를
 // 탐색해보고 더 나은 결과를 찾으면 그 골격으로 완전히 갈아탄다.
-export const TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = 90000;
-export const TARGET_MATCH_ALT_BASE_BUDGET_MS = 8000; // 대안 골격 하나에 쓸 수 있는 시간 상한
+export const TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = scaledBudgetMs(90000, 100);
+export const TARGET_MATCH_ALT_BASE_BUDGET_MS = scaledBudgetMs(8000, 20); // 대안 골격 하나에 쓸 수 있는 시간 상한
 export const TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40; // 대안 골격 하나에서 시도할 무작위 요일 순서 수
 
 // 재시작 그룹 하나를 처음부터 끝까지(요일 순서 탐색 → 다듬기) 돌려 그 그룹의 최종 결과

@@ -3352,14 +3352,18 @@
     ).sort().join(",");
   }
   var SCHEDULE2_CARD_COUNT = 3;
+  var TEST_BUDGET_SCALE = typeof window !== "undefined" && window.__PT_TEST_BUDGET_SCALE__ > 0 && window.__PT_TEST_BUDGET_SCALE__ <= 1 && window.__PT_TEST_BUDGET_SCALE__ || 1;
+  function scaledBudgetMs(fullMs, minMs) {
+    return Math.max(minMs, Math.round(fullMs * TEST_BUDGET_SCALE));
+  }
   var PER_GROUP_DAY_ORDER_SHUFFLES = 400;
-  var PER_GROUP_SEARCH_DEADLINE_MS = 3e4;
+  var PER_GROUP_SEARCH_DEADLINE_MS = scaledBudgetMs(3e4, 50);
   var PER_GROUP_MAX_POLISH_CANDIDATES = 16;
   var PER_GROUP_MAX_POLISH_ATTEMPTS = 48;
-  var PER_GROUP_TOTAL_POLISH_BUDGET_MS = 42e4;
-  var MIN_POLISH_BUDGET_MS = 6e3;
-  var TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = 9e4;
-  var TARGET_MATCH_ALT_BASE_BUDGET_MS = 8e3;
+  var PER_GROUP_TOTAL_POLISH_BUDGET_MS = scaledBudgetMs(42e4, 480);
+  var MIN_POLISH_BUDGET_MS = scaledBudgetMs(6e3, 10);
+  var TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = scaledBudgetMs(9e4, 100);
+  var TARGET_MATCH_ALT_BASE_BUDGET_MS = scaledBudgetMs(8e3, 20);
   var TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40;
   async function runSchedule2RestartGroup(eligibleReqsMaster, groupSeed, groupIndex, onProgress, targetFloor) {
     const randomFn = mulberry32(groupSeed);

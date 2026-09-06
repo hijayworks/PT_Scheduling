@@ -6,8 +6,11 @@
 //
 // 후보A(체인DP) 생성은 카드 3장 각각이 시간 예산제 다듬기(최대 90초/카드, 데이터 크기와
 // 무관하게 시간 비율로 식히는 방식)를 쓰므로 트리비얼한 입력에서도 수 분이 걸릴 수 있다.
-// 리팩터링 중 빠르게 반복 확인할 때는 SMOKE_SKIP_A=1로 그 부분만 건너뛸 수 있다 — 최종
-// 검증 때는 반드시 SMOKE_SKIP_A 없이 한 번 더 돌릴 것.
+// 그래서 기본값으로는 chainDp.js의 window.__PT_TEST_BUDGET_SCALE__ 훅을 이용해 모든 시간
+// 예산을 비례 축소해(SMOKE_A_BUDGET_SCALE, 기본 0.005) 몇 초 안에 끝내면서도 실제 코드
+// 경로(탐색→다듬기→담금질)는 그대로 exercise한다 — 결과 품질이 아니라 "안 깨졌는지"만
+// 보는 스모크 테스트 목적에 맞다. 완전히 건너뛰려면 SMOKE_SKIP_A=1, 실제 운영 예산 그대로
+// (수 분~수십 분) 돌려 진짜 성능/품질까지 확인하려면 SMOKE_FULL_BUDGET_A=1을 쓴다.
 "use strict";
 
 const path = require("path");
@@ -17,6 +20,8 @@ const ROOT = path.resolve(__dirname, "..");
 const INDEX_URL = "file://" + path.join(ROOT, "index.html");
 const STORAGE_KEY = "pt_schedule_state_v3";
 const SKIP_A = process.env.SMOKE_SKIP_A === "1";
+const FULL_BUDGET_A = process.env.SMOKE_FULL_BUDGET_A === "1";
+const A_BUDGET_SCALE = Number(process.env.SMOKE_A_BUDGET_SCALE || "0.005");
 
 // 트레이너 근무 가능 시간(월요일 14:00~17:00)과 그 안에 들어오는 회원 희망 시간 하나를
 // 미리 채워서, 실제 UI(커스텀 드롭다운·그리드 클릭)를 조작하지 않고도 두 생성 엔진
@@ -70,6 +75,14 @@ async function main() {
       ({ key, data }) => localStorage.setItem(key, JSON.stringify(data)),
       { key: STORAGE_KEY, data: buildSeedState() }
     );
+    if (!SKIP_A && !FULL_BUDGET_A) {
+      await page.addInitScript(
+        (scale) => {
+          window.__PT_TEST_BUDGET_SCALE__ = scale;
+        },
+        A_BUDGET_SCALE
+      );
+    }
 
     await page.goto(INDEX_URL);
     await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
@@ -85,13 +98,16 @@ async function main() {
     if (SKIP_A) {
       console.log("SMOKE_SKIP_A=1 — 후보A(체인DP) 검증은 건너뜀");
     } else {
-      // 후보A(체인DP) 생성 — 카드 3장 × 그룹당 최대 7분(PER_GROUP_TOTAL_POLISH_BUDGET_MS)
-      // 시간 예산제 다듬기라, 회원 1명짜리 트리비얼한 입력은 물론 회원 8명짜리로도 실측
-      // 90초에 진행률 22%(선형 추정 시 40분 이상)로 확인됨. 이건 이번 모듈 분리 작업과
-      // 무관한 기존 알고리즘 설계(시간 비율 기반 담금질) 특성이라 여기서 고치지 않고,
-      // 테스트 타임아웃만 넉넉히 잡는다 — CI처럼 매번 자동으로 도는 환경이 아니라면
-      // SMOKE_SKIP_A=1로 이 구간을 건너뛰고 필요할 때만 수동으로 전체 검증하는 걸 권장.
-      await clickGenerateAndWait(page, "#generateBtnA3", 45 * 60 * 1000);
+      // 후보A(체인DP) 생성. 기본값은 위에서 주입한 __PT_TEST_BUDGET_SCALE__로 모든 시간
+      // 예산을 축소해 몇 초 안에 끝난다. SMOKE_FULL_BUDGET_A=1이면 실제 운영 예산(카드 3장 ×
+      // 그룹당 최대 7분) 그대로 돌린다 — 회원 1명짜리 트리비얼한 입력도 실측 몇 분~수십 분이
+      // 걸릴 수 있으므로(시간 비율 기반 담금질이라 데이터 크기와 무관), 그만큼 타임아웃도
+      // 늘어난다.
+      await clickGenerateAndWait(
+        page,
+        "#generateBtnA3",
+        FULL_BUDGET_A ? 45 * 60 * 1000 : 60 * 1000
+      );
       state = await readState(page);
       assert(
         state && state.schedule3Result && state.schedule3Result.candidateAList
@@ -123,7 +139,14 @@ async function main() {
     failures.forEach((f) => console.error("  - " + f));
     process.exit(1);
   }
-  console.log("PASS — 스모크 테스트 통과" + (SKIP_A ? " (후보A 생략)" : " (후보A/B/C 생성, 새로고침 유지, 회원 목록 렌더링 확인됨)"));
+  const aNote = SKIP_A
+    ? "후보A 생략"
+    : FULL_BUDGET_A
+      ? "후보A 실제 운영 예산으로 검증"
+      : "후보A 예산 축소 검증";
+  console.log(
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보B/C 생성, 새로고침 유지, 회원 목록 렌더링 확인됨)"
+  );
 }
 
 main().catch((err) => {

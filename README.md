@@ -46,6 +46,12 @@ git commit 시 pre-commit 훅이 `npm run build`와 캐시 버스팅 버전(`?v=
 GitHub Actions CI(`.github/workflows/ci.yml`)가 `npm run build` 후 `script.js` diff를
 검사해 실패시킵니다 — 훅은 예방, CI는 안전망입니다.
 
-`npm test`가 실행하는 후보A(체인DP) 생성 검증은 담금질 다듬기가 시간 예산제(카드 3장 ×
-최대 90초)라 데이터가 아주 적어도 실측 몇 분~십수 분이 걸릴 수 있습니다 — 빠르게 반복
-확인할 때는 `SMOKE_SKIP_A=1 npm test`로 그 부분만 건너뛸 수 있습니다.
+후보A(체인DP) 생성은 담금질 다듬기가 시간 예산제(카드 3장 × 최대 7분+α)라, 데이터가 아주
+적어도 실제 운영 예산 그대로면 몇 분~수십 분이 걸릴 수 있습니다. 그래서 `npm test`는 기본값
+으로 시간 예산을 비례 축소해(`chainDp.js`의 `window.__PT_TEST_BUDGET_SCALE__`) 몇 초 안에
+후보A까지 포함해 전체 흐름을 검증합니다 — CI도 이 기본값으로 돕니다. 필요에 따라:
+
+- 후보A 자체를 건너뛰려면: `SMOKE_SKIP_A=1 npm test`
+- 실제 운영 예산 그대로(진짜 성능/품질까지) 검증하려면: `SMOKE_FULL_BUDGET_A=1 npm test`
+  (타임아웃이 45분으로 늘어납니다)
+- 축소 비율을 직접 조절하려면: `SMOKE_A_BUDGET_SCALE=0.02 npm test` (기본값 0.005)
