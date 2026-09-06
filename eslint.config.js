@@ -81,5 +81,19 @@ module.exports = [
       "no-unused-vars": "warn",
       "no-undef": "error"
     }
+  },
+  {
+    // tests/unit.js가 esbuild로 번들링해 요구(require)하는 진입점 — src/**/*.js처럼
+    // export/import를 쓰는 ES 모듈이라 이 파일만 sourceType을 module로 되돌린다.
+    files: ["tests/unit/entry.js"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: browserGlobals
+    },
+    rules: {
+      "no-unused-vars": "warn",
+      "no-undef": "error"
+    }
   }
 ];

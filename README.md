@@ -33,11 +33,17 @@ npm install
 `src/`를 고친 뒤에는:
 
 ```sh
-npm run build   # src/ -> script.js 번들링
-npm test        # tests/smoke.js (Playwright 헤드리스 E2E 스모크 테스트)
-npm run lint    # ESLint
-npm run format  # Prettier
+npm run build      # src/ -> script.js 번들링
+npm test           # tests/unit.js(단위 테스트) + tests/smoke.js(E2E 스모크 테스트)
+npm run test:unit  # tests/unit.js만 — 브라우저 없이 수십 ms 안에 끝남
+npm run lint       # ESLint
+npm run format     # Prettier
 ```
+
+`tests/unit.js`는 `src/`의 순수 로직(시간 계산, 이동 시간, 체인DP 알고리즘 등)을 esbuild로
+`tests/unit/entry.js` 하나만 번들링해 Node에서 바로 검증합니다 — 브라우저를 띄우는 스모크
+테스트보다 훨씬 빠르고, 실패 지점을 함수 단위로 좁혀줍니다. 새 순수 함수를 추가했으면
+`tests/unit/entry.js`에 export를 추가하고 `tests/unit.js`에 테스트를 더하세요.
 
 git commit 시 pre-commit 훅이 `npm run build`와 캐시 버스팅 버전(`?v=`) 갱신을 자동으로
 실행하므로, 평소에는 `src/`만 고치고 커밋하면 됩니다.
