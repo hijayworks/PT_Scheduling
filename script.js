@@ -2023,7 +2023,7 @@
     showToast("이전 후보로 되돌아갔습니다", "info");
   }
 
-  // src/engine/chainDp.js
+  // src/engine/chainDpCore.js
   function sessionDurationFor2(member) {
     return (member && (member.category || "상담")) === "상담" ? CONSULT_DURATION_MIN_2 : SESSION_DURATION_MIN_2;
   }
@@ -2160,6 +2160,27 @@
     }
     return chain;
   }
+
+  // src/engine/rng.js
+  function mulberry32(seed) {
+    return function() {
+      seed |= 0;
+      seed = seed + 1831565813 | 0;
+      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function shuffled(arr, randomFn) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(randomFn() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  // src/engine/chainDpPolish.js
   async function runSchedule2Pipeline(eligibleReqs, reqsByDay, daysWithReqs, stage1DayOrder, runRepair, runPolish, polishBudgetMs, seedOffset) {
     seedOffset = seedOffset || 0;
     let yieldOverheadMs = 0;
@@ -2411,13 +2432,10 @@
         const beforeUnassigned = stillUnassignedIds().length;
         const existingChain = dayChains.get(day) || [];
         existingChain.forEach((node) => uncommit(day, node));
-        const nodes = buildDayNodes(
-          reqsByDay.get(day),
-          (mId) => {
-            if (mId === memberId) return REBUILD_TARGET_WEIGHT;
-            return isEligibleForDay(mId, day) ? 1 : 0;
-          }
-        );
+        const nodes = buildDayNodes(reqsByDay.get(day), (mId) => {
+          if (mId === memberId) return REBUILD_TARGET_WEIGHT;
+          return isEligibleForDay(mId, day) ? 1 : 0;
+        });
         const newChain = runChainDP(nodes);
         if (!newChain.some((n) => n.memberId === memberId)) {
           existingChain.forEach((node) => commit(day, node));
@@ -3304,23 +3322,8 @@
     const unassignedMembers = eligibleMemberIds.filter((id) => !assignedMemberIds.has(id)).map(memberById).filter(Boolean);
     return { assigned, unassignedMembers };
   }
-  function mulberry32(seed) {
-    return function() {
-      seed |= 0;
-      seed = seed + 1831565813 | 0;
-      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
-      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-      return ((t ^ t >>> 14) >>> 0) / 4294967296;
-    };
-  }
-  function shuffled(arr, randomFn) {
-    const a = arr.slice();
-    for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(randomFn() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]];
-    }
-    return a;
-  }
+
+  // src/engine/scheduleCompare.js
   function isSchedule2ResultBetter(a, b) {
     if (a.unassignedMembers.length !== b.unassignedMembers.length) {
       return a.unassignedMembers.length < b.unassignedMembers.length;
@@ -3350,6 +3353,54 @@
       (r) => r.memberId + "|" + r.day + "|" + r.startSlot + "|" + r.locationId
     ).sort().join(",");
   }
+  function schedule2ToIdleBlocks(assigned) {
+    const byDay = /* @__PURE__ */ new Map();
+    assigned.forEach((r) => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    const idleBlocks = [];
+    byDay.forEach((reqs) => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1], cur = sorted[i];
+        const travelSlots = requiredGapMin2(prev.locationId, cur.locationId) / SLOT_MIN;
+        const idleStartSlot = prev.startSlot + durationToSlots(prev.duration) + travelSlots;
+        const idleEndSlot = cur.startSlot;
+        if (idleEndSlot > idleStartSlot) {
+          const mins = (idleEndSlot - idleStartSlot) * SLOT_MIN;
+          idleBlocks.push({
+            day: prev.day,
+            startSlot: idleStartSlot,
+            duration: mins,
+            label: "빈 시간 " + mins + "분",
+            type: "idle"
+          });
+        }
+      }
+    });
+    return idleBlocks;
+  }
+  function schedule2TotalIdleMinutes(assigned) {
+    let idle = 0;
+    const byDay = /* @__PURE__ */ new Map();
+    assigned.forEach((r) => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    byDay.forEach((reqs) => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1], cur = sorted[i];
+        const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;
+        const needMin = requiredGapMin2(prev.locationId, cur.locationId);
+        idle += Math.max(0, gapMin - needMin);
+      }
+    });
+    return idle;
+  }
+
+  // src/engine/chainDp.js
   var SCHEDULE2_CARD_COUNT = 3;
   var TEST_BUDGET_SCALE = typeof window !== "undefined" && window.__PT_TEST_BUDGET_SCALE__ > 0 && window.__PT_TEST_BUDGET_SCALE__ <= 1 && window.__PT_TEST_BUDGET_SCALE__ || 1;
   function scaledBudgetMs(fullMs, minMs) {
@@ -3575,52 +3626,6 @@
     }
     if (onProgress) onProgress(1);
     return cards;
-  }
-  function schedule2ToIdleBlocks(assigned) {
-    const byDay = /* @__PURE__ */ new Map();
-    assigned.forEach((r) => {
-      if (!byDay.has(r.day)) byDay.set(r.day, []);
-      byDay.get(r.day).push(r);
-    });
-    const idleBlocks = [];
-    byDay.forEach((reqs) => {
-      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
-      for (let i = 1; i < sorted.length; i++) {
-        const prev = sorted[i - 1], cur = sorted[i];
-        const travelSlots = requiredGapMin2(prev.locationId, cur.locationId) / SLOT_MIN;
-        const idleStartSlot = prev.startSlot + durationToSlots(prev.duration) + travelSlots;
-        const idleEndSlot = cur.startSlot;
-        if (idleEndSlot > idleStartSlot) {
-          const mins = (idleEndSlot - idleStartSlot) * SLOT_MIN;
-          idleBlocks.push({
-            day: prev.day,
-            startSlot: idleStartSlot,
-            duration: mins,
-            label: "빈 시간 " + mins + "분",
-            type: "idle"
-          });
-        }
-      }
-    });
-    return idleBlocks;
-  }
-  function schedule2TotalIdleMinutes(assigned) {
-    let idle = 0;
-    const byDay = /* @__PURE__ */ new Map();
-    assigned.forEach((r) => {
-      if (!byDay.has(r.day)) byDay.set(r.day, []);
-      byDay.get(r.day).push(r);
-    });
-    byDay.forEach((reqs) => {
-      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
-      for (let i = 1; i < sorted.length; i++) {
-        const prev = sorted[i - 1], cur = sorted[i];
-        const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;
-        const needMin = requiredGapMin2(prev.locationId, cur.locationId);
-        idle += Math.max(0, gapMin - needMin);
-      }
-    });
-    return idle;
   }
 
   // src/pages/memberSchedule.js
