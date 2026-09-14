@@ -3415,56 +3415,57 @@
   var TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = scaledBudgetMs(9e4, 100);
   var TARGET_MATCH_ALT_BASE_BUDGET_MS = scaledBudgetMs(8e3, 20);
   var TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40;
+  var QUALITY_CATCHUP_BUDGET_MS = scaledBudgetMs(9e4, 100);
+  function groupByDay(reqs) {
+    const reqsByDay = /* @__PURE__ */ new Map();
+    DAYS.forEach((_, d) => reqsByDay.set(d, []));
+    reqs.forEach((r) => reqsByDay.get(r.day).push(r));
+    const daysWithReqs = Array.from(reqsByDay.keys()).filter(
+      (d) => reqsByDay.get(d).length > 0
+    );
+    return { reqsByDay, daysWithReqs };
+  }
+  function fixedDayOrders(daysWithReqs, reqsByDay) {
+    const memberCountOf = (day) => new Set(reqsByDay.get(day).map((r) => r.memberId)).size;
+    return [
+      daysWithReqs.slice().sort((a, b) => memberCountOf(a) - memberCountOf(b)),
+      daysWithReqs.slice().sort((a, b) => memberCountOf(b) - memberCountOf(a)),
+      daysWithReqs.slice().sort((a, b) => a - b),
+      daysWithReqs.slice().sort((a, b) => b - a)
+    ];
+  }
+  async function searchWithinBase(reqs, reqsByDay, daysWithReqs, shuffleCount, deadlineMs, seedBase, randomFn, onEval) {
+    const dayOrdersToTry = fixedDayOrders(daysWithReqs, reqsByDay);
+    for (let k = 0; k < shuffleCount; k++)
+      dayOrdersToTry.push(shuffled(daysWithReqs, randomFn));
+    const deadline = performance.now() + deadlineMs;
+    let best = null, bestOrder = null, bestSeedOffset = null;
+    const evaluated = [];
+    for (let i = 0; i < dayOrdersToTry.length; i++) {
+      const seedOffset = seedBase + i;
+      const result = await runSchedule2Pipeline(
+        reqs,
+        reqsByDay,
+        daysWithReqs,
+        dayOrdersToTry[i],
+        true,
+        false,
+        void 0,
+        seedOffset
+      );
+      evaluated.push({ order: dayOrdersToTry[i], seedOffset, result });
+      if (!best || isSchedule2ResultBetter(result, best)) {
+        best = result;
+        bestOrder = dayOrdersToTry[i];
+        bestSeedOffset = seedOffset;
+      }
+      if (onEval) await onEval();
+      if (performance.now() >= deadline) break;
+    }
+    return { evaluated, best, bestOrder, bestSeedOffset };
+  }
   async function runSchedule2RestartGroup(eligibleReqsMaster, groupSeed, groupIndex, onProgress, targetFloor) {
     const randomFn = mulberry32(groupSeed);
-    function groupByDay(reqs) {
-      const reqsByDay2 = /* @__PURE__ */ new Map();
-      DAYS.forEach((_, d) => reqsByDay2.set(d, []));
-      reqs.forEach((r) => reqsByDay2.get(r.day).push(r));
-      const daysWithReqs2 = Array.from(reqsByDay2.keys()).filter(
-        (d) => reqsByDay2.get(d).length > 0
-      );
-      return { reqsByDay: reqsByDay2, daysWithReqs: daysWithReqs2 };
-    }
-    function fixedDayOrders(daysWithReqs2, reqsByDay2) {
-      const memberCountOf = (day) => new Set(reqsByDay2.get(day).map((r) => r.memberId)).size;
-      return [
-        daysWithReqs2.slice().sort((a, b) => memberCountOf(a) - memberCountOf(b)),
-        daysWithReqs2.slice().sort((a, b) => memberCountOf(b) - memberCountOf(a)),
-        daysWithReqs2.slice().sort((a, b) => a - b),
-        daysWithReqs2.slice().sort((a, b) => b - a)
-      ];
-    }
-    async function searchWithinBase(reqs, reqsByDay2, daysWithReqs2, shuffleCount, deadlineMs, seedBase, onEval) {
-      const dayOrdersToTry = fixedDayOrders(daysWithReqs2, reqsByDay2);
-      for (let k = 0; k < shuffleCount; k++)
-        dayOrdersToTry.push(shuffled(daysWithReqs2, randomFn));
-      const deadline = performance.now() + deadlineMs;
-      let best2 = null, bestOrder2 = null, bestSeedOffset2 = null;
-      const evaluated2 = [];
-      for (let i = 0; i < dayOrdersToTry.length; i++) {
-        const seedOffset = seedBase + i;
-        const result = await runSchedule2Pipeline(
-          reqs,
-          reqsByDay2,
-          daysWithReqs2,
-          dayOrdersToTry[i],
-          true,
-          false,
-          void 0,
-          seedOffset
-        );
-        evaluated2.push({ order: dayOrdersToTry[i], seedOffset, result });
-        if (!best2 || isSchedule2ResultBetter(result, best2)) {
-          best2 = result;
-          bestOrder2 = dayOrdersToTry[i];
-          bestSeedOffset2 = seedOffset;
-        }
-        if (onEval) await onEval();
-        if (performance.now() >= deadline) break;
-      }
-      return { evaluated: evaluated2, best: best2, bestOrder: bestOrder2, bestSeedOffset: bestSeedOffset2 };
-    }
     let eligibleReqs = shuffled(eligibleReqsMaster, randomFn);
     let grouping = groupByDay(eligibleReqs);
     let reqsByDay = grouping.reqsByDay, daysWithReqs = grouping.daysWithReqs;
@@ -3476,6 +3477,7 @@
       PER_GROUP_DAY_ORDER_SHUFFLES,
       PER_GROUP_SEARCH_DEADLINE_MS,
       groupIndex * 5e6,
+      randomFn,
       async () => {
         if (onProgress) {
           progressMax = Math.min(
@@ -3507,6 +3509,7 @@
           TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES,
           altBudget,
           groupIndex * 5e6 + altRestartCount * 1e6,
+          randomFn,
           async () => {
             if (onProgress) {
               progressMax = Math.min(0.549, progressMax + 2e-3);
@@ -3602,6 +3605,72 @@
     }
     return { result: bestPolished, pool: tied };
   }
+  async function runQualityCatchUpRound(eligibleReqsMaster, groupSeed, groupIndex, qualityTarget, currentBest, currentPool, budgetMs) {
+    const randomFn = mulberry32(groupSeed + 999999937);
+    const deadline = performance.now() + budgetMs;
+    let best = currentBest;
+    const extraPolished = [];
+    let altRestartCount = 0;
+    while (performance.now() < deadline && isSchedule2ResultBetter(qualityTarget, best)) {
+      altRestartCount++;
+      const altReqs = shuffled(eligibleReqsMaster, randomFn);
+      const altGrouping = groupByDay(altReqs);
+      const altBudget = Math.min(
+        TARGET_MATCH_ALT_BASE_BUDGET_MS,
+        Math.max(0, deadline - performance.now())
+      );
+      if (altBudget <= 0) break;
+      const alt = await searchWithinBase(
+        altReqs,
+        altGrouping.reqsByDay,
+        altGrouping.daysWithReqs,
+        TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES,
+        altBudget,
+        groupIndex * 5e6 + 8e6 + altRestartCount * 1e6,
+        randomFn,
+        async () => {
+          await yieldToUI();
+          checkGenerationCancelled();
+        }
+      );
+      if (!alt.bestOrder) continue;
+      const polishBudget = Math.max(
+        MIN_POLISH_BUDGET_MS,
+        Math.min(altBudget, Math.max(0, deadline - performance.now()))
+      );
+      if (polishBudget <= 0) break;
+      const altPolished = await runSchedule2Pipeline(
+        altReqs,
+        altGrouping.reqsByDay,
+        altGrouping.daysWithReqs,
+        alt.bestOrder,
+        true,
+        true,
+        polishBudget,
+        alt.bestSeedOffset
+      );
+      extraPolished.push(altPolished);
+      if (isSchedule2ResultBetter(altPolished, best)) best = altPolished;
+    }
+    if (best === currentBest) return { result: currentBest, pool: currentPool };
+    const bestSig = schedule2Signature(best);
+    const tied = [];
+    const seenTieSig = /* @__PURE__ */ new Set();
+    [best, ...extraPolished].forEach((cand) => {
+      if (isSchedule2ResultBetter(cand, best) || isSchedule2ResultBetter(best, cand))
+        return;
+      const sig = schedule2Signature(cand);
+      if (seenTieSig.has(sig)) return;
+      seenTieSig.add(sig);
+      if (tied.length < MAX_POOL_VARIANTS)
+        tied.push(sig === bestSig ? best : cand);
+    });
+    if (!tied.includes(best)) {
+      if (tied.length >= MAX_POOL_VARIANTS) tied.length = MAX_POOL_VARIANTS - 1;
+      tied.unshift(best);
+    }
+    return { result: best, pool: tied };
+  }
   async function generateSchedule2Async(onProgress) {
     const eligibleReqs = state.requests.filter(isEligibleRequest2);
     const cards = [];
@@ -3623,6 +3692,34 @@
       );
       if (card && card.result && floorIsBetter(card.result, targetFloor))
         targetFloor = card.result;
+    }
+    if (targetFloor) {
+      let bestQualityAtTop = null;
+      cards.forEach((c) => {
+        if (c.result && !floorIsBetter(targetFloor, c.result)) {
+          if (!bestQualityAtTop || isSchedule2ResultBetter(c.result, bestQualityAtTop))
+            bestQualityAtTop = c.result;
+        }
+      });
+      if (bestQualityAtTop) {
+        for (let g = 0; g < cards.length; g++) {
+          const c = cards[g];
+          if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
+          if (!isSchedule2ResultBetter(bestQualityAtTop, c.result)) continue;
+          const groupSeed = 20260823 + g * 104729;
+          cards[g] = await runQualityCatchUpRound(
+            eligibleReqs,
+            groupSeed,
+            g,
+            bestQualityAtTop,
+            c.result,
+            c.pool,
+            QUALITY_CATCHUP_BUDGET_MS
+          );
+          await yieldToUI();
+          checkGenerationCancelled();
+        }
+      }
     }
     if (onProgress) onProgress(1);
     return cards;

@@ -97,57 +97,53 @@ export const MIN_POLISH_BUDGET_MS = scaledBudgetMs(6000, 10); // 시도가 여�
 export const TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = scaledBudgetMs(90000, 100);
 export const TARGET_MATCH_ALT_BASE_BUDGET_MS = scaledBudgetMs(8000, 20); // 대안 골격 하나에 쓸 수 있는 시간 상한
 export const TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40; // 대안 골격 하나에서 시도할 무작위 요일 순서 수
+// 카드 간 품질 하한 공유(2차 패스, generateSchedule2Async 아래 참고)가 못 따라잡은 카드에
+// 추가로 쓰는 시간 예산 — TARGET_MATCH_*와 같은 규모로 맞춘다(대안 골격을 몇 개 더 만들어
+// 짧게 탐색+다듬어보는 같은 방식이라 시간 감도 비슷할 것으로 보고 재사용).
+export const QUALITY_CATCHUP_BUDGET_MS = scaledBudgetMs(90000, 100);
 
-// 재시작 그룹 하나를 처음부터 끝까지(요일 순서 탐색 → 다듬기) 돌려 그 그룹의 최종 결과
-// 하나를 반환한다. groupSeed가 요일 순서 무작위 셔플을 결정하고, groupIndex는 다듬기
-// 단계의 담금질 시드가 그룹끼리 겹치지 않도록 seedOffset의 밑변을 벌려준다.
-export async function runSchedule2RestartGroup(
-  eligibleReqsMaster,
-  groupSeed,
-  groupIndex,
-  onProgress,
-  targetFloor,
+// 신청 배열 순서(base) 하나를 요일별로 묶는다. runSchedule2RestartGroup과(카드 간 품질
+// 하한을 못 따라잡은 카드를 2차로 다시 탐색하는) runQualityCatchUpRound가 함께 쓴다.
+function groupByDay(reqs) {
+  const reqsByDay = new Map();
+  DAYS.forEach((_, d) => reqsByDay.set(d, []));
+  reqs.forEach((r) => reqsByDay.get(r.day).push(r));
+  const daysWithReqs = Array.from(reqsByDay.keys()).filter(
+    (d) => reqsByDay.get(d).length > 0,
+  );
+  return { reqsByDay, daysWithReqs };
+}
+function fixedDayOrders(daysWithReqs, reqsByDay) {
+  const memberCountOf = (day) =>
+    new Set(reqsByDay.get(day).map((r) => r.memberId)).size;
+  return [
+    daysWithReqs.slice().sort((a, b) => memberCountOf(a) - memberCountOf(b)),
+    daysWithReqs.slice().sort((a, b) => memberCountOf(b) - memberCountOf(a)),
+    daysWithReqs.slice().sort((a, b) => a - b),
+    daysWithReqs.slice().sort((a, b) => b - a),
+  ];
+}
+// base(신청 배열 순서) 하나를 고정해두고, 그 안에서 요일 순서를 최대한 탐색해 이 base의
+// 최선 결과를 찾는다. 회원·신청이 아주 많으면 요일 순서 후보 하나를 시도하는 데도 시간이
+// 걸리므로(복구 단계 포함), 시간 예산을 둔다 — 예산을 넘기면 그때까지 찾은 가장 좋은
+// 순서로 넘어간다. seedBase는 그리디 1·2단계 지터 시드의 밑변(호출하는 쪽에서 base·시도
+// 끼리 겹치지 않도록 충분히 벌려서 넘긴다). randomFn은 호출하는 쪽(재시작 그룹 또는 품질
+// 하한 따라잡기)이 쓰는 요일 순서 셔플용 의사난수를 그대로 받아 전체 탐색이 하나의 시드
+// 계열로 재현 가능하게 한다.
+async function searchWithinBase(
+  reqs,
+  reqsByDay,
+  daysWithReqs,
+  shuffleCount,
+  deadlineMs,
+  seedBase,
+  randomFn,
+  onEval,
 ) {
-  const randomFn = mulberry32(groupSeed);
-
-  // 신청 배열 순서(base) 하나를 요일별로 묶는다.
-  function groupByDay(reqs) {
-    const reqsByDay = new Map();
-    DAYS.forEach((_, d) => reqsByDay.set(d, []));
-    reqs.forEach((r) => reqsByDay.get(r.day).push(r));
-    const daysWithReqs = Array.from(reqsByDay.keys()).filter(
-      (d) => reqsByDay.get(d).length > 0,
-    );
-    return { reqsByDay, daysWithReqs };
-  }
-  function fixedDayOrders(daysWithReqs, reqsByDay) {
-    const memberCountOf = (day) =>
-      new Set(reqsByDay.get(day).map((r) => r.memberId)).size;
-    return [
-      daysWithReqs.slice().sort((a, b) => memberCountOf(a) - memberCountOf(b)),
-      daysWithReqs.slice().sort((a, b) => memberCountOf(b) - memberCountOf(a)),
-      daysWithReqs.slice().sort((a, b) => a - b),
-      daysWithReqs.slice().sort((a, b) => b - a),
-    ];
-  }
-  // base(신청 배열 순서) 하나를 고정해두고, 그 안에서 요일 순서를 최대한 탐색해 이 base의
-  // 최선 결과를 찾는다. 회원·신청이 아주 많으면 요일 순서 후보 하나를 시도하는 데도 시간이
-  // 걸리므로(복구 단계 포함), 시간 예산을 둔다 — 예산을 넘기면 그때까지 찾은 가장 좋은
-  // 순서로 넘어간다. seedBase는 그리디 1·2단계 지터 시드의 밑변(호출하는 쪽에서 base·시도
-  // 끼리 겹치지 않도록 충분히 벌려서 넘긴다).
-  async function searchWithinBase(
-    reqs,
-    reqsByDay,
-    daysWithReqs,
-    shuffleCount,
-    deadlineMs,
-    seedBase,
-    onEval,
-  ) {
-    const dayOrdersToTry = fixedDayOrders(daysWithReqs, reqsByDay);
-    for (let k = 0; k < shuffleCount; k++)
-      dayOrdersToTry.push(shuffled(daysWithReqs, randomFn));
-    const deadline = performance.now() + deadlineMs;
+  const dayOrdersToTry = fixedDayOrders(daysWithReqs, reqsByDay);
+  for (let k = 0; k < shuffleCount; k++)
+    dayOrdersToTry.push(shuffled(daysWithReqs, randomFn));
+  const deadline = performance.now() + deadlineMs;
     let best = null,
       bestOrder = null,
       bestSeedOffset = null;
@@ -187,7 +183,19 @@ export async function runSchedule2RestartGroup(
       if (performance.now() >= deadline) break;
     }
     return { evaluated, best, bestOrder, bestSeedOffset };
-  }
+}
+
+// 재시작 그룹 하나를 처음부터 끝까지(요일 순서 탐색 → 다듬기) 돌려 그 그룹의 최종 결과
+// 하나를 반환한다. groupSeed가 요일 순서 무작위 셔플을 결정하고, groupIndex는 다듬기
+// 단계의 담금질 시드가 그룹끼리 겹치지 않도록 seedOffset의 밑변을 벌려준다.
+export async function runSchedule2RestartGroup(
+  eligibleReqsMaster,
+  groupSeed,
+  groupIndex,
+  onProgress,
+  targetFloor,
+) {
+  const randomFn = mulberry32(groupSeed);
 
   // ---- 기본 골격(primary base): 카드 고유의 시드로 신청 배열을 한 번 섞는다(사용자가
   // "같은 스케줄을 추가하고 후보 생성하기를 눌러도 항상 같은 후보가 나오는 게 아니다"라고
@@ -207,6 +215,7 @@ export async function runSchedule2RestartGroup(
     PER_GROUP_DAY_ORDER_SHUFFLES,
     PER_GROUP_SEARCH_DEADLINE_MS,
     groupIndex * 5000000,
+    randomFn,
     async () => {
       if (onProgress) {
         progressMax = Math.min(
@@ -254,6 +263,7 @@ export async function runSchedule2RestartGroup(
         TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES,
         altBudget,
         groupIndex * 5000000 + altRestartCount * 1000000,
+        randomFn,
         async () => {
           if (onProgress) {
             progressMax = Math.min(0.549, progressMax + 0.002);
@@ -394,6 +404,96 @@ export async function runSchedule2RestartGroup(
   return { result: bestPolished, pool: tied };
 }
 
+// 카드 3장을 모두 만든 뒤(generateSchedule2Async 아래 "카드 간 품질 하한 공유" 참고) 호출된다.
+// currentBest가 qualityTarget(형제 카드가 이미 찾은, 같은 수업 횟수 수준에서의 이동+빈 시간
+// 환산 점수)보다 못하면, 대안 골격을 몇 개 더 만들어 짧게 탐색+다듬어서 따라잡을 기회를
+// 준다 — targetFloor 따라잡기(runSchedule2RestartGroup 안)와 같은 방식이지만, 그건 "카드가
+// 먼저 끝난 형제의 목표를 넘겨받아 자기 탐색 중에" 쓰는 것이고, 이건 "이미 확정된 카드를
+// 사후에" 따라잡는다는 점이 다르다(그래서 groupSeed에 큰 오프셋을 더해 원래 탐색이 쓴 시드
+// 계열과 겹치지 않는 새 무작위 경로를 쓴다).
+async function runQualityCatchUpRound(
+  eligibleReqsMaster,
+  groupSeed,
+  groupIndex,
+  qualityTarget,
+  currentBest,
+  currentPool,
+  budgetMs,
+) {
+  const randomFn = mulberry32(groupSeed + 999999937);
+  const deadline = performance.now() + budgetMs;
+  let best = currentBest;
+  const extraPolished = [];
+  let altRestartCount = 0;
+  while (
+    performance.now() < deadline &&
+    isSchedule2ResultBetter(qualityTarget, best)
+  ) {
+    altRestartCount++;
+    const altReqs = shuffled(eligibleReqsMaster, randomFn);
+    const altGrouping = groupByDay(altReqs);
+    const altBudget = Math.min(
+      TARGET_MATCH_ALT_BASE_BUDGET_MS,
+      Math.max(0, deadline - performance.now()),
+    );
+    if (altBudget <= 0) break;
+    const alt = await searchWithinBase(
+      altReqs,
+      altGrouping.reqsByDay,
+      altGrouping.daysWithReqs,
+      TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES,
+      altBudget,
+      groupIndex * 5000000 + 8000000 + altRestartCount * 1000000,
+      randomFn,
+      async () => {
+        await yieldToUI();
+        checkGenerationCancelled();
+      },
+    );
+    if (!alt.bestOrder) continue;
+    const polishBudget = Math.max(
+      MIN_POLISH_BUDGET_MS,
+      Math.min(altBudget, Math.max(0, deadline - performance.now())),
+    );
+    if (polishBudget <= 0) break;
+    const altPolished = await runSchedule2Pipeline(
+      altReqs,
+      altGrouping.reqsByDay,
+      altGrouping.daysWithReqs,
+      alt.bestOrder,
+      true,
+      true,
+      polishBudget,
+      alt.bestSeedOffset,
+    );
+    extraPolished.push(altPolished);
+    if (isSchedule2ResultBetter(altPolished, best)) best = altPolished;
+  }
+  if (best === currentBest) return { result: currentBest, pool: currentPool };
+  // 더 나은 결과를 찾았으면, 그 결과와 동점인 것들로 배치 페이저 풀을 다시 만든다
+  // (runSchedule2RestartGroup 끝부분의 tied 구성과 같은 방식).
+  const bestSig = schedule2Signature(best);
+  const tied = [];
+  const seenTieSig = new Set();
+  [best, ...extraPolished].forEach((cand) => {
+    if (
+      isSchedule2ResultBetter(cand, best) ||
+      isSchedule2ResultBetter(best, cand)
+    )
+      return;
+    const sig = schedule2Signature(cand);
+    if (seenTieSig.has(sig)) return;
+    seenTieSig.add(sig);
+    if (tied.length < MAX_POOL_VARIANTS)
+      tied.push(sig === bestSig ? best : cand);
+  });
+  if (!tied.includes(best)) {
+    if (tied.length >= MAX_POOL_VARIANTS) tied.length = MAX_POOL_VARIANTS - 1;
+    tied.unshift(best);
+  }
+  return { result: best, pool: tied };
+}
+
 // 여러 요일 순서를 다 시도해보는 동안(특히 회원·신청이 많으면 한 조합에도 시간이 좀
 // 걸릴 수 있어) 화면이 멈춘 것처럼 보이지 않도록, onProgress가 있으면 조합 하나를 끝낼
 // 때마다 진행률을 알리고 화면을 다시 그릴 틈(yieldToUI)을 준다.
@@ -428,6 +528,53 @@ export async function generateSchedule2Async(onProgress) {
     if (card && card.result && floorIsBetter(card.result, targetFloor))
       targetFloor = card.result;
   }
+
+  // 카드 간 품질 하한 공유(2차 패스): 카드끼리는 "요일 순서·신청 배열 순서가 다른 골격"에서
+  // 독립적으로 탐색하도록 일부러 설계했고(SCHEDULE2_CARD_COUNT 근처 주석 참고), targetFloor도
+  // 미배정·수업 횟수까지만 공유해 이동·빈 시간은 카드마다 다를 수 있게 뒀다. 그런데 이는
+  // "카드마다 다른 배치가 나온다"까지는 맞지만, 그 결과 한 카드가 다른 카드보다 이동+빈 시간
+  // 환산 점수(TRAVEL_VALUE_MINUTES 기준)로 순수하게 더 나쁠 수 있다는 뜻이기도 하다 — 실제로
+  // A-1이 이동5·빈시간180(환산 480)으로 끝났는데 A-2가 이동4·빈시간180(환산 420)으로 더 나은
+  // 조합을 찾은 사례가 있었다(사용자 피드백으로 확인됨: 같은 수업 횟수·이동 횟수인데 빈 시간만
+  // 많은 카드는 "빈 시간을 허용해서 얻은 트레이드오프"가 아니라 그냥 못 찾은 결과일 뿐이다).
+  // 카드는 순서대로 생성되므로 먼저 끝난 카드는 나중 카드가 더 잘한다는 걸 알 도리가 없다 —
+  // 그래서 3장을 모두 만든 뒤에야, 수업 횟수가 가장 좋은 카드들 중 이동+빈 시간 환산 점수가
+  // 가장 좋은 결과를 "품질 하한"으로 삼아 그에 못 미치는 카드에게 한 번 더(대안 골격 탐색
+  // +다듬기, runQualityCatchUpRound) 따라잡을 기회를 준다. 카드의 골격 자체를 강제로 맞추지는
+  // 않는다 — 못 미치는 카드가 스스로 대안 골격을 새로 찾아 그 수준에 도달하면 쓰고, 시간 안에
+  // 못 찾으면 원래 결과를 그대로 둔다.
+  if (targetFloor) {
+    let bestQualityAtTop = null;
+    cards.forEach((c) => {
+      if (c.result && !floorIsBetter(targetFloor, c.result)) {
+        if (
+          !bestQualityAtTop ||
+          isSchedule2ResultBetter(c.result, bestQualityAtTop)
+        )
+          bestQualityAtTop = c.result;
+      }
+    });
+    if (bestQualityAtTop) {
+      for (let g = 0; g < cards.length; g++) {
+        const c = cards[g];
+        if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
+        if (!isSchedule2ResultBetter(bestQualityAtTop, c.result)) continue;
+        const groupSeed = 20260823 + g * 104729;
+        cards[g] = await runQualityCatchUpRound(
+          eligibleReqs,
+          groupSeed,
+          g,
+          bestQualityAtTop,
+          c.result,
+          c.pool,
+          QUALITY_CATCHUP_BUDGET_MS,
+        );
+        await yieldToUI();
+        checkGenerationCancelled();
+      }
+    }
+  }
+
   if (onProgress) onProgress(1);
   return cards; // [{result, pool}, {result, pool}, {result, pool}]
 }
