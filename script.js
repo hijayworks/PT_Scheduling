@@ -3415,7 +3415,7 @@
   var TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = scaledBudgetMs(9e4, 100);
   var TARGET_MATCH_ALT_BASE_BUDGET_MS = scaledBudgetMs(8e3, 20);
   var TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40;
-  var QUALITY_CATCHUP_BUDGET_MS = scaledBudgetMs(9e4, 100);
+  var QUALITY_CATCHUP_MAX_EXTRA_RESTARTS = 1;
   function groupByDay(reqs) {
     const reqsByDay = /* @__PURE__ */ new Map();
     DAYS.forEach((_, d) => reqsByDay.set(d, []));
@@ -3605,71 +3605,29 @@
     }
     return { result: bestPolished, pool: tied };
   }
-  async function runQualityCatchUpRound(eligibleReqsMaster, groupSeed, groupIndex, qualityTarget, currentBest, currentPool, budgetMs) {
-    const randomFn = mulberry32(groupSeed + 999999937);
-    const deadline = performance.now() + budgetMs;
+  async function runQualityCatchUpRound(eligibleReqsMaster, groupIndex, qualityTarget, currentBest, currentPool, classFloor, maxExtraRestarts) {
     let best = currentBest;
-    const extraPolished = [];
-    let altRestartCount = 0;
-    while (performance.now() < deadline && isSchedule2ResultBetter(qualityTarget, best)) {
-      altRestartCount++;
-      const altReqs = shuffled(eligibleReqsMaster, randomFn);
-      const altGrouping = groupByDay(altReqs);
-      const altBudget = Math.min(
-        TARGET_MATCH_ALT_BASE_BUDGET_MS,
-        Math.max(0, deadline - performance.now())
+    let pool = currentPool;
+    for (let attempt = 1; attempt <= maxExtraRestarts; attempt++) {
+      if (!isSchedule2ResultBetter(qualityTarget, best)) break;
+      const retrySeed = 987654321 + groupIndex * 10007 + attempt * 7919;
+      const retryGroupIndex = 1e3 + groupIndex * 10 + attempt;
+      const retry = await runSchedule2RestartGroup(
+        eligibleReqsMaster,
+        retrySeed,
+        retryGroupIndex,
+        null,
+        classFloor
       );
-      if (altBudget <= 0) break;
-      const alt = await searchWithinBase(
-        altReqs,
-        altGrouping.reqsByDay,
-        altGrouping.daysWithReqs,
-        TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES,
-        altBudget,
-        groupIndex * 5e6 + 8e6 + altRestartCount * 1e6,
-        randomFn,
-        async () => {
-          await yieldToUI();
-          checkGenerationCancelled();
-        }
-      );
-      if (!alt.bestOrder) continue;
-      const polishBudget = Math.max(
-        MIN_POLISH_BUDGET_MS,
-        Math.min(altBudget, Math.max(0, deadline - performance.now()))
-      );
-      if (polishBudget <= 0) break;
-      const altPolished = await runSchedule2Pipeline(
-        altReqs,
-        altGrouping.reqsByDay,
-        altGrouping.daysWithReqs,
-        alt.bestOrder,
-        true,
-        true,
-        polishBudget,
-        alt.bestSeedOffset
-      );
-      extraPolished.push(altPolished);
-      if (isSchedule2ResultBetter(altPolished, best)) best = altPolished;
+      await yieldToUI();
+      checkGenerationCancelled();
+      if (retry && retry.result && isSchedule2ResultBetter(retry.result, best)) {
+        best = retry.result;
+        pool = retry.pool;
+      }
     }
     if (best === currentBest) return { result: currentBest, pool: currentPool };
-    const bestSig = schedule2Signature(best);
-    const tied = [];
-    const seenTieSig = /* @__PURE__ */ new Set();
-    [best, ...extraPolished].forEach((cand) => {
-      if (isSchedule2ResultBetter(cand, best) || isSchedule2ResultBetter(best, cand))
-        return;
-      const sig = schedule2Signature(cand);
-      if (seenTieSig.has(sig)) return;
-      seenTieSig.add(sig);
-      if (tied.length < MAX_POOL_VARIANTS)
-        tied.push(sig === bestSig ? best : cand);
-    });
-    if (!tied.includes(best)) {
-      if (tied.length >= MAX_POOL_VARIANTS) tied.length = MAX_POOL_VARIANTS - 1;
-      tied.unshift(best);
-    }
-    return { result: best, pool: tied };
+    return { result: best, pool };
   }
   async function generateSchedule2Async(onProgress) {
     const eligibleReqs = state.requests.filter(isEligibleRequest2);
@@ -3706,15 +3664,14 @@
           const c = cards[g];
           if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
           if (!isSchedule2ResultBetter(bestQualityAtTop, c.result)) continue;
-          const groupSeed = 20260823 + g * 104729;
           cards[g] = await runQualityCatchUpRound(
             eligibleReqs,
-            groupSeed,
             g,
             bestQualityAtTop,
             c.result,
             c.pool,
-            QUALITY_CATCHUP_BUDGET_MS
+            targetFloor,
+            QUALITY_CATCHUP_MAX_EXTRA_RESTARTS
           );
           await yieldToUI();
           checkGenerationCancelled();
@@ -4252,8 +4209,10 @@
       skipOpt.textContent = "건너뛰기";
       select.appendChild(skipOpt);
       select.value = row.choice;
+      select.classList.toggle("is-new-member", select.value === "__new__");
       select.addEventListener("change", () => {
         row.choice = select.value;
+        select.classList.toggle("is-new-member", select.value === "__new__");
         renderRowState();
       });
       const newFields = document.createElement("div");
