@@ -419,8 +419,10 @@ export async function generateSchedule2Async(onProgress) {
   const cardProgressShare = 1 - GREEDY_BASELINE_PROGRESS_SHARE;
 
   // 후보A-1/A-2/A-3 카드마다 독립적으로 탐색한다(서로 다른 시드 → 서로 다른 골격에서
-  // 출발) — 카드끼리 동점일 필요는 없다. 각 카드는 자기 자신의 탐색(runSchedule2RestartGroup)
-  // 안에서 나온 동점만 배치 페이저로 보여준다.
+  // 출발) — 카드끼리 동점일 필요는 없다. 기본적으로 각 카드는 자기 자신의 탐색
+  // (runSchedule2RestartGroup) 안에서 나온 동점만 배치 페이저로 보여주지만, 아래 "카드 간
+  // 품질 하한 공유"로 다른 카드·그리디 결과로 바꿔치기되면 그 시점에 찾아낸 동점들로 풀이
+  // 다시 채워진다.
   const cards = [];
   // 카드 간 목표 공유: 먼저 끝난 카드가 도달한 "미배정 없음 → 수업 횟수" 최고 수준을
   // 기억해뒀다가 다음 카드에 넘긴다 — 못 미치는 카드가 나오면 그 카드가 더 탐색하도록
@@ -464,27 +466,59 @@ export async function generateSchedule2Async(onProgress) {
   // 추가 탐색이 전혀 없어 순간적으로 끝나므로, 진행률 바가 카드 3장을 다 만든 뒤에도 한참
   // 100%에 멈춰 있던 문제도 이걸로 함께 없어진다.
   if (targetFloor) {
-    let best = null; // { result, pool }
-    function considerAsCandidate(result, pool) {
+    let best = null;
+    function considerAsCandidate(result) {
       if (!result || floorIsBetter(targetFloor, result)) return;
-      if (!best || isSchedule2ResultBetter(result, best.result))
-        best = { result, pool };
+      if (!best || isSchedule2ResultBetter(result, best)) best = result;
     }
-    cards.forEach((c) => considerAsCandidate(c.result, c.pool));
-    (greedyBaseline.built || []).concat(runtime.candidates || []).forEach((cand) => {
-      if (!cand || !cand.assigned) return;
-      const asResult = {
-        assigned: cand.assigned,
-        unassignedMembers: cand.unassignedMembers || [],
-      };
-      considerAsCandidate(asResult, [asResult]);
-    });
+    const externalCandidates = (greedyBaseline.built || [])
+      .concat(runtime.candidates || [])
+      .map((cand) => {
+        if (!cand || !cand.assigned) return null;
+        return {
+          assigned: cand.assigned,
+          unassignedMembers: cand.unassignedMembers || [],
+        };
+      })
+      .filter(Boolean);
+    cards.forEach((c) => considerAsCandidate(c.result));
+    externalCandidates.forEach((asResult) => considerAsCandidate(asResult));
     if (best) {
+      // best로 카드를 통째로 바꿔치기하면 그 카드는 더 이상 "자기 자신의 탐색"에서 나온
+      // 결과가 아니게 된다 — best 혼자만(pool 1개) 들고 오면 배치 페이저가 사라져버리므로
+      // (실제로 이 문제로 확인됨), best와 정확히 동점인 배치를 카드들의 결과·각자 풀·
+      // 그리디/후보B·C 쪽에서 모두 긁어모아 새 풀을 만든다. best보다 못한 동점 아닌 배치는
+      // 절대 섞지 않는다(동점 풀은 늘 진짜 동점만 보여줘야 한다).
+      const bestSig = schedule2Signature(best);
+      const bestPool = [];
+      const seenTieSig = new Set();
+      function addTie(result) {
+        if (!result) return;
+        if (
+          isSchedule2ResultBetter(best, result) ||
+          isSchedule2ResultBetter(result, best)
+        )
+          return;
+        const sig = schedule2Signature(result);
+        if (seenTieSig.has(sig)) return;
+        seenTieSig.add(sig);
+        if (bestPool.length < MAX_POOL_VARIANTS)
+          bestPool.push(sig === bestSig ? best : result);
+      }
+      addTie(best);
+      cards.forEach((c) => {
+        addTie(c.result);
+        (c.pool || []).forEach(addTie);
+      });
+      externalCandidates.forEach(addTie);
       for (let g = 0; g < cards.length; g++) {
         const c = cards[g];
         if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
-        if (!isSchedule2ResultBetter(best.result, c.result)) continue;
-        cards[g] = best;
+        if (!isSchedule2ResultBetter(best, c.result)) continue;
+        // bestPool을 그대로(참조로) 나눠주면 여러 카드가 같은 배열을 공유하게 되어, 한
+        // 카드에서 페이저로 다른 배치를 골라(pickCandidateASlot의 pool.unshift 등) 배열을
+        // 바꾸면 다른 카드의 풀까지 조용히 같이 바뀐다 — 카드마다 독립된 복사본을 준다.
+        cards[g] = { result: best, pool: bestPool.slice() };
       }
     }
   }

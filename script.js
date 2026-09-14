@@ -3633,27 +3633,45 @@
         targetFloor = card.result;
     }
     if (targetFloor) {
-      let considerAsCandidate = function(result, pool) {
+      let considerAsCandidate = function(result) {
         if (!result || floorIsBetter(targetFloor, result)) return;
-        if (!best || isSchedule2ResultBetter(result, best.result))
-          best = { result, pool };
+        if (!best || isSchedule2ResultBetter(result, best)) best = result;
       };
       let best = null;
-      cards.forEach((c) => considerAsCandidate(c.result, c.pool));
-      (greedyBaseline.built || []).concat(runtime.candidates || []).forEach((cand) => {
-        if (!cand || !cand.assigned) return;
-        const asResult = {
+      const externalCandidates = (greedyBaseline.built || []).concat(runtime.candidates || []).map((cand) => {
+        if (!cand || !cand.assigned) return null;
+        return {
           assigned: cand.assigned,
           unassignedMembers: cand.unassignedMembers || []
         };
-        considerAsCandidate(asResult, [asResult]);
-      });
+      }).filter(Boolean);
+      cards.forEach((c) => considerAsCandidate(c.result));
+      externalCandidates.forEach((asResult) => considerAsCandidate(asResult));
       if (best) {
+        let addTie = function(result) {
+          if (!result) return;
+          if (isSchedule2ResultBetter(best, result) || isSchedule2ResultBetter(result, best))
+            return;
+          const sig = schedule2Signature(result);
+          if (seenTieSig.has(sig)) return;
+          seenTieSig.add(sig);
+          if (bestPool.length < MAX_POOL_VARIANTS)
+            bestPool.push(sig === bestSig ? best : result);
+        };
+        const bestSig = schedule2Signature(best);
+        const bestPool = [];
+        const seenTieSig = /* @__PURE__ */ new Set();
+        addTie(best);
+        cards.forEach((c) => {
+          addTie(c.result);
+          (c.pool || []).forEach(addTie);
+        });
+        externalCandidates.forEach(addTie);
         for (let g = 0; g < cards.length; g++) {
           const c = cards[g];
           if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
-          if (!isSchedule2ResultBetter(best.result, c.result)) continue;
-          cards[g] = best;
+          if (!isSchedule2ResultBetter(best, c.result)) continue;
+          cards[g] = { result: best, pool: bestPool.slice() };
         }
       }
     }
