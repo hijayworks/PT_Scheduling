@@ -1,9 +1,10 @@
 import { DAYS } from "../constants.js";
-import { state } from "../state.js";
+import { state, runtime } from "../state.js";
 import {
   yieldToUI,
   checkGenerationCancelled,
   MAX_POOL_VARIANTS,
+  generateCandidatesAsync,
 } from "./greedy.js";
 import { isEligibleRequest2, runChainDP } from "./chainDpCore.js";
 import { runSchedule2Pipeline } from "./chainDpPolish.js";
@@ -97,13 +98,7 @@ export const MIN_POLISH_BUDGET_MS = scaledBudgetMs(6000, 10); // 시도가 여�
 export const TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = scaledBudgetMs(90000, 100);
 export const TARGET_MATCH_ALT_BASE_BUDGET_MS = scaledBudgetMs(8000, 20); // 대안 골격 하나에 쓸 수 있는 시간 상한
 export const TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40; // 대안 골격 하나에서 시도할 무작위 요일 순서 수
-// 카드 간 품질 하한 공유(2차 패스, generateSchedule2Async 아래 참고)에서, 못 따라잡은 카드
-// 하나당 최대 몇 번까지 카드 전체를 새 시드로 다시 만들어볼지. 재시도 한 번의 비용이 카드
-// 하나를 새로 만드는 것과 같으므로(runSchedule2RestartGroup 전체 재호출) 크게 잡지 않는다.
-export const QUALITY_CATCHUP_MAX_EXTRA_RESTARTS = 1;
-
-// 신청 배열 순서(base) 하나를 요일별로 묶는다. runSchedule2RestartGroup과(카드 간 품질
-// 하한을 못 따라잡은 카드를 2차로 다시 탐색하는) runQualityCatchUpRound가 함께 쓴다.
+// 신청 배열 순서(base) 하나를 요일별로 묶는다.
 function groupByDay(reqs) {
   const reqsByDay = new Map();
   DAYS.forEach((_, d) => reqsByDay.set(d, []));
@@ -404,58 +399,24 @@ export async function runSchedule2RestartGroup(
   return { result: bestPolished, pool: tied };
 }
 
-// 카드 3장을 모두 만든 뒤(generateSchedule2Async 아래 "카드 간 품질 하한 공유" 참고) 호출된다.
-// currentBest가 qualityTarget(형제 카드가 이미 찾은, 같은 수업 횟수 수준에서의 이동+빈 시간
-// 환산 점수)보다 못하면, 이 카드를 완전히 새 시드로 최대 maxExtraRestarts번 다시 독립
-// 탐색해 따라잡을 기회를 준다 — 대안 골격 하나를 찾아 그 안에서 이동·빈 시간을 줄이는 건
-// 형제 카드가 애초에 그 결과에 도달할 때 쓴 것(요일 순서 400개 탐색 + 몇 분짜리 담금질)과
-// 정확히 같은 난이도의 일이라, 훨씬 적은 예산으로 대충 흉내만 내서는(처음 버전이 그랬다)
-// 거의 항상 못 따라잡는다(실제로 사용자가 재생성해도 결과가 그대로였던 사례로 확인됨).
-// 그래서 값싼 임시 탐색 대신 형제 카드가 쓴 것과 완전히 같은 전체 예산
-// (runSchedule2RestartGroup 통짜 재호출)을 다시 쓴다 — 대신 비용이 카드 하나를 더 만드는
-// 것과 같으므로 기본은 1번만 재시도한다. classFloor(수업 횟수 하한)를 그대로 넘겨, 이
-// 재시도가 수업 횟수부터 다시 확보하도록 한다(이미 확보돼 있을 가능성이 높지만, 새 시드가
-// 우연히 그 수준에 못 미치는 경우를 대비).
-async function runQualityCatchUpRound(
-  eligibleReqsMaster,
-  groupIndex,
-  qualityTarget,
-  currentBest,
-  currentPool,
-  classFloor,
-  maxExtraRestarts,
-) {
-  let best = currentBest;
-  let pool = currentPool;
-  for (let attempt = 1; attempt <= maxExtraRestarts; attempt++) {
-    if (!isSchedule2ResultBetter(qualityTarget, best)) break; // 이미 따라잡음
-    // 원래 카드 3장이 쓴 시드 계열(20260823 + g*104729, g=0..2)과 겹치지 않는 새 시드·
-    // groupIndex를 쓴다(둘 다 담금질 시드의 밑변으로 쓰이므로 겹치면 안 된다).
-    const retrySeed = 987654321 + groupIndex * 10007 + attempt * 7919;
-    const retryGroupIndex = 1000 + groupIndex * 10 + attempt;
-    const retry = await runSchedule2RestartGroup(
-      eligibleReqsMaster,
-      retrySeed,
-      retryGroupIndex,
-      null,
-      classFloor,
-    );
-    await yieldToUI();
-    checkGenerationCancelled();
-    if (retry && retry.result && isSchedule2ResultBetter(retry.result, best)) {
-      best = retry.result;
-      pool = retry.pool;
-    }
-  }
-  if (best === currentBest) return { result: currentBest, pool: currentPool };
-  return { result: best, pool };
-}
-
 // 여러 요일 순서를 다 시도해보는 동안(특히 회원·신청이 많으면 한 조합에도 시간이 좀
 // 걸릴 수 있어) 화면이 멈춘 것처럼 보이지 않도록, onProgress가 있으면 조합 하나를 끝낼
 // 때마다 진행률을 알리고 화면을 다시 그릴 틈(yieldToUI)을 준다.
 export async function generateSchedule2Async(onProgress) {
   const eligibleReqs = state.requests.filter(isEligibleRequest2);
+
+  // 아래 "카드 간 품질 하한 공유"가 후보A 버튼만 단독으로 눌러도(후보B·C를 따로 생성해두지
+  // 않아도) 항상 그리디 수준까지 확인할 수 있도록, 그리디 엔진(engine/greedy.js)으로 빠른
+  // 기준선을 하나 미리 만들어둔다. 화면에 보이는 후보B/C 카드(runtime.candidates)나 그
+  // 되돌리기 이력은 전혀 건드리지 않는다 — 체인DP 카드들끼리(그리고 그 카드들과) 비교할 때만
+  // 쓰는 내부 참고용이다(실제로 사용자가 후보A만 단독으로 눌렀더니 후보B·C 수준을 못 따라
+  // 잡은 사례로 확인됨 — runtime.candidates는 후보B·C를 먼저 생성해둔 적이 있을 때만 채워져
+  // 있다). 그리디는 담금질보다 훨씬 빨라(수 초~수십 초) 전체 대기 시간에 크게 보태지 않는다.
+  const GREEDY_BASELINE_PROGRESS_SHARE = 0.08;
+  const greedyBaseline = await generateCandidatesAsync((p) => {
+    if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
+  });
+  const cardProgressShare = 1 - GREEDY_BASELINE_PROGRESS_SHARE;
 
   // 후보A-1/A-2/A-3 카드마다 독립적으로 탐색한다(서로 다른 시드 → 서로 다른 골격에서
   // 출발) — 카드끼리 동점일 필요는 없다. 각 카드는 자기 자신의 탐색(runSchedule2RestartGroup)
@@ -469,13 +430,16 @@ export async function generateSchedule2Async(onProgress) {
     // 카드마다 서로 다른 소수 간격으로 시드를 벌려, 요일 순서·신청 배열 순서 무작위 셔플이
     // 카드끼리 겹치지 않고 완전히 다른 골격에서 출발하게 한다.
     const groupSeed = 20260823 + g * 104729;
-    const groupStart = g / SCHEDULE2_CARD_COUNT;
+    const groupStart =
+      GREEDY_BASELINE_PROGRESS_SHARE +
+      (g / SCHEDULE2_CARD_COUNT) * cardProgressShare;
     const card = await runSchedule2RestartGroup(
       eligibleReqs,
       groupSeed,
       g,
       (p) => {
-        if (onProgress) onProgress(groupStart + p / SCHEDULE2_CARD_COUNT);
+        if (onProgress)
+          onProgress(groupStart + (p / SCHEDULE2_CARD_COUNT) * cardProgressShare);
       },
       targetFloor,
     );
@@ -486,47 +450,41 @@ export async function generateSchedule2Async(onProgress) {
       targetFloor = card.result;
   }
 
-  // 카드 간 품질 하한 공유(2차 패스): 카드끼리는 "요일 순서·신청 배열 순서가 다른 골격"에서
-  // 독립적으로 탐색하도록 일부러 설계했고(SCHEDULE2_CARD_COUNT 근처 주석 참고), targetFloor도
-  // 미배정·수업 횟수까지만 공유해 이동·빈 시간은 카드마다 다를 수 있게 뒀다. 그런데 이는
-  // "카드마다 다른 배치가 나온다"까지는 맞지만, 그 결과 한 카드가 다른 카드보다 이동+빈 시간
-  // 환산 점수(TRAVEL_VALUE_MINUTES 기준)로 순수하게 더 나쁠 수 있다는 뜻이기도 하다 — 실제로
-  // A-1이 이동5·빈시간180(환산 480)으로 끝났는데 A-2가 이동4·빈시간180(환산 420)으로 더 나은
-  // 조합을 찾은 사례가 있었다(사용자 피드백으로 확인됨: 같은 수업 횟수·이동 횟수인데 빈 시간만
-  // 많은 카드는 "빈 시간을 허용해서 얻은 트레이드오프"가 아니라 그냥 못 찾은 결과일 뿐이다).
-  // 카드는 순서대로 생성되므로 먼저 끝난 카드는 나중 카드가 더 잘한다는 걸 알 도리가 없다 —
-  // 그래서 3장을 모두 만든 뒤에야, 수업 횟수가 가장 좋은 카드들 중 이동+빈 시간 환산 점수가
-  // 가장 좋은 결과를 "품질 하한"으로 삼아 그에 못 미치는 카드에게 한 번 더(runQualityCatchUpRound
-  // — 카드 전체를 새 시드로 다시 만들어보는 완전한 재시도) 따라잡을 기회를 준다. 못 미치는
-  // 카드가 새 시드로 그 수준에 도달하거나 넘어서면 그 결과로 바꾸고, 재시도 예산 안에 못
-  // 찾으면 원래 결과를 그대로 둔다.
+  // 카드 간 품질 하한 공유: 카드끼리는 "요일 순서·신청 배열 순서가 다른 골격"에서 독립적으로
+  // 탐색하도록 일부러 설계했고(SCHEDULE2_CARD_COUNT 근처 주석 참고), targetFloor도 미배정·
+  // 수업 횟수까지만 공유해 이동·빈 시간은 카드마다 다를 수 있게 뒀다. 그런데 그 결과 한 카드가
+  // 다른 카드보다, 또는 완전히 다른 엔진인 그리디(engine/greedy.js, 위 greedyBaseline과 화면에
+  // 이미 떠 있을 수 있는 runtime.candidates 둘 다)보다 이동+빈 시간 환산 점수(TRAVEL_VALUE_MINUTES
+  // 기준)로 순수하게 더 나쁠 수 있다 — 실제로 체인DP+담금질 카드를 같은 예산으로 통째로
+  // 재시도시켜봐도(카드 하나를 새로 만드는 것과 같은 시간이 걸림) 그리디가 우연히 찾아낸
+  // 이동5·빈시간0 수준을 못 따라잡는 사례가 있었다(사용자 피드백으로 확인됨). 그리디가 그
+  // 수준이 이 데이터에서 실제로 가능하다는 걸 이미 증명했으므로, 체인DP 쪽에 그걸 다시
+  // "찾아내라"고 느리고 못 미덥게 시키는 대신 그리디 결과(assigned/unassignedMembers 형태가
+  // 그대로 호환된다)를 가장 좋은 것부터 찾아, 그보다 못한 카드는 그 결과를 즉시 가져다 쓴다.
+  // 추가 탐색이 전혀 없어 순간적으로 끝나므로, 진행률 바가 카드 3장을 다 만든 뒤에도 한참
+  // 100%에 멈춰 있던 문제도 이걸로 함께 없어진다.
   if (targetFloor) {
-    let bestQualityAtTop = null;
-    cards.forEach((c) => {
-      if (c.result && !floorIsBetter(targetFloor, c.result)) {
-        if (
-          !bestQualityAtTop ||
-          isSchedule2ResultBetter(c.result, bestQualityAtTop)
-        )
-          bestQualityAtTop = c.result;
-      }
+    let best = null; // { result, pool }
+    function considerAsCandidate(result, pool) {
+      if (!result || floorIsBetter(targetFloor, result)) return;
+      if (!best || isSchedule2ResultBetter(result, best.result))
+        best = { result, pool };
+    }
+    cards.forEach((c) => considerAsCandidate(c.result, c.pool));
+    (greedyBaseline.built || []).concat(runtime.candidates || []).forEach((cand) => {
+      if (!cand || !cand.assigned) return;
+      const asResult = {
+        assigned: cand.assigned,
+        unassignedMembers: cand.unassignedMembers || [],
+      };
+      considerAsCandidate(asResult, [asResult]);
     });
-    if (bestQualityAtTop) {
+    if (best) {
       for (let g = 0; g < cards.length; g++) {
         const c = cards[g];
         if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
-        if (!isSchedule2ResultBetter(bestQualityAtTop, c.result)) continue;
-        cards[g] = await runQualityCatchUpRound(
-          eligibleReqs,
-          g,
-          bestQualityAtTop,
-          c.result,
-          c.pool,
-          targetFloor,
-          QUALITY_CATCHUP_MAX_EXTRA_RESTARTS,
-        );
-        await yieldToUI();
-        checkGenerationCancelled();
+        if (!isSchedule2ResultBetter(best.result, c.result)) continue;
+        cards[g] = best;
       }
     }
   }

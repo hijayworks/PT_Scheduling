@@ -3415,7 +3415,6 @@
   var TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = scaledBudgetMs(9e4, 100);
   var TARGET_MATCH_ALT_BASE_BUDGET_MS = scaledBudgetMs(8e3, 20);
   var TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40;
-  var QUALITY_CATCHUP_MAX_EXTRA_RESTARTS = 1;
   function groupByDay(reqs) {
     const reqsByDay = /* @__PURE__ */ new Map();
     DAYS.forEach((_, d) => reqsByDay.set(d, []));
@@ -3605,43 +3604,25 @@
     }
     return { result: bestPolished, pool: tied };
   }
-  async function runQualityCatchUpRound(eligibleReqsMaster, groupIndex, qualityTarget, currentBest, currentPool, classFloor, maxExtraRestarts) {
-    let best = currentBest;
-    let pool = currentPool;
-    for (let attempt = 1; attempt <= maxExtraRestarts; attempt++) {
-      if (!isSchedule2ResultBetter(qualityTarget, best)) break;
-      const retrySeed = 987654321 + groupIndex * 10007 + attempt * 7919;
-      const retryGroupIndex = 1e3 + groupIndex * 10 + attempt;
-      const retry = await runSchedule2RestartGroup(
-        eligibleReqsMaster,
-        retrySeed,
-        retryGroupIndex,
-        null,
-        classFloor
-      );
-      await yieldToUI();
-      checkGenerationCancelled();
-      if (retry && retry.result && isSchedule2ResultBetter(retry.result, best)) {
-        best = retry.result;
-        pool = retry.pool;
-      }
-    }
-    if (best === currentBest) return { result: currentBest, pool: currentPool };
-    return { result: best, pool };
-  }
   async function generateSchedule2Async(onProgress) {
     const eligibleReqs = state.requests.filter(isEligibleRequest2);
+    const GREEDY_BASELINE_PROGRESS_SHARE = 0.08;
+    const greedyBaseline = await generateCandidatesAsync((p) => {
+      if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
+    });
+    const cardProgressShare = 1 - GREEDY_BASELINE_PROGRESS_SHARE;
     const cards = [];
     let targetFloor = null;
     for (let g = 0; g < SCHEDULE2_CARD_COUNT; g++) {
       const groupSeed = 20260823 + g * 104729;
-      const groupStart = g / SCHEDULE2_CARD_COUNT;
+      const groupStart = GREEDY_BASELINE_PROGRESS_SHARE + g / SCHEDULE2_CARD_COUNT * cardProgressShare;
       const card = await runSchedule2RestartGroup(
         eligibleReqs,
         groupSeed,
         g,
         (p) => {
-          if (onProgress) onProgress(groupStart + p / SCHEDULE2_CARD_COUNT);
+          if (onProgress)
+            onProgress(groupStart + p / SCHEDULE2_CARD_COUNT * cardProgressShare);
         },
         targetFloor
       );
@@ -3652,29 +3633,27 @@
         targetFloor = card.result;
     }
     if (targetFloor) {
-      let bestQualityAtTop = null;
-      cards.forEach((c) => {
-        if (c.result && !floorIsBetter(targetFloor, c.result)) {
-          if (!bestQualityAtTop || isSchedule2ResultBetter(c.result, bestQualityAtTop))
-            bestQualityAtTop = c.result;
-        }
+      let considerAsCandidate = function(result, pool) {
+        if (!result || floorIsBetter(targetFloor, result)) return;
+        if (!best || isSchedule2ResultBetter(result, best.result))
+          best = { result, pool };
+      };
+      let best = null;
+      cards.forEach((c) => considerAsCandidate(c.result, c.pool));
+      (greedyBaseline.built || []).concat(runtime.candidates || []).forEach((cand) => {
+        if (!cand || !cand.assigned) return;
+        const asResult = {
+          assigned: cand.assigned,
+          unassignedMembers: cand.unassignedMembers || []
+        };
+        considerAsCandidate(asResult, [asResult]);
       });
-      if (bestQualityAtTop) {
+      if (best) {
         for (let g = 0; g < cards.length; g++) {
           const c = cards[g];
           if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
-          if (!isSchedule2ResultBetter(bestQualityAtTop, c.result)) continue;
-          cards[g] = await runQualityCatchUpRound(
-            eligibleReqs,
-            g,
-            bestQualityAtTop,
-            c.result,
-            c.pool,
-            targetFloor,
-            QUALITY_CATCHUP_MAX_EXTRA_RESTARTS
-          );
-          await yieldToUI();
-          checkGenerationCancelled();
+          if (!isSchedule2ResultBetter(best.result, c.result)) continue;
+          cards[g] = best;
         }
       }
     }
