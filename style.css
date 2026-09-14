@@ -1367,6 +1367,7 @@ body {
 }
 .bulk-preview-row-head select:focus,
 .bulk-preview-new-fields select:focus { outline: 2px solid var(--primary-soft); border-color: var(--primary); }
+.bulk-preview-row-head select.is-new-member { background-color: #fef2f2; border-color: #fecaca; }
 .bulk-preview-new-fields { display: flex; flex-wrap: wrap; gap: 8px; }
 .bulk-preview-schedule { display: flex; flex-wrap: wrap; gap: 6px; }
 .bulk-preview-day-chip {

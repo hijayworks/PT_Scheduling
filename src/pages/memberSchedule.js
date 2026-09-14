@@ -688,8 +688,10 @@ export function renderBulkImportPreview() {
     skipOpt.textContent = "건너뛰기";
     select.appendChild(skipOpt);
     select.value = row.choice;
+    select.classList.toggle("is-new-member", select.value === "__new__");
     select.addEventListener("change", () => {
       row.choice = select.value;
+      select.classList.toggle("is-new-member", select.value === "__new__");
       renderRowState();
     });
     const newFields = document.createElement("div");
