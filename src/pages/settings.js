@@ -330,23 +330,6 @@ export function businessHoursGridRange() {
   };
 }
 
-// 시간 선택창에는 30분 단위 옵션만 보여준다 (실제 배정은 여전히 10분 단위로 계산됨).
-export const TIME_SELECT_STEP_SLOTS = 30 / SLOT_MIN;
-
-export function fillTimeSelect(sel, kind) {
-  // kind: "start" -> slots 0..SLOT_COUNT-1, "end" -> slots 0..SLOT_COUNT, 30분 간격으로만.
-  // end는 "마지막으로 시작 가능한 시각"이라 시작과 같은 값(맨 첫 시각 포함)도 고를 수 있어야 한다.
-  sel.innerHTML = "";
-  const from = 0;
-  const to = kind === "start" ? SLOT_COUNT - 1 : SLOT_COUNT;
-  for (let s = from; s <= to; s += TIME_SELECT_STEP_SLOTS) {
-    const opt = document.createElement("option");
-    opt.value = String(s);
-    opt.textContent = minutesLabel(START_MIN + s * SLOT_MIN);
-    sel.appendChild(opt);
-  }
-}
-
 // 근무 가능 시간(기본 설정) 전용 시간 선택창: 시작은 13:00~22:00, 종료는 14:00~24:00을
 // 30분 단위로 보여주되, 23:00~24:00 구간만 10분 단위로 더 촘촘하게 보여준다.
 export function fillAvailabilityTimeSelect(sel, kind) {

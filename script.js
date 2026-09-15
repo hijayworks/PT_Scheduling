@@ -85,6 +85,18 @@
   function uid(prefix) {
     return prefix + "_" + Math.random().toString(36).slice(2, 9);
   }
+  var TIME_SELECT_STEP_SLOTS = 30 / SLOT_MIN;
+  function fillTimeSelect(sel, kind) {
+    sel.innerHTML = "";
+    const from = 0;
+    const to = kind === "start" ? SLOT_COUNT - 1 : SLOT_COUNT;
+    for (let s = from; s <= to; s += TIME_SELECT_STEP_SLOTS) {
+      const opt = document.createElement("option");
+      opt.value = String(s);
+      opt.textContent = minutesLabel(START_MIN + s * SLOT_MIN);
+      sel.appendChild(opt);
+    }
+  }
   var toastContainerEl = null;
   function showToast(message, type) {
     if (!toastContainerEl) {
@@ -6845,18 +6857,6 @@
       rangeStartSlot: (roundedStartMin - START_MIN) / SLOT_MIN,
       rangeEndSlot: (roundedEndMin - START_MIN) / SLOT_MIN
     };
-  }
-  var TIME_SELECT_STEP_SLOTS = 30 / SLOT_MIN;
-  function fillTimeSelect(sel, kind) {
-    sel.innerHTML = "";
-    const from = 0;
-    const to = kind === "start" ? SLOT_COUNT - 1 : SLOT_COUNT;
-    for (let s = from; s <= to; s += TIME_SELECT_STEP_SLOTS) {
-      const opt = document.createElement("option");
-      opt.value = String(s);
-      opt.textContent = minutesLabel(START_MIN + s * SLOT_MIN);
-      sel.appendChild(opt);
-    }
   }
   function fillAvailabilityTimeSelect(sel, kind) {
     sel.innerHTML = "";

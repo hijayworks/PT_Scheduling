@@ -15,6 +15,7 @@ import {
   durationToSlots,
   uid,
   showToast,
+  fillTimeSelect,
 } from "../utils.js";
 import { state, runtime, saveState } from "../state.js";
 import {
@@ -25,7 +26,7 @@ import {
   sessionDurationFor,
 } from "../domain.js";
 import { renderGrid } from "../grid.js";
-import { fillTimeSelect, businessHoursGridRange } from "./settings.js";
+import { businessHoursGridRange } from "./settings.js";
 import {
   renderSchedule3Result,
   onceLimit3Widget,
