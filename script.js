@@ -3638,7 +3638,7 @@
         if (!best || isSchedule2ResultBetter(result, best)) best = result;
       };
       let best = null;
-      const externalCandidates = (greedyBaseline.built || []).concat(runtime.candidates || []).map((cand) => {
+      const externalCandidates = (greedyBaseline.built || []).concat(runtime.candidates || []).concat([].concat(...greedyBaseline.pools || [])).map((cand) => {
         if (!cand || !cand.assigned) return null;
         return {
           assigned: cand.assigned,

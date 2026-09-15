@@ -471,8 +471,14 @@ export async function generateSchedule2Async(onProgress) {
       if (!result || floorIsBetter(targetFloor, result)) return;
       if (!best || isSchedule2ResultBetter(result, best)) best = result;
     }
+    // greedyBaseline.built는 전략별 "1등"만 담고 있어, 그 1등과 이미 완전히 동점인 다른
+    // 배치들(greedyBaseline.pools[idx], generateCandidatesAsync가 이미 찾아둔 것)을 함께
+    // 넣지 않으면 best가 그리디 쪽에서 왔을 때 bestPool이 1개로 줄어버린다(실제로 이 문제로
+    // 확인됨 — 그리디 자체 tiedPool은 3인데 A-1/2/3 카드가 모두 그 1등으로 바뀌면서
+    // 페이저가 사라지고 세 카드가 서로 구분 없이 똑같아졌다).
     const externalCandidates = (greedyBaseline.built || [])
       .concat(runtime.candidates || [])
+      .concat([].concat(...(greedyBaseline.pools || [])))
       .map((cand) => {
         if (!cand || !cand.assigned) return null;
         return {
