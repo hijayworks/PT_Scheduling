@@ -4272,14 +4272,17 @@
     }
     tokens.slice(1).forEach((spaceTok) => {
       const pieces = spaceTok.split(",").filter(Boolean);
-      pieces.forEach((tok) => {
-        const dayPrefixMatch = tok.match(/^[월화수목금토]+/);
-        if (dayPrefixMatch) {
-          currentDays = parseDayGroupToken(dayPrefixMatch[0]);
-          tok = tok.slice(dayPrefixMatch[0].length);
-          if (tok === "") return;
-        }
-        applyTimeToken(tok, pieces.length > 1);
+      pieces.forEach((piece) => {
+        piece.match(/[월화수목금토]+[^월화수목금토]*|[^월화수목금토]+/g).forEach((seg) => {
+          let tok = seg;
+          const dayPrefixMatch = tok.match(/^[월화수목금토]+/);
+          if (dayPrefixMatch) {
+            currentDays = parseDayGroupToken(dayPrefixMatch[0]);
+            tok = tok.slice(dayPrefixMatch[0].length);
+            if (tok === "") return;
+          }
+          applyTimeToken(tok, pieces.length > 1);
+        });
       });
     });
     result.days.sort((a, b) => a.day - b.day);

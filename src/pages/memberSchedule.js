@@ -499,16 +499,22 @@ export function parseBulkImportLine(line) {
   }
 
   // "목2,410,420"처럼 쉼표로 나뉜 조각은 각각 하나의 시각(2시, 4시10분, 4시20분)으로 본다.
+  // "화7수목금78910"처럼 띄어쓰기 없이 요일이 다시 나오면 그 자리에서 새 요일 묶음으로 끊는다.
   tokens.slice(1).forEach((spaceTok) => {
     const pieces = spaceTok.split(",").filter(Boolean);
-    pieces.forEach((tok) => {
-      const dayPrefixMatch = tok.match(/^[월화수목금토]+/);
-      if (dayPrefixMatch) {
-        currentDays = parseDayGroupToken(dayPrefixMatch[0]);
-        tok = tok.slice(dayPrefixMatch[0].length);
-        if (tok === "") return;
-      }
-      applyTimeToken(tok, pieces.length > 1);
+    pieces.forEach((piece) => {
+      piece
+        .match(/[월화수목금토]+[^월화수목금토]*|[^월화수목금토]+/g)
+        .forEach((seg) => {
+          let tok = seg;
+          const dayPrefixMatch = tok.match(/^[월화수목금토]+/);
+          if (dayPrefixMatch) {
+            currentDays = parseDayGroupToken(dayPrefixMatch[0]);
+            tok = tok.slice(dayPrefixMatch[0].length);
+            if (tok === "") return;
+          }
+          applyTimeToken(tok, pieces.length > 1);
+        });
     });
   });
   result.days.sort((a, b) => a.day - b.day);
