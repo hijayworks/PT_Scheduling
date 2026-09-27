@@ -12,6 +12,7 @@ import {
   memberById,
   travelMinutes,
   isInefficientRoundTrip,
+  roundTripOriginLoc,
 } from "../domain.js";
 import {
   currentExcludedIds2,
@@ -179,7 +180,11 @@ export function runChainDP(
       const newJs = js[j] + (node.jitter || 0);
       // 2칸 전 지점(p가 도착하기 전에 있던 지점)까지 알아야 지금 완성되는 A→B→A 왕복(p 이전
       // 지점 → p의 지점 → 이번 node의 지점)을 판정할 수 있다.
-      const pTwoBackLoc = prev[j] !== -1 ? nodes[prev[j]].locationId : null;
+      const pTwoBackLoc = roundTripOriginLoc(
+        j,
+        (k) => (prev[k] !== -1 ? prev[k] : null),
+        (k) => nodes[k].locationId,
+      );
       const newIneff =
         ineff[j] +
         (isInefficientRoundTrip(

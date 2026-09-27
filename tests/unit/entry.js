@@ -7,6 +7,7 @@ export {
   pairKey,
   inefficientRoundTripLocationInfo,
   isInefficientRoundTrip,
+  roundTripOriginLoc,
 } from "../../src/domain.js";
 export { state } from "../../src/state.js";
 export {

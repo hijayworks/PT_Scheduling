@@ -1455,7 +1455,7 @@ export function renderSchedule3Result() {
   for (let i = 0; i < SCHEDULE2_CARD_COUNT; i++) {
     const aTitle = "후보A-" + (i + 1) + " - 인원 최대 (빈 시간 허용)";
     const aDesc =
-      "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.";
+      "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.";
     const a = runtime.schedule3Result.candidateAList[i];
     if (a) {
       buildCard(
@@ -1486,7 +1486,7 @@ export function renderSchedule3Result() {
   if (b) {
     buildCard(
       "후보B - 인원 최대 (빈 시간 최소화)",
-      "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.",
+      "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
       b,
       candidateToBlocks(b, renderSchedule3Result),
       candidateToTravelBlocks(b).concat(schedule2ToIdleBlocks(b.assigned)),
@@ -1501,7 +1501,7 @@ export function renderSchedule3Result() {
   } else {
     buildPlaceholderCard(
       "후보B - 인원 최대 (빈 시간 최소화)",
-      "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.",
+      "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
       colRight,
     );
   }

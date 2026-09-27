@@ -23,8 +23,10 @@ import {
   travelMinutes,
   inefficientRoundTripLocationInfo,
   isInefficientRoundTrip,
+  roundTripOriginLoc,
 } from "../domain.js";
 import { currentExcludedIds } from "../selectionOverride.js";
+import { schedule2TotalIdleMinutes } from "./scheduleCompare.js";
 
 export function requestCells(req) {
   const cells = [];
@@ -117,16 +119,14 @@ export function dailyTravelCount(chain) {
 // 호출부에서 한 번만 구해 넘기는 편이 낫다.
 export function dailyInefficientMoveCount(chain, info) {
   info = info === undefined ? inefficientRoundTripLocationInfo() : info;
+  // 같은 지점에서 연달아 한 세션은 하나로 합쳐서 본다(마포→상암→상암→마포도 왕복).
+  const locs = [];
+  chain.forEach((s) => {
+    if (locs[locs.length - 1] !== s.locationId) locs.push(s.locationId);
+  });
   let count = 0;
-  for (let i = 1; i < chain.length - 1; i++) {
-    if (
-      isInefficientRoundTrip(
-        info,
-        chain[i - 1].locationId,
-        chain[i].locationId,
-        chain[i + 1].locationId,
-      )
-    )
+  for (let i = 1; i < locs.length - 1; i++) {
+    if (isInefficientRoundTrip(info, locs[i - 1], locs[i], locs[i + 1]))
       count++;
   }
   return count;
@@ -419,7 +419,8 @@ export function greedyAssign(eligibleReqs, options, pinned) {
         // dp 차이가 COVERAGE_WEIGHT_GAP_THRESHOLD를 넘으면 FORCE_ONCE_WEIGHT 같은 하드
         // 가중치가 걸려 있다는 뜻이므로, coveragePriority와 무관하게 dp를 먼저 본다 — 안
         // 그러면 "미배정 회원을 강제로 넣는다" 같은 하드 로직이 비효율 이동 회피에 밀릴 수 있다.
-        const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;
+        const hardWeightGap =
+          Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;
         if (travelFirst) {
           if (countA !== countB) return countA < countB;
           if (dpA !== dpB) return dpA > dpB;
@@ -509,9 +510,11 @@ export function greedyAssign(eligibleReqs, options, pinned) {
               // 2칸 전 지점(prevNode가 도착하기 전에 있던 지점)까지 알아야 지금 완성되는
               // A→B→A 왕복(prevNode 이전 지점 → prevNode의 지점 → 이번 node의 지점)을 판정할
               // 수 있다 — prevNode 자신이 하루의 첫 세션이면(prev 없음) 왕복이 성립할 수 없다.
-              const prevTwoBackLoc = prevNode.prev
-                ? prevNode.prev.locationId
-                : null;
+              const prevTwoBackLoc = roundTripOriginLoc(
+                prevNode,
+                (n) => n.prev,
+                (n) => n.locationId,
+              );
               const resultIneffCount =
                 prevNode.ineffCount +
                 (isInefficientRoundTrip(
@@ -669,7 +672,11 @@ export function greedyAssign(eligibleReqs, options, pinned) {
             // 왕복을 완성시키는지(node 이전 지점 → node의 지점 → endBefore의 지점)까지 반영해
             // 비교용으로만 더해준다(기존에도 이 블록은 마지막 전이 비용을 완벽히 반영하진
             // 않는 근사라, 그 패턴을 그대로 따른다).
-            const nodeTwoBackLoc = node.prev ? node.prev.locationId : null;
+            const nodeTwoBackLoc = roundTripOriginLoc(
+              node,
+              (n) => n.prev,
+              (n) => n.locationId,
+            );
             const nodeIneffCount =
               node.ineffCount +
               (isInefficientRoundTrip(
@@ -741,8 +748,11 @@ export function greedyAssign(eligibleReqs, options, pinned) {
         const chainEnd = chain[chain.length - 1];
         // 체인 끝에서 두 칸 전 지점 — 다음 후보를 이어붙였을 때 A→B→A 왕복이 완성되는지
         // 판정하는 데 쓴다.
-        const chainTwoBackLoc =
-          chain.length >= 2 ? chain[chain.length - 2].locationId : null;
+        const chainTwoBackLoc = roundTripOriginLoc(
+          chain.length - 1,
+          (i) => (i > 0 ? i - 1 : null),
+          (i) => chain[i].locationId,
+        );
         // 숨김 하드 로직: chainEnd가 세 지점을 모두 다니는 회원이고 그 자신도 이동으로
         // 도착했다면, 여기서 또 이동으로 이어붙이는 것은 막는다("이동-회원-이동" 금지,
         // buildBestChain의 동일 로직 참고).
@@ -834,7 +844,12 @@ export function greedyAssign(eligibleReqs, options, pinned) {
     // 찾는다. 앞뒤를 합친 하루 전체가 "하루 이동 최대 허용 횟수"를 넘기면 적용하지 않는다(앞쪽
     // 체인 자체는 자기 안에서 이 한도를 지키지만, 기존 체인과 이어지는 지점에서의 이동은
     // buildBestChain이 알지 못하므로 합친 뒤 다시 확인해야 한다).
-    function extendChainBackward(day, eligibleMemberIds, weightFn, coveragePriority) {
+    function extendChainBackward(
+      day,
+      eligibleMemberIds,
+      weightFn,
+      coveragePriority,
+    ) {
       const chain = chainByDay.get(day) || [];
       if (chain.length === 0) return;
       const usedMembers = new Set(chain.map((s) => s.memberId));
@@ -1167,7 +1182,7 @@ export function defaultSort(eligible, jitter) {
 export const STRATEGIES = [
   {
     title: "후보A - 인원 최대",
-    desc: "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다. (빈 시간 최소화)",
+    desc: "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
     // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
     // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
     // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
@@ -1402,9 +1417,10 @@ export function buildCandidateFromStrategy(
 // 수업 건수가 더 많은 조합을 골라버려(예: 미배정 2명) 후보 설명이 내세우는 상한이 지켜지지
 // 않는다(실제로 이 문제가 있었다). 상한을 지키는 조합이 아예 없을 때만(둘 다 위반) 그 아래
 // 기준으로 비교한다.
-// 튜플 순서 [capOk, ineff, base0, base1, travel] — capOk(미배정 상한 준수) 다음으로 비효율
-// 이동 횟수를 항상 먼저 비교한다("후보 생성 우선순위: 미배정 없음 → 비효율 이동 최소화 →
-// 수업 횟수 최대 → 이동 횟수 최소화"를 후보B("sessions" 우선)에도 예외 없이 적용한다).
+// 후보 생성 우선순위: 미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저 →
+// 빈 시간 최소. 기본("count") 튜플은 [capOk, count, ineff, sessions, travel, idle] — 인원이
+// 비효율 이동보다 먼저다. "sessions"(후보C)는 미배정 상한(capOk) 안에서 [capOk, ineff,
+// sessions, count, travel, idle]로 비교한다.
 export function candidateSearchScore(cand, primary, maxUnassigned) {
   const count = new Set(cand.assigned.map((r) => r.memberId)).size;
   const sessions = cand.assigned.length;
@@ -1415,18 +1431,15 @@ export function candidateSearchScore(cand, primary, maxUnassigned) {
     cand.unassignedMembers.length > maxUnassigned
       ? 0
       : 1;
-  const base =
-    primary === "sessions"
-      ? [sessions, count, travel]
-      : [count, sessions, travel];
-  return [capOk, ineff, base[0], base[1], base[2]];
+  const idle = schedule2TotalIdleMinutes(cand.assigned);
+  // ineff/travel/idle은 적을수록 좋으므로 부호를 뒤집어 "클수록 좋음"으로 통일한다.
+  return primary === "sessions"
+    ? [capOk, -ineff, sessions, count, -travel, -idle]
+    : [capOk, count, -ineff, sessions, -travel, -idle];
 }
 export function isCandidateWorse(a, b) {
-  if (a[0] !== b[0]) return a[0] < b[0];
-  if (a[1] !== b[1]) return a[1] > b[1]; // ineff: 적을수록 좋음
-  if (a[2] !== b[2]) return a[2] < b[2];
-  if (a[3] !== b[3]) return a[3] < b[3];
-  return a[4] > b[4]; // travel: 적을수록 좋음
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
 }
 // 두 candidateSearchScore 튜플이 완전히 동점인지("배치 페이저"용 — 미배정/수업 건수/이동
 // 횟수까지 전부 같아 카드 pill 표시가 동일한 경우만 같은 풀로 묶는다).

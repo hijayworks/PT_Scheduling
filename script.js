@@ -228,6 +228,12 @@
       yeouidoId: idByName.get("여의도점")
     };
   }
+  function roundTripOriginLoc(start, prevOf, locOf) {
+    const loc = locOf(start);
+    let n = prevOf(start);
+    while (n != null && locOf(n) === loc) n = prevOf(n);
+    return n == null ? null : locOf(n);
+  }
   function isInefficientRoundTrip(info, locA, locB, locC) {
     if (!info || locA == null || locB == null || locC == null) return false;
     if (locA !== locC || locA === locB) return false;
@@ -1007,6 +1013,248 @@
     }
   }
 
+  // src/engine/chainDpCore.js
+  function sessionDurationFor2(member) {
+    return (member && (member.category || "상담")) === "상담" ? CONSULT_DURATION_MIN_2 : SESSION_DURATION_MIN_2;
+  }
+  function maxSessionsFor2(member) {
+    if (!member) return 1;
+    if (currentOnceLimitIds2().includes(member.id)) return 1;
+    return (member.category || "상담") === "상담" ? 1 : MAX_SESSIONS_PER_MEMBER;
+  }
+  function requiredGapMin2(locA, locB) {
+    const raw = travelMinutes(locA, locB);
+    return raw > 0 ? Math.ceil(raw / SLOT_MIN) * SLOT_MIN : 0;
+  }
+  function isEligibleRequest2(req) {
+    const member = memberById(req.memberId);
+    if (!member || currentExcludedIds2().includes(req.memberId)) return false;
+    const slots = durationToSlots(sessionDurationFor2(member));
+    for (let i = 0; i < slots; i++) {
+      if (!runtime.availableCells.has(cellKey(req.day, req.startSlot + i)))
+        return false;
+    }
+    return true;
+  }
+  function buildDayNodes(dayRequests, weightFn, jitterFn) {
+    const nodes = [];
+    dayRequests.forEach((r) => {
+      const member = memberById(r.memberId);
+      const duration = sessionDurationFor2(member);
+      const end = r.startSlot + durationToSlots(duration);
+      candidateLocationsForRequest(r).forEach((locationId) => {
+        const weight = weightFn(r.memberId, r.startSlot, locationId);
+        if (!weight) return;
+        nodes.push({
+          id: r.id,
+          memberId: r.memberId,
+          day: r.day,
+          startSlot: r.startSlot,
+          duration,
+          locationId,
+          end,
+          weight,
+          jitter: jitterFn ? jitterFn() : 0
+        });
+      });
+    });
+    return nodes;
+  }
+  function runChainDP(nodes, maxTravelsPerDay, ineffInfo, coveragePriority) {
+    if (maxTravelsPerDay === void 0) maxTravelsPerDay = MAX_TRAVELS_PER_DAY;
+    nodes = nodes.slice().sort((a, b) => a.end - b.end || a.startSlot - b.startSlot);
+    const n = nodes.length;
+    const dp = new Array(n), tc = new Array(n), tm = new Array(n), idle = new Array(n), js = new Array(n), ineff = new Array(n), prev = new Array(n);
+    function better(dpA, ineffA, tcA, tmA, idleA, jsA, dpB, ineffB, tcB, tmB, idleB, jsB) {
+      const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;
+      if (coveragePriority || hardWeightGap) {
+        if (dpA !== dpB) return dpA > dpB;
+        if (ineffA !== ineffB) return ineffA < ineffB;
+      } else {
+        if (ineffA !== ineffB) return ineffA < ineffB;
+        if (dpA !== dpB) return dpA > dpB;
+      }
+      if (tcA !== tcB) return tcA < tcB;
+      if (tmA !== tmB) return tmA < tmB;
+      if (idleA !== idleB) return idleA < idleB;
+      return jsA < jsB;
+    }
+    for (let i = 0; i < n; i++) {
+      const node = nodes[i];
+      let bestDp = node.weight, bestIneff = 0, bestTc = 0, bestTm = 0, bestIdle = 0, bestJs = node.jitter || 0, bestPrev = -1;
+      for (let j = 0; j < i; j++) {
+        const p = nodes[j];
+        if (p.memberId === node.memberId) continue;
+        const gapNeed = requiredGapMin2(p.locationId, node.locationId);
+        const gapActual = (node.startSlot - p.end) * SLOT_MIN;
+        if (gapActual < gapNeed) continue;
+        const addsTravel = travelMinutes(p.locationId, node.locationId) > 0 ? 1 : 0;
+        const newTc = tc[j] + addsTravel;
+        if (newTc > maxTravelsPerDay) continue;
+        const newDp = dp[j] + node.weight;
+        const newTm = tm[j] + travelMinutes(p.locationId, node.locationId);
+        const newIdle = idle[j] + (gapActual - gapNeed);
+        const newJs = js[j] + (node.jitter || 0);
+        const pTwoBackLoc = roundTripOriginLoc(
+          j,
+          (k) => prev[k] !== -1 ? prev[k] : null,
+          (k) => nodes[k].locationId
+        );
+        const newIneff = ineff[j] + (isInefficientRoundTrip(
+          ineffInfo,
+          pTwoBackLoc,
+          p.locationId,
+          node.locationId
+        ) ? 1 : 0);
+        if (better(
+          newDp,
+          newIneff,
+          newTc,
+          newTm,
+          newIdle,
+          newJs,
+          bestDp,
+          bestIneff,
+          bestTc,
+          bestTm,
+          bestIdle,
+          bestJs
+        )) {
+          bestDp = newDp;
+          bestIneff = newIneff;
+          bestTc = newTc;
+          bestTm = newTm;
+          bestIdle = newIdle;
+          bestJs = newJs;
+          bestPrev = j;
+        }
+      }
+      dp[i] = bestDp;
+      ineff[i] = bestIneff;
+      tc[i] = bestTc;
+      tm[i] = bestTm;
+      idle[i] = bestIdle;
+      js[i] = bestJs;
+      prev[i] = bestPrev;
+    }
+    let bestEnd = -1, bestDpAll = 0, bestIneffAll = 0, bestTcAll = 0, bestTmAll = 0, bestIdleAll = 0, bestJsAll = 0;
+    for (let i = 0; i < n; i++) {
+      if (bestEnd === -1 || better(
+        dp[i],
+        ineff[i],
+        tc[i],
+        tm[i],
+        idle[i],
+        js[i],
+        bestDpAll,
+        bestIneffAll,
+        bestTcAll,
+        bestTmAll,
+        bestIdleAll,
+        bestJsAll
+      )) {
+        bestDpAll = dp[i];
+        bestIneffAll = ineff[i];
+        bestTcAll = tc[i];
+        bestTmAll = tm[i];
+        bestIdleAll = idle[i];
+        bestJsAll = js[i];
+        bestEnd = i;
+      }
+    }
+    const chain = [];
+    const used = /* @__PURE__ */ new Set();
+    let cur = bestEnd;
+    while (cur !== -1 && cur !== void 0) {
+      const node = nodes[cur];
+      if (!used.has(node.memberId)) {
+        chain.unshift(node);
+        used.add(node.memberId);
+      }
+      cur = prev[cur];
+    }
+    return chain;
+  }
+
+  // src/engine/scheduleCompare.js
+  function isSchedule2ResultBetter(a, b) {
+    if (a.unassignedMembers.length !== b.unassignedMembers.length) {
+      return a.unassignedMembers.length < b.unassignedMembers.length;
+    }
+    const ineffA = totalInefficientMoveCount(a.assigned), ineffB = totalInefficientMoveCount(b.assigned);
+    if (ineffA !== ineffB) return ineffA < ineffB;
+    if (a.assigned.length !== b.assigned.length)
+      return a.assigned.length > b.assigned.length;
+    const travelCountA = totalTravelCount(a.assigned), travelCountB = totalTravelCount(b.assigned);
+    const idleA = schedule2TotalIdleMinutes(a.assigned), idleB = schedule2TotalIdleMinutes(b.assigned);
+    if (travelCountA !== travelCountB) {
+      const netA = travelCountA * TRAVEL_VALUE_MINUTES + idleA;
+      const netB = travelCountB * TRAVEL_VALUE_MINUTES + idleB;
+      if (netA !== netB) return netA < netB;
+    }
+    const travelMinA = totalTravelMinutes(a.assigned), travelMinB = totalTravelMinutes(b.assigned);
+    if (travelMinA !== travelMinB) return travelMinA < travelMinB;
+    return idleA < idleB;
+  }
+  function floorIsBetter(a, b) {
+    if (!b) return true;
+    if (a.unassignedMembers.length !== b.unassignedMembers.length) {
+      return a.unassignedMembers.length < b.unassignedMembers.length;
+    }
+    return a.assigned.length > b.assigned.length;
+  }
+  function schedule2Signature(result) {
+    return result.assigned.map(
+      (r) => r.memberId + "|" + r.day + "|" + r.startSlot + "|" + r.locationId
+    ).sort().join(",");
+  }
+  function schedule2ToIdleBlocks(assigned) {
+    const byDay = /* @__PURE__ */ new Map();
+    assigned.forEach((r) => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    const idleBlocks = [];
+    byDay.forEach((reqs) => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1], cur = sorted[i];
+        const travelSlots = requiredGapMin2(prev.locationId, cur.locationId) / SLOT_MIN;
+        const idleStartSlot = prev.startSlot + durationToSlots(prev.duration) + travelSlots;
+        const idleEndSlot = cur.startSlot;
+        if (idleEndSlot > idleStartSlot) {
+          const mins = (idleEndSlot - idleStartSlot) * SLOT_MIN;
+          idleBlocks.push({
+            day: prev.day,
+            startSlot: idleStartSlot,
+            duration: mins,
+            label: "빈 시간 " + mins + "분",
+            type: "idle"
+          });
+        }
+      }
+    });
+    return idleBlocks;
+  }
+  function schedule2TotalIdleMinutes(assigned) {
+    let idle = 0;
+    const byDay = /* @__PURE__ */ new Map();
+    assigned.forEach((r) => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    byDay.forEach((reqs) => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1], cur = sorted[i];
+        const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;
+        const needMin = requiredGapMin2(prev.locationId, cur.locationId);
+        idle += Math.max(0, gapMin - needMin);
+      }
+    });
+    return idle;
+  }
+
   // src/engine/greedy.js
   function requestCells(req) {
     const cells = [];
@@ -1061,14 +1309,13 @@
   }
   function dailyInefficientMoveCount(chain, info) {
     info = info === void 0 ? inefficientRoundTripLocationInfo() : info;
+    const locs = [];
+    chain.forEach((s) => {
+      if (locs[locs.length - 1] !== s.locationId) locs.push(s.locationId);
+    });
     let count = 0;
-    for (let i = 1; i < chain.length - 1; i++) {
-      if (isInefficientRoundTrip(
-        info,
-        chain[i - 1].locationId,
-        chain[i].locationId,
-        chain[i + 1].locationId
-      ))
+    for (let i = 1; i < locs.length - 1; i++) {
+      if (isInefficientRoundTrip(info, locs[i - 1], locs[i], locs[i + 1]))
         count++;
     }
     return count;
@@ -1216,7 +1463,11 @@
                 const resultTimeCost = resultTravelOnly + prevNode.idleMinutesSum + slackMin;
                 const slackPenalty = soloTravelIds.has(node.cand.memberId) && transitionMin === 0 && slackMin > 0 ? slackMin : 0;
                 const resultSlackPen = prevNode.soloSlackPenalty + slackPenalty;
-                const prevTwoBackLoc = prevNode.prev ? prevNode.prev.locationId : null;
+                const prevTwoBackLoc = roundTripOriginLoc(
+                  prevNode,
+                  (n) => n.prev,
+                  (n) => n.locationId
+                );
                 const resultIneffCount = prevNode.ineffCount + (isInefficientRoundTrip(
                   ineffInfo,
                   prevTwoBackLoc,
@@ -1331,7 +1582,11 @@
                 (n) => !(soloTravelIds.has(n.cand.memberId) && n.arrivedViaTravel && transitionMin > 0)
               );
               if (!node) continue;
-              const nodeTwoBackLoc = node.prev ? node.prev.locationId : null;
+              const nodeTwoBackLoc = roundTripOriginLoc(
+                node,
+                (n) => n.prev,
+                (n) => n.locationId
+              );
               const nodeIneffCount = node.ineffCount + (isInefficientRoundTrip(
                 ineffInfo,
                 nodeTwoBackLoc,
@@ -1390,7 +1645,11 @@
         while (extending) {
           extending = false;
           const chainEnd = chain[chain.length - 1];
-          const chainTwoBackLoc = chain.length >= 2 ? chain[chain.length - 2].locationId : null;
+          const chainTwoBackLoc = roundTripOriginLoc(
+            chain.length - 1,
+            (i) => i > 0 ? i - 1 : null,
+            (i) => chain[i].locationId
+          );
           const chainEndArrivedViaTravel = chain.length >= 2 && chain[chain.length - 2].locationId !== chainEnd.locationId;
           const chainEndIsSoloTravelMember = soloTravelIds.has(chainEnd.memberId) && chainEndArrivedViaTravel;
           let bestCand = null, bestLocated = null, bestCost = Infinity;
@@ -1656,7 +1915,7 @@
   var STRATEGIES = [
     {
       title: "후보A - 인원 최대",
-      desc: "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다. (빈 시간 최소화)",
+      desc: "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
       // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
       // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
       // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
@@ -1808,15 +2067,12 @@
     const travel = totalTravelCount(cand.assigned);
     const ineff = totalInefficientMoveCount(cand.assigned);
     const capOk = typeof maxUnassigned === "number" && cand.unassignedMembers.length > maxUnassigned ? 0 : 1;
-    const base = primary === "sessions" ? [sessions, count, travel] : [count, sessions, travel];
-    return [capOk, ineff, base[0], base[1], base[2]];
+    const idle = schedule2TotalIdleMinutes(cand.assigned);
+    return primary === "sessions" ? [capOk, -ineff, sessions, count, -travel, -idle] : [capOk, count, -ineff, sessions, -travel, -idle];
   }
   function isCandidateWorse(a, b) {
-    if (a[0] !== b[0]) return a[0] < b[0];
-    if (a[1] !== b[1]) return a[1] > b[1];
-    if (a[2] !== b[2]) return a[2] < b[2];
-    if (a[3] !== b[3]) return a[3] < b[3];
-    return a[4] > b[4];
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
+    return false;
   }
   function isCandidateScoreTie(a, b) {
     return !isCandidateWorse(a, b) && !isCandidateWorse(b, a);
@@ -2136,165 +2392,6 @@
     saveState();
     onDone();
     showToast("이전 후보로 되돌아갔습니다", "info");
-  }
-
-  // src/engine/chainDpCore.js
-  function sessionDurationFor2(member) {
-    return (member && (member.category || "상담")) === "상담" ? CONSULT_DURATION_MIN_2 : SESSION_DURATION_MIN_2;
-  }
-  function maxSessionsFor2(member) {
-    if (!member) return 1;
-    if (currentOnceLimitIds2().includes(member.id)) return 1;
-    return (member.category || "상담") === "상담" ? 1 : MAX_SESSIONS_PER_MEMBER;
-  }
-  function requiredGapMin2(locA, locB) {
-    const raw = travelMinutes(locA, locB);
-    return raw > 0 ? Math.ceil(raw / SLOT_MIN) * SLOT_MIN : 0;
-  }
-  function isEligibleRequest2(req) {
-    const member = memberById(req.memberId);
-    if (!member || currentExcludedIds2().includes(req.memberId)) return false;
-    const slots = durationToSlots(sessionDurationFor2(member));
-    for (let i = 0; i < slots; i++) {
-      if (!runtime.availableCells.has(cellKey(req.day, req.startSlot + i)))
-        return false;
-    }
-    return true;
-  }
-  function buildDayNodes(dayRequests, weightFn, jitterFn) {
-    const nodes = [];
-    dayRequests.forEach((r) => {
-      const member = memberById(r.memberId);
-      const duration = sessionDurationFor2(member);
-      const end = r.startSlot + durationToSlots(duration);
-      candidateLocationsForRequest(r).forEach((locationId) => {
-        const weight = weightFn(r.memberId, r.startSlot, locationId);
-        if (!weight) return;
-        nodes.push({
-          id: r.id,
-          memberId: r.memberId,
-          day: r.day,
-          startSlot: r.startSlot,
-          duration,
-          locationId,
-          end,
-          weight,
-          jitter: jitterFn ? jitterFn() : 0
-        });
-      });
-    });
-    return nodes;
-  }
-  function runChainDP(nodes, maxTravelsPerDay, ineffInfo, coveragePriority) {
-    if (maxTravelsPerDay === void 0) maxTravelsPerDay = MAX_TRAVELS_PER_DAY;
-    nodes = nodes.slice().sort((a, b) => a.end - b.end || a.startSlot - b.startSlot);
-    const n = nodes.length;
-    const dp = new Array(n), tc = new Array(n), tm = new Array(n), idle = new Array(n), js = new Array(n), ineff = new Array(n), prev = new Array(n);
-    function better(dpA, ineffA, tcA, tmA, idleA, jsA, dpB, ineffB, tcB, tmB, idleB, jsB) {
-      const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;
-      if (coveragePriority || hardWeightGap) {
-        if (dpA !== dpB) return dpA > dpB;
-        if (ineffA !== ineffB) return ineffA < ineffB;
-      } else {
-        if (ineffA !== ineffB) return ineffA < ineffB;
-        if (dpA !== dpB) return dpA > dpB;
-      }
-      if (tcA !== tcB) return tcA < tcB;
-      if (tmA !== tmB) return tmA < tmB;
-      if (idleA !== idleB) return idleA < idleB;
-      return jsA < jsB;
-    }
-    for (let i = 0; i < n; i++) {
-      const node = nodes[i];
-      let bestDp = node.weight, bestIneff = 0, bestTc = 0, bestTm = 0, bestIdle = 0, bestJs = node.jitter || 0, bestPrev = -1;
-      for (let j = 0; j < i; j++) {
-        const p = nodes[j];
-        if (p.memberId === node.memberId) continue;
-        const gapNeed = requiredGapMin2(p.locationId, node.locationId);
-        const gapActual = (node.startSlot - p.end) * SLOT_MIN;
-        if (gapActual < gapNeed) continue;
-        const addsTravel = travelMinutes(p.locationId, node.locationId) > 0 ? 1 : 0;
-        const newTc = tc[j] + addsTravel;
-        if (newTc > maxTravelsPerDay) continue;
-        const newDp = dp[j] + node.weight;
-        const newTm = tm[j] + travelMinutes(p.locationId, node.locationId);
-        const newIdle = idle[j] + (gapActual - gapNeed);
-        const newJs = js[j] + (node.jitter || 0);
-        const pTwoBackLoc = prev[j] !== -1 ? nodes[prev[j]].locationId : null;
-        const newIneff = ineff[j] + (isInefficientRoundTrip(
-          ineffInfo,
-          pTwoBackLoc,
-          p.locationId,
-          node.locationId
-        ) ? 1 : 0);
-        if (better(
-          newDp,
-          newIneff,
-          newTc,
-          newTm,
-          newIdle,
-          newJs,
-          bestDp,
-          bestIneff,
-          bestTc,
-          bestTm,
-          bestIdle,
-          bestJs
-        )) {
-          bestDp = newDp;
-          bestIneff = newIneff;
-          bestTc = newTc;
-          bestTm = newTm;
-          bestIdle = newIdle;
-          bestJs = newJs;
-          bestPrev = j;
-        }
-      }
-      dp[i] = bestDp;
-      ineff[i] = bestIneff;
-      tc[i] = bestTc;
-      tm[i] = bestTm;
-      idle[i] = bestIdle;
-      js[i] = bestJs;
-      prev[i] = bestPrev;
-    }
-    let bestEnd = -1, bestDpAll = 0, bestIneffAll = 0, bestTcAll = 0, bestTmAll = 0, bestIdleAll = 0, bestJsAll = 0;
-    for (let i = 0; i < n; i++) {
-      if (bestEnd === -1 || better(
-        dp[i],
-        ineff[i],
-        tc[i],
-        tm[i],
-        idle[i],
-        js[i],
-        bestDpAll,
-        bestIneffAll,
-        bestTcAll,
-        bestTmAll,
-        bestIdleAll,
-        bestJsAll
-      )) {
-        bestDpAll = dp[i];
-        bestIneffAll = ineff[i];
-        bestTcAll = tc[i];
-        bestTmAll = tm[i];
-        bestIdleAll = idle[i];
-        bestJsAll = js[i];
-        bestEnd = i;
-      }
-    }
-    const chain = [];
-    const used = /* @__PURE__ */ new Set();
-    let cur = bestEnd;
-    while (cur !== -1 && cur !== void 0) {
-      const node = nodes[cur];
-      if (!used.has(node.memberId)) {
-        chain.unshift(node);
-        used.add(node.memberId);
-      }
-      cur = prev[cur];
-    }
-    return chain;
   }
 
   // src/engine/rng.js
@@ -3542,85 +3639,6 @@
     const assignedMemberIds = new Set(assigned.map((r) => r.memberId));
     const unassignedMembers = eligibleMemberIds.filter((id) => !assignedMemberIds.has(id)).map(memberById).filter(Boolean);
     return { assigned, unassignedMembers };
-  }
-
-  // src/engine/scheduleCompare.js
-  function isSchedule2ResultBetter(a, b) {
-    if (a.unassignedMembers.length !== b.unassignedMembers.length) {
-      return a.unassignedMembers.length < b.unassignedMembers.length;
-    }
-    const ineffA = totalInefficientMoveCount(a.assigned), ineffB = totalInefficientMoveCount(b.assigned);
-    if (ineffA !== ineffB) return ineffA < ineffB;
-    if (a.assigned.length !== b.assigned.length)
-      return a.assigned.length > b.assigned.length;
-    const travelCountA = totalTravelCount(a.assigned), travelCountB = totalTravelCount(b.assigned);
-    const idleA = schedule2TotalIdleMinutes(a.assigned), idleB = schedule2TotalIdleMinutes(b.assigned);
-    if (travelCountA !== travelCountB) {
-      const netA = travelCountA * TRAVEL_VALUE_MINUTES + idleA;
-      const netB = travelCountB * TRAVEL_VALUE_MINUTES + idleB;
-      if (netA !== netB) return netA < netB;
-    }
-    const travelMinA = totalTravelMinutes(a.assigned), travelMinB = totalTravelMinutes(b.assigned);
-    if (travelMinA !== travelMinB) return travelMinA < travelMinB;
-    return idleA < idleB;
-  }
-  function floorIsBetter(a, b) {
-    if (!b) return true;
-    if (a.unassignedMembers.length !== b.unassignedMembers.length) {
-      return a.unassignedMembers.length < b.unassignedMembers.length;
-    }
-    return a.assigned.length > b.assigned.length;
-  }
-  function schedule2Signature(result) {
-    return result.assigned.map(
-      (r) => r.memberId + "|" + r.day + "|" + r.startSlot + "|" + r.locationId
-    ).sort().join(",");
-  }
-  function schedule2ToIdleBlocks(assigned) {
-    const byDay = /* @__PURE__ */ new Map();
-    assigned.forEach((r) => {
-      if (!byDay.has(r.day)) byDay.set(r.day, []);
-      byDay.get(r.day).push(r);
-    });
-    const idleBlocks = [];
-    byDay.forEach((reqs) => {
-      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
-      for (let i = 1; i < sorted.length; i++) {
-        const prev = sorted[i - 1], cur = sorted[i];
-        const travelSlots = requiredGapMin2(prev.locationId, cur.locationId) / SLOT_MIN;
-        const idleStartSlot = prev.startSlot + durationToSlots(prev.duration) + travelSlots;
-        const idleEndSlot = cur.startSlot;
-        if (idleEndSlot > idleStartSlot) {
-          const mins = (idleEndSlot - idleStartSlot) * SLOT_MIN;
-          idleBlocks.push({
-            day: prev.day,
-            startSlot: idleStartSlot,
-            duration: mins,
-            label: "빈 시간 " + mins + "분",
-            type: "idle"
-          });
-        }
-      }
-    });
-    return idleBlocks;
-  }
-  function schedule2TotalIdleMinutes(assigned) {
-    let idle = 0;
-    const byDay = /* @__PURE__ */ new Map();
-    assigned.forEach((r) => {
-      if (!byDay.has(r.day)) byDay.set(r.day, []);
-      byDay.get(r.day).push(r);
-    });
-    byDay.forEach((reqs) => {
-      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
-      for (let i = 1; i < sorted.length; i++) {
-        const prev = sorted[i - 1], cur = sorted[i];
-        const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;
-        const needMin = requiredGapMin2(prev.locationId, cur.locationId);
-        idle += Math.max(0, gapMin - needMin);
-      }
-    });
-    return idle;
   }
 
   // src/engine/chainDp.js
@@ -6636,7 +6654,7 @@
     }
     for (let i = 0; i < SCHEDULE2_CARD_COUNT; i++) {
       const aTitle = "후보A-" + (i + 1) + " - 인원 최대 (빈 시간 허용)";
-      const aDesc = "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.";
+      const aDesc = "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.";
       const a = runtime.schedule3Result.candidateAList[i];
       if (a) {
         buildCard(
@@ -6666,7 +6684,7 @@
     if (b) {
       buildCard(
         "후보B - 인원 최대 (빈 시간 최소화)",
-        "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.",
+        "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
         b,
         candidateToBlocks(b, renderSchedule3Result),
         candidateToTravelBlocks(b).concat(schedule2ToIdleBlocks(b.assigned)),
@@ -6681,7 +6699,7 @@
     } else {
       buildPlaceholderCard(
         "후보B - 인원 최대 (빈 시간 최소화)",
-        "미배정 없음 → 수업 횟수 최대 → 이동 횟수 최저 순으로 배정합니다.",
+        "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
         colRight
       );
     }

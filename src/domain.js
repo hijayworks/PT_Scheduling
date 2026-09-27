@@ -141,6 +141,16 @@ export function inefficientRoundTripLocationInfo() {
 // 마포점↔여의도점이 아니면(=상암점이 끼면) 비효율로 판정한다. info는
 // inefficientRoundTripLocationInfo()의 결과를 호출부에서 한 번만 구해 넘겨야 한다(순수 함수라
 // DP 안쪽 루프에서 반복 호출해도 안전하지만, info 자체를 반복 계산할 필요는 없다).
+// 왕복의 출발 지점(A)을 구한다: start부터 같은 지점에서 연달아 한 세션들을 거슬러 올라가
+// 그 직전에 있던 다른 지점을 돌려준다(없으면 null). 마포→상암→상암→마포처럼 B에서 여러 건을
+// 하고 돌아와도 왕복으로 잡히도록, 바로 앞 세션이 아니라 이 값을 locA로 넘긴다.
+export function roundTripOriginLoc(start, prevOf, locOf) {
+  const loc = locOf(start);
+  let n = prevOf(start);
+  while (n != null && locOf(n) === loc) n = prevOf(n);
+  return n == null ? null : locOf(n);
+}
+
 export function isInefficientRoundTrip(info, locA, locB, locC) {
   if (!info || locA == null || locB == null || locC == null) return false;
   if (locA !== locC || locA === locB) return false; // 실제로 이동이 있는 A→B→A만

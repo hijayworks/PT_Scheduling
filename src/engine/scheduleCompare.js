@@ -12,7 +12,7 @@ import { requiredGapMin2 } from "./chainDpCore.js";
 // 재시작 오케스트레이션)가 요일 순서 후보·다듬은 결과를 고를 때 이 모듈에 의존한다.
 
 // result가 better보다 더 나은 결과인지 비교한다: 미배정 회원 수(적을수록) → 비효율 이동
-// 횟수(적을수록) → 수업 수(많을수록) → 이동 횟수(적을수록) → 총 이동 시간(적을수록) 순.
+// 횟수(적을수록) → 수업 수(많을수록) → 이동 횟수·빈 시간 → 총 이동 시간(적을수록) 순.
 export function isSchedule2ResultBetter(a, b) {
   if (a.unassignedMembers.length !== b.unassignedMembers.length) {
     return a.unassignedMembers.length < b.unassignedMembers.length;

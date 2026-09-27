@@ -268,6 +268,14 @@ test("dailyInefficientMoveCount: 하루 체인에서 비효율 왕복만 센다"
   ];
   assertEqual(lib.dailyInefficientMoveCount(chain, info), 1);
 });
+test("dailyInefficientMoveCount: 상암에서 연달아 여러 건 해도 마포>상암>마포는 비효율", () => {
+  lib.state.locations = ineffLocations();
+  const info = lib.inefficientRoundTripLocationInfo();
+  const locs = ["M", "S", "S", "M"];
+  assertEqual(lib.dailyInefficientMoveCount(locs.map((locationId) => ({ locationId })), info), 1);
+  assertEqual(lib.roundTripOriginLoc(2, (i) => (i > 0 ? i - 1 : null), (i) => locs[i]), "M");
+  assertEqual(lib.roundTripOriginLoc(0, (i) => (i > 0 ? i - 1 : null), (i) => locs[i]), null);
+});
 
 /* ---------------- greedy.js: 후보 생성 우선순위(미배정 없음 > 비효율 이동 > 수업 횟수) ---------------- */
 // 세 회원 A(마포, 0~60분)·B(상암, 70~130분)·C(마포, 140~200분)를 하루 한 체인에 이어붙일 수
@@ -338,6 +346,20 @@ test("isSchedule2ResultBetter: 미배정이 같으면 비효율 이동이 적은
     "비효율 왕복이 없는 쪽이 수업 수가 적어도 이겨야 함",
   );
   assert(!lib.isSchedule2ResultBetter(moreSessionsButIneff, fewerSessionsNoIneff));
+});
+
+/* ---------------- candidateSearchScore: 미배정 → 비효율 이동 → 수업 수 ---------------- */
+test("candidateSearchScore: 인원이 비효율 이동보다, 비효율 이동이 수업 수보다 우선", () => {
+  lib.state.locations = ineffLocations();
+  lib.state.travelTimes = {};
+  const s = (memberId, startSlot, locationId) => ({ memberId, day: 0, startSlot, locationId, duration: 50 });
+  const score = (assigned) => lib.candidateSearchScore({ assigned, unassignedMembers: [] }, "count", null);
+  const threeMembersIneff = score([s("A", 0, "M"), s("B", 10, "S"), s("C", 20, "M")]);
+  const twoMembersClean = score([s("A", 0, "M"), s("B", 10, "S")]);
+  assert(lib.isCandidateWorse(twoMembersClean, threeMembersIneff), "인원이 많은 쪽이 비효율 이동이 있어도 이겨야 함");
+  const moreSessionsIneff = score([s("A", 0, "M"), s("B", 10, "S"), s("A", 20, "M")]);
+  const fewerSessionsClean = score([s("A", 0, "M"), s("B", 10, "S")]);
+  assert(lib.isCandidateWorse(moreSessionsIneff, fewerSessionsClean), "인원이 같으면 비효율 이동 없는 쪽이 수업 수보다 우선");
 });
 
 console.log(pass + "개 통과, " + fail + "개 실패 (단위 테스트)");
