@@ -4139,8 +4139,15 @@
     }
     return marks;
   }
-  function parseTimeToken(token) {
+  function parseTimeToken(token, single = false) {
     const originalToken = token;
+    if (single && /^\d{3,4}$/.test(token)) {
+      const hour = parseInt(token.slice(0, -2), 10);
+      const minute = parseInt(token.slice(-2), 10);
+      if (hour < 1 || hour > 12 || minute >= 60 || minute % SLOT_MIN !== 0)
+        return { error: '시간 해석 실패: "' + originalToken + '"' };
+      return { type: "point", marks: [{ hour, minute }] };
+    }
     const LATE_MARK = { hour: 10, minute: 30 };
     let hasLateMark = false;
     if (token.endsWith("늦은시간")) {
@@ -4241,14 +4248,14 @@
       return result;
     }
     let currentDays = null;
-    function applyTimeToken(tok) {
+    function applyTimeToken(tok, single) {
       if (!currentDays) {
         result.errors.push(
           '요일 지정 전에 나온 시간 표기라 건너뜁니다: "' + tok + '"'
         );
         return;
       }
-      const parsed = parseTimeToken(tok);
+      const parsed = parseTimeToken(tok, single);
       if (parsed.warning) result.warnings.push(parsed.warning);
       if (parsed.error) {
         result.errors.push(parsed.error);
@@ -4263,16 +4270,18 @@
         dayEntry.specs.push(parsed);
       });
     }
-    for (let i = 1; i < tokens.length; i++) {
-      let tok = tokens[i];
-      const dayPrefixMatch = tok.match(/^[월화수목금토]+/);
-      if (dayPrefixMatch) {
-        currentDays = parseDayGroupToken(dayPrefixMatch[0]);
-        tok = tok.slice(dayPrefixMatch[0].length);
-        if (tok === "") continue;
-      }
-      applyTimeToken(tok);
-    }
+    tokens.slice(1).forEach((spaceTok) => {
+      const pieces = spaceTok.split(",").filter(Boolean);
+      pieces.forEach((tok) => {
+        const dayPrefixMatch = tok.match(/^[월화수목금토]+/);
+        if (dayPrefixMatch) {
+          currentDays = parseDayGroupToken(dayPrefixMatch[0]);
+          tok = tok.slice(dayPrefixMatch[0].length);
+          if (tok === "") return;
+        }
+        applyTimeToken(tok, pieces.length > 1);
+      });
+    });
     result.days.sort((a, b) => a.day - b.day);
     return result;
   }

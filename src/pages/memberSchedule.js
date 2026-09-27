@@ -335,8 +335,17 @@ export function expandHourRange(leftMark, rightMark) {
 //  - "2~5" 처럼 물결 양쪽에 시각이 있으면 -> { type:"point", marks:[...] } ("2345"와 동일하게 확장)
 //  - "630~" -> { type:"openStart", mark:{...} } (그 시각부터 마감까지 전부 가능)
 //  - "~730" -> { type:"openEnd", mark:{...} } (마감 이전부터 그 시각까지 전부 가능)
-export function parseTimeToken(token) {
+//  - single=true(쉼표로 나뉜 조각)이면 "410"·"1020"처럼 3~4자리 숫자를 "시+분" 한 시각으로 읽는다
+//    (쉼표 없이 "410"을 쓰면 기존처럼 4시·10시).
+export function parseTimeToken(token, single = false) {
   const originalToken = token;
+  if (single && /^\d{3,4}$/.test(token)) {
+    const hour = parseInt(token.slice(0, -2), 10);
+    const minute = parseInt(token.slice(-2), 10);
+    if (hour < 1 || hour > 12 || minute >= 60 || minute % SLOT_MIN !== 0)
+      return { error: '시간 해석 실패: "' + originalToken + '"' };
+    return { type: "point", marks: [{ hour, minute }] };
+  }
   // "늦은시간"은 트레이너들이 관행적으로 쓰는 표현으로, 영업 마감 직전 시간대인
   // 오후 10시30분 시작을 뜻한다. "금910늦은시간"처럼 다른 시각 표기 뒤에 바로 붙어도
   // 그 시각들에 더해 22:30을 별도의 희망 시작 시각으로 추가한다.
@@ -466,14 +475,14 @@ export function parseBulkImportLine(line) {
 
   let currentDays = null;
 
-  function applyTimeToken(tok) {
+  function applyTimeToken(tok, single) {
     if (!currentDays) {
       result.errors.push(
         '요일 지정 전에 나온 시간 표기라 건너뜁니다: "' + tok + '"',
       );
       return;
     }
-    const parsed = parseTimeToken(tok);
+    const parsed = parseTimeToken(tok, single);
     if (parsed.warning) result.warnings.push(parsed.warning);
     if (parsed.error) {
       result.errors.push(parsed.error);
@@ -489,16 +498,19 @@ export function parseBulkImportLine(line) {
     });
   }
 
-  for (let i = 1; i < tokens.length; i++) {
-    let tok = tokens[i];
-    const dayPrefixMatch = tok.match(/^[월화수목금토]+/);
-    if (dayPrefixMatch) {
-      currentDays = parseDayGroupToken(dayPrefixMatch[0]);
-      tok = tok.slice(dayPrefixMatch[0].length);
-      if (tok === "") continue;
-    }
-    applyTimeToken(tok);
-  }
+  // "목2,410,420"처럼 쉼표로 나뉜 조각은 각각 하나의 시각(2시, 4시10분, 4시20분)으로 본다.
+  tokens.slice(1).forEach((spaceTok) => {
+    const pieces = spaceTok.split(",").filter(Boolean);
+    pieces.forEach((tok) => {
+      const dayPrefixMatch = tok.match(/^[월화수목금토]+/);
+      if (dayPrefixMatch) {
+        currentDays = parseDayGroupToken(dayPrefixMatch[0]);
+        tok = tok.slice(dayPrefixMatch[0].length);
+        if (tok === "") return;
+      }
+      applyTimeToken(tok, pieces.length > 1);
+    });
+  });
   result.days.sort((a, b) => a.day - b.day);
   return result;
 }
