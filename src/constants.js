@@ -11,6 +11,9 @@ export const ALLOWED_GAP_MIN = 10; // 이동시간·휴식시간을 제외하고
 // 상암점·여의도점·마포점 세 지점을 모두 다니는 회원은 "이동-회원-이동"(도착도 이동, 떠날 때도
 // 이동)으로 배정될 수 없다는 숨김 하드 로직(greedyAssign·eligibleSwapMembersFor 공용)의 기준 지점들.
 export const SOLO_TRAVEL_LOCATION_NAMES = ["상암점", "여의도점", "마포점"];
+// 하루 안에서 A→B→A로 돌아오는 왕복 중, 마포점↔여의도점 왕복만 허용하고 그 외(상암점이
+// 낀 모든 조합)는 "비효율 이동"으로 본다는 규칙(greedy.js·chainDp* 공용)의 기준 지점들.
+export const INEFFICIENT_ROUNDTRIP_LOCATION_NAMES = ["마포점", "여의도점", "상암점"];
 export const BLOCK_COLOR = "#4f46e5"; // 회원 미지정 등 예외 상황의 기본 블록 배경색
 // 회원별 블록 배경색(등록 순서대로 순환, 고정 순서 — 절대 임의로 섞지 않음). 색맹 시뮬레이션
 // 기준으로 인접 색끼리 구분이 되도록 검증된 팔레트: blue/orange/aqua/yellow/magenta/green/
@@ -60,6 +63,14 @@ export const STRATEGY_COUNT = 2;
 export const MAX_SESSIONS_PER_MEMBER = 2;
 export const MAX_TRAVELS_PER_DAY = 2; // 하루 지점 간 이동은 최소화하되, 하더라도 최대 2회까지
 export const FORCE_ONCE_WEIGHT = 1e6; // repairUnassigned의 forceOnceMemberIds가 1단계 배정에서 다른 회원들보다 항상 우선하도록 주는 가중치
+// FORCE_ONCE_WEIGHT·chainDpPolish.js의 PIN_WEIGHT·REBUILD_TARGET_WEIGHT(모두 1e6)처럼 "이
+// 노드는 절대 빠지면 안 된다"는 하드 가중치가 걸려 있는지 dp 차이의 크기로 판별하는 기준선.
+// 이 값보다 큰 dp 차이는(=하드 가중치가 걸린 쪽과 안 걸린 쪽을 비교하는 것) 비효율 이동
+// 회피보다 항상 우선한다 — 그래야 "비효율 이동을 피하려 세션 하나를 덜 받는" 정도의 정상적인
+// 트레이드오프만 비효율 이동이 이기고, 미배정 회원을 강제로 넣거나 이미 확정된 자리를
+// 지키는 하드 로직은 절대 깨지지 않는다. 일반적인 회원 수·수업 수 차이(많아야 수백 단위)보다
+// 훨씬 크고, 하드 가중치(1e6)보다는 훨씬 작게 잡는다.
+export const COVERAGE_WEIGHT_GAP_THRESHOLD = 10000;
 
 // "수업 스케줄 생성2" 전용 후보 생성 규칙: 등록 회원 60분·상담 회원 30분, 쉬는 시간 없음(이동이
 // 필요할 때만 그 이동 시간만큼 간격을 둔다). "수업 스케줄 생성1"도 이제 동일한 규칙(등록 60분·

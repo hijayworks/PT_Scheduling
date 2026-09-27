@@ -1,7 +1,7 @@
 import { SLOT_MIN, MAX_TRAVELS_PER_DAY } from "../constants.js";
 import { durationToSlots } from "../utils.js";
 import { state } from "../state.js";
-import { memberById } from "../domain.js";
+import { memberById, inefficientRoundTripLocationInfo } from "../domain.js";
 import { currentExcludedIds2 } from "../selectionOverride.js";
 import {
   yieldToUI,
@@ -9,6 +9,7 @@ import {
   candidateLocationsForRequest,
   dailyTravelCount,
   totalTravelCount,
+  dailyInefficientMoveCount,
   TRAVEL_VALUE_MINUTES,
 } from "./greedy.js";
 import {
@@ -49,6 +50,9 @@ export async function runSchedule2Pipeline(
   seedOffset,
 ) {
   seedOffset = seedOffset || 0;
+  // 비효율 이동(A→B→A 왕복 중 마포점↔여의도점이 아닌 것) 판정에 쓸 지점 정보 — 파이프라인
+  // 실행 동안 바뀌지 않으므로 한 번만 구해 모든 runChainDP 호출에 그대로 넘긴다.
+  const ineffInfo = inefficientRoundTripLocationInfo();
   // 아래 다듬기 루프들(특히 담금질 기법)은 동기로 몇 초~몇십 초씩 돌면 탭이 완전히
   // 멈춰버리므로, 주기적으로 yieldToUI에 제어권을 넘겨준다. 다만 그 시간도 실제 시계
   // (performance.now())에는 그대로 흐르므로, 아무 보정 없이 넘기기만 하면 같은 시간
@@ -171,7 +175,9 @@ export async function runSchedule2Pipeline(
       },
       () => stage1RandomFn(),
     );
-    const chain = runChainDP(nodes);
+    // coveragePriority=true: "아직 한 번도 못 받은 회원만" 채우는 진짜 커버리지 단계이므로
+    // 인원(dp)을 비효율 이동보다 먼저 본다.
+    const chain = runChainDP(nodes, undefined, ineffInfo, true);
     chain.forEach((node) => commit(day, node));
     dayChains.set(day, chain);
   });
@@ -200,7 +206,9 @@ export async function runSchedule2Pipeline(
       },
       () => stage1RandomFn(),
     );
-    const chain = runChainDP(nodes);
+    // coveragePriority=false지만, PIN_WEIGHT(1e6)로 고정된 자리는 dp 차이가 워낙 커서
+    // runChainDP 내부의 하드 가중치 안전장치(COVERAGE_WEIGHT_GAP_THRESHOLD)가 그대로 지켜준다.
+    const chain = runChainDP(nodes, undefined, ineffInfo);
     chain.forEach((node) => commit(day, node));
     dayChains.set(day, chain);
   });
@@ -429,7 +437,9 @@ export async function runSchedule2Pipeline(
         if (mId === memberId) return REBUILD_TARGET_WEIGHT;
         return isEligibleForDay(mId, day) ? 1 : 0;
       });
-      const newChain = runChainDP(nodes); // 하루 이동 최대 MAX_TRAVELS_PER_DAY회 제한은 여기서도 그대로 지킨다
+      // REBUILD_TARGET_WEIGHT(1e6)로 이 회원은 하드 가중치 안전장치가 지켜준다(coveragePriority
+      // 불필요). 하루 이동 최대 MAX_TRAVELS_PER_DAY회 제한은 여기서도 그대로 지킨다
+      const newChain = runChainDP(nodes, undefined, ineffInfo);
       if (!newChain.some((n) => n.memberId === memberId)) {
         existingChain.forEach((node) => commit(day, node)); // 이 회원을 못 넣으면 의미가 없으니 되돌린다
         dayChains.set(day, existingChain);
@@ -519,20 +529,25 @@ export async function runSchedule2Pipeline(
         0,
       );
       const existingChain = dayChains.get(day) || [];
+      const beforeIneff = dailyInefficientMoveCount(existingChain, ineffInfo);
       existingChain.forEach((node) => uncommit(day, node));
       const nodes = buildDayNodes(reqsByDay.get(day), (mId) =>
         isEligibleForDay(mId, day) ? 1 : 0,
       );
-      const newChain = runChainDP(nodes);
+      const newChain = runChainDP(nodes, undefined, ineffInfo);
       newChain.forEach((node) => commit(day, node));
       dayChains.set(day, newChain);
       const afterTotalSessions = Array.from(dayChains.values()).reduce(
         (sum, c) => sum + c.length,
         0,
       );
+      const afterIneff = dailyInefficientMoveCount(newChain, ineffInfo);
+      // 비효율 이동이 줄면(우선순위 2) 이 요일의 수업 수가 줄어도(우선순위 3) 받아들인다 —
+      // 비효율 이동이 그대로일 때만 기존처럼 수업 수 기준으로 판단한다.
       const worse =
         stillUnassignedIds().length > beforeUnassignedCount ||
-        afterTotalSessions < beforeTotalSessions;
+        afterIneff > beforeIneff ||
+        (afterIneff === beforeIneff && afterTotalSessions < beforeTotalSessions);
       if (worse) {
         newChain.forEach((node) => uncommit(day, node));
         existingChain.forEach((node) => commit(day, node));
@@ -572,6 +587,9 @@ export async function runSchedule2Pipeline(
         );
         const beforePairTravel =
           totalTravelCount(existingA) + totalTravelCount(existingB);
+        const beforePairIneff =
+          dailyInefficientMoveCount(existingA, ineffInfo) +
+          dailyInefficientMoveCount(existingB, ineffInfo);
 
         // 기존 배치는 여기서 딱 한 번만 커밋 해제한다 — attemptOrder를 여러 번 호출하면서
         // 매번 이걸 다시 해제하면, 이미 해제된 회원을 또 해제하게 되어 배정 카운트가
@@ -593,7 +611,7 @@ export async function runSchedule2Pipeline(
             (mId) => (isEligibleForDay(mId, firstDay) ? 1 : 0),
             jitterFn,
           );
-          const firstChain = runChainDP(firstNodes);
+          const firstChain = runChainDP(firstNodes, undefined, ineffInfo);
           firstChain.forEach((node) => commit(firstDay, node));
           dayChains.set(firstDay, firstChain);
           const secondNodes = buildDayNodes(
@@ -601,7 +619,7 @@ export async function runSchedule2Pipeline(
             (mId) => (isEligibleForDay(mId, secondDay) ? 1 : 0),
             jitterFn,
           );
-          const secondChain = runChainDP(secondNodes);
+          const secondChain = runChainDP(secondNodes, undefined, ineffInfo);
           secondChain.forEach((node) => commit(secondDay, node));
           dayChains.set(secondDay, secondChain);
           const outcome = {
@@ -612,6 +630,9 @@ export async function runSchedule2Pipeline(
             ),
             pairTravel:
               totalTravelCount(firstChain) + totalTravelCount(secondChain),
+            pairIneff:
+              dailyInefficientMoveCount(firstChain, ineffInfo) +
+              dailyInefficientMoveCount(secondChain, ineffInfo),
             chainA: firstDay === dayA ? firstChain : secondChain,
             chainB: firstDay === dayA ? secondChain : firstChain,
           };
@@ -635,10 +656,18 @@ export async function runSchedule2Pipeline(
         let bestOption = null;
         attempts.forEach((opt) => {
           if (opt.unassigned > beforeUnassignedCount) return;
-          if (opt.totalSessions < beforeTotalSessions) return;
-          if (opt.pairTravel >= beforePairTravel) return; // 개선되지 않으면 굳이 바꾸지 않는다
-          if (!bestOption || opt.pairTravel < bestOption.pairTravel)
-            bestOption = opt;
+          if (opt.pairIneff > beforePairIneff) return; // 비효율 이동이 늘면 거부(우선순위 2)
+          if (opt.pairIneff === beforePairIneff) {
+            // 비효율 이동이 그대로일 때만 기존처럼 수업 수·이동 시간으로 판단한다.
+            if (opt.totalSessions < beforeTotalSessions) return;
+            if (opt.pairTravel >= beforePairTravel) return; // 개선되지 않으면 굳이 바꾸지 않는다
+          }
+          const better =
+            !bestOption ||
+            opt.pairIneff < bestOption.pairIneff ||
+            (opt.pairIneff === bestOption.pairIneff &&
+              opt.pairTravel < bestOption.pairTravel);
+          if (better) bestOption = opt;
         });
 
         if (bestOption) {
@@ -671,10 +700,15 @@ export async function runSchedule2Pipeline(
       (sum, c) => sum + totalTravelCount(c),
       0,
     );
+    const baselineIneff = Array.from(dayChains.values()).reduce(
+      (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),
+      0,
+    );
     let bestSnapshot = {
       unassigned: baselineUnassigned,
       sessions: baselineSessions,
       travel: baselineTravel,
+      ineff: baselineIneff,
       chains: new Map(dayChains),
     };
 
@@ -701,7 +735,7 @@ export async function runSchedule2Pipeline(
           },
           () => polishRandomFn(),
         );
-        const chain = runChainDP(nodes);
+        const chain = runChainDP(nodes, undefined, ineffInfo);
         chain.forEach((node) => commit(day, node));
         dayChains.set(day, chain);
       });
@@ -714,15 +748,24 @@ export async function runSchedule2Pipeline(
         (sum, c) => sum + totalTravelCount(c),
         0,
       );
-      if (
+      const attemptIneff = Array.from(dayChains.values()).reduce(
+        (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),
+        0,
+      );
+      // 비효율 이동이 줄면(우선순위 2) 수업 수·이동 시간이 나빠져도 받아들인다 — 비효율
+      // 이동이 그대로일 때만 기존처럼 수업 수·이동 시간으로 판단한다.
+      const accept =
         attemptUnassigned <= bestSnapshot.unassigned &&
-        attemptSessions >= bestSnapshot.sessions &&
-        attemptTravel < bestSnapshot.travel
-      ) {
+        (attemptIneff < bestSnapshot.ineff ||
+          (attemptIneff === bestSnapshot.ineff &&
+            attemptSessions >= bestSnapshot.sessions &&
+            attemptTravel < bestSnapshot.travel));
+      if (accept) {
         bestSnapshot = {
           unassigned: attemptUnassigned,
           sessions: attemptSessions,
           travel: attemptTravel,
+          ineff: attemptIneff,
           chains: new Map(dayChains),
         };
       }
@@ -763,18 +806,27 @@ export async function runSchedule2Pipeline(
     }
     // (travelA, idleA)가 (travelB, idleB)보다 나은지 — 이동 1번의 가치를 빈 시간
     // TRAVEL_VALUE_MINUTES분으로 쳐서 하나의 점수로 합쳐 비교한다(이동이 줄어도 그 대가로
-    // 늘어난 빈 시간이 너무 크면 더 나은 것으로 치지 않는다).
-    function isTravelIdleBetter(travelA, idleA, travelB, idleB) {
+    // 늘어난 빈 시간이 너무 크면 더 나은 것으로 치지 않는다). ineffA/ineffB(비효율 이동
+    // 횟수, 기본 0)는 이동·빈 시간보다 먼저 비교한다(우선순위 2가 4보다 우선).
+    function isTravelIdleBetter(travelA, idleA, travelB, idleB, ineffA, ineffB) {
+      ineffA = ineffA || 0;
+      ineffB = ineffB || 0;
+      if (ineffA !== ineffB) return ineffA < ineffB;
       const scoreA = travelA * TRAVEL_VALUE_MINUTES + idleA;
       const scoreB = travelB * TRAVEL_VALUE_MINUTES + idleB;
       if (scoreA !== scoreB) return scoreA < scoreB;
       if (travelA !== travelB) return travelA < travelB;
       return idleA < idleB;
     }
-    // (deltaTravel, deltaIdle) 변화가 실제로 개선인지: 이동이 늘면 무조건 거부, 이동이
-    // 그대로면 빈 시간이 줄 때만, 이동이 줄면 그 대가로 늘어난 빈 시간이 이동 1번당
-    // TRAVEL_VALUE_MINUTES분을 넘지 않을 때만 개선으로 친다.
-    function travelIdleImproves(deltaTravel, deltaIdle) {
+    // (deltaTravel, deltaIdle, deltaIneff) 변화가 실제로 개선인지: 비효율 이동이 늘면
+    // 무조건 거부, 줄면 이동·빈 시간 손해와 무관하게 무조건 개선으로 친다(우선순위 2가 4보다
+    // 우선). 비효율 이동이 그대로면 기존 기준(이동이 늘면 거부, 그대로면 빈 시간이 줄 때만,
+    // 줄면 그 대가로 늘어난 빈 시간이 이동 1번당 TRAVEL_VALUE_MINUTES분을 넘지 않을 때만
+    // 개선)을 그대로 쓴다.
+    function travelIdleImproves(deltaTravel, deltaIdle, deltaIneff) {
+      deltaIneff = deltaIneff || 0;
+      if (deltaIneff > 0) return false;
+      if (deltaIneff < 0) return true;
       if (deltaTravel > 0) return false;
       if (deltaTravel === 0) return deltaIdle < 0;
       return deltaIdle <= -deltaTravel * TRAVEL_VALUE_MINUTES;
@@ -792,9 +844,17 @@ export async function runSchedule2Pipeline(
       const beforeCurrentDayIdle = dayIdleMinutes(
         dayChains.get(currentDay) || [],
       );
+      const beforeCurrentDayIneff = dailyInefficientMoveCount(
+        dayChains.get(currentDay) || [],
+        ineffInfo,
+      );
       const currentDayWithoutTravel = totalTravelCount(currentChainWithout); // 후보마다 매번 다시 구하지 않도록 한 번만 계산
       const currentDayWithoutIdle = dayIdleMinutes(currentChainWithout);
-      let bestMove = null; // { sameDay, targetDay, newTargetChain, deltaTravel, deltaIdle }
+      const currentDayWithoutIneff = dailyInefficientMoveCount(
+        currentChainWithout,
+        ineffInfo,
+      );
+      let bestMove = null; // { sameDay, targetDay, newTargetChain, deltaTravel, deltaIdle, deltaIneff }
 
       daysWithReqs.forEach((day) => {
         if (day !== currentDay) {
@@ -811,6 +871,10 @@ export async function runSchedule2Pipeline(
           day === currentDay ? 0 : totalTravelCount(baseChain); // 후보 훑기 전 한 번만
         const beforeTargetDayIdle =
           day === currentDay ? 0 : dayIdleMinutes(baseChain);
+        const beforeTargetDayIneff =
+          day === currentDay
+            ? 0
+            : dailyInefficientMoveCount(baseChain, ineffInfo);
         candNodes.forEach((cand) => {
           if (
             day === currentDay &&
@@ -858,10 +922,13 @@ export async function runSchedule2Pipeline(
           newChain.splice(insertAt, 0, newNode);
           if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) return;
 
-          let deltaTravel, deltaIdle;
+          let deltaTravel, deltaIdle, deltaIneff;
           if (day === currentDay) {
             deltaTravel = totalTravelCount(newChain) - beforeCurrentDayTravel;
             deltaIdle = dayIdleMinutes(newChain) - beforeCurrentDayIdle;
+            deltaIneff =
+              dailyInefficientMoveCount(newChain, ineffInfo) -
+              beforeCurrentDayIneff;
           } else {
             deltaTravel =
               currentDayWithoutTravel +
@@ -871,8 +938,12 @@ export async function runSchedule2Pipeline(
               currentDayWithoutIdle +
               dayIdleMinutes(newChain) -
               (beforeCurrentDayIdle + beforeTargetDayIdle);
+            deltaIneff =
+              currentDayWithoutIneff +
+              dailyInefficientMoveCount(newChain, ineffInfo) -
+              (beforeCurrentDayIneff + beforeTargetDayIneff);
           }
-          const improves = travelIdleImproves(deltaTravel, deltaIdle);
+          const improves = travelIdleImproves(deltaTravel, deltaIdle, deltaIneff);
           if (
             improves &&
             (!bestMove ||
@@ -881,6 +952,8 @@ export async function runSchedule2Pipeline(
                 deltaIdle,
                 bestMove.deltaTravel,
                 bestMove.deltaIdle,
+                deltaIneff,
+                bestMove.deltaIneff,
               ))
           ) {
             bestMove = {
@@ -889,6 +962,7 @@ export async function runSchedule2Pipeline(
               newTargetChain: newChain,
               deltaTravel,
               deltaIdle,
+              deltaIneff,
             };
           }
         });
@@ -1017,8 +1091,18 @@ export async function runSchedule2Pipeline(
         dayIdleMinutes(dayChains.get(day1) || []) +
         dayIdleMinutes(dayChains.get(day2) || []);
       const afterIdle = dayIdleMinutes(chain1) + dayIdleMinutes(chain2);
+      const beforeIneff =
+        dailyInefficientMoveCount(dayChains.get(day1) || [], ineffInfo) +
+        dailyInefficientMoveCount(dayChains.get(day2) || [], ineffInfo);
+      const afterIneff =
+        dailyInefficientMoveCount(chain1, ineffInfo) +
+        dailyInefficientMoveCount(chain2, ineffInfo);
       if (
-        !travelIdleImproves(afterTravel - beforeTravel, afterIdle - beforeIdle)
+        !travelIdleImproves(
+          afterTravel - beforeTravel,
+          afterIdle - beforeIdle,
+          afterIneff - beforeIneff,
+        )
       )
         return false;
 
@@ -1215,18 +1299,29 @@ export async function runSchedule2Pipeline(
 
       let beforeTravel = 0,
         beforeIdle = 0,
+        beforeIneff = 0,
         afterTravel = 0,
-        afterIdle = 0;
+        afterIdle = 0,
+        afterIneff = 0;
       touchedDays.forEach((day) => {
         beforeTravel += totalTravelCount(snap.dayChains.get(day) || []);
         beforeIdle += dayIdleMinutes(snap.dayChains.get(day) || []);
+        beforeIneff += dailyInefficientMoveCount(
+          snap.dayChains.get(day) || [],
+          ineffInfo,
+        );
         afterTravel += totalTravelCount(dayChains.get(day) || []);
         afterIdle += dayIdleMinutes(dayChains.get(day) || []);
+        afterIneff += dailyInefficientMoveCount(
+          dayChains.get(day) || [],
+          ineffInfo,
+        );
       });
       const deltaTravel = afterTravel - beforeTravel;
       const deltaIdle = afterIdle - beforeIdle;
+      const deltaIneff = afterIneff - beforeIneff;
 
-      if (acceptFn(deltaTravel, deltaIdle)) return true;
+      if (acceptFn(deltaTravel, deltaIdle, deltaIneff)) return true;
       restoreChainState(snap);
       return false;
     }
@@ -1289,18 +1384,29 @@ export async function runSchedule2Pipeline(
 
       let beforeTravel = 0,
         beforeIdle = 0,
+        beforeIneff = 0,
         afterTravel = 0,
-        afterIdle = 0;
+        afterIdle = 0,
+        afterIneff = 0;
       touchedDays.forEach((day) => {
         beforeTravel += totalTravelCount(snap.dayChains.get(day) || []);
         beforeIdle += dayIdleMinutes(snap.dayChains.get(day) || []);
+        beforeIneff += dailyInefficientMoveCount(
+          snap.dayChains.get(day) || [],
+          ineffInfo,
+        );
         afterTravel += totalTravelCount(dayChains.get(day) || []);
         afterIdle += dayIdleMinutes(dayChains.get(day) || []);
+        afterIneff += dailyInefficientMoveCount(
+          dayChains.get(day) || [],
+          ineffInfo,
+        );
       });
       const deltaTravel = afterTravel - beforeTravel;
       const deltaIdle = afterIdle - beforeIdle;
+      const deltaIneff = afterIneff - beforeIneff;
 
-      if (acceptFn(deltaTravel, deltaIdle)) return true;
+      if (acceptFn(deltaTravel, deltaIdle, deltaIneff)) return true;
       restoreChainState(snap);
       return false;
     }
@@ -1330,6 +1436,13 @@ export async function runSchedule2Pipeline(
         let sum = 0;
         dayChains.forEach((chain) => {
           sum += dayIdleMinutes(chain);
+        });
+        return sum;
+      }
+      function saTotalIneff() {
+        let sum = 0;
+        dayChains.forEach((chain) => {
+          sum += dailyInefficientMoveCount(chain, ineffInfo);
         });
         return sum;
       }
@@ -1393,7 +1506,7 @@ export async function runSchedule2Pipeline(
         const newChain = insertFeasible(baseChain, cand);
         if (!newChain) return null;
 
-        let deltaTravel, deltaIdle;
+        let deltaTravel, deltaIdle, deltaIneff;
         if (picked.day === currentDay) {
           deltaTravel =
             totalTravelCount(newChain) -
@@ -1401,6 +1514,12 @@ export async function runSchedule2Pipeline(
           deltaIdle =
             dayIdleMinutes(newChain) -
             dayIdleMinutes(dayChains.get(currentDay) || []);
+          deltaIneff =
+            dailyInefficientMoveCount(newChain, ineffInfo) -
+            dailyInefficientMoveCount(
+              dayChains.get(currentDay) || [],
+              ineffInfo,
+            );
         } else {
           const beforeCur = dayChains.get(currentDay) || [];
           const beforeTgt = dayChains.get(picked.day) || [];
@@ -1412,11 +1531,17 @@ export async function runSchedule2Pipeline(
             dayIdleMinutes(currentChainWithout) +
             dayIdleMinutes(newChain) -
             (dayIdleMinutes(beforeCur) + dayIdleMinutes(beforeTgt));
+          deltaIneff =
+            dailyInefficientMoveCount(currentChainWithout, ineffInfo) +
+            dailyInefficientMoveCount(newChain, ineffInfo) -
+            (dailyInefficientMoveCount(beforeCur, ineffInfo) +
+              dailyInefficientMoveCount(beforeTgt, ineffInfo));
         }
         const cost = deltaTravel * SA_TRAVEL_WEIGHT + deltaIdle;
 
         return {
           cost,
+          deltaIneff,
           apply: () => {
             uncommit(currentDay, node);
             if (picked.day === currentDay) {
@@ -1508,12 +1633,19 @@ export async function runSchedule2Pipeline(
           dayIdleMinutes(dayChains.get(day1) || []) +
           dayIdleMinutes(dayChains.get(day2) || []);
         const afterIdle = dayIdleMinutes(chain1) + dayIdleMinutes(chain2);
+        const beforeIneff =
+          dailyInefficientMoveCount(dayChains.get(day1) || [], ineffInfo) +
+          dailyInefficientMoveCount(dayChains.get(day2) || [], ineffInfo);
+        const afterIneff =
+          dailyInefficientMoveCount(chain1, ineffInfo) +
+          dailyInefficientMoveCount(chain2, ineffInfo);
         const cost =
           (afterTravel - beforeTravel) * SA_TRAVEL_WEIGHT +
           (afterIdle - beforeIdle);
 
         return {
           cost,
+          deltaIneff: afterIneff - beforeIneff,
           apply: () => {
             uncommit(day1, n1);
             uncommit(day2, n2);
@@ -1542,6 +1674,16 @@ export async function runSchedule2Pipeline(
       let bestSnapshotSA = new Map(dayChains);
       let bestTravelSA = saTotalTravel();
       let bestIdleSA = saTotalIdle();
+      let bestIneffSA = saTotalIneff();
+      // 비효율 이동이 늘어나는 이동은 온도와 무관하게 항상 거부하고(우선순위 2가 담금질의
+      // "가끔 나빠져도 받아들인다"는 원칙보다 우선), 비효율 이동이 줄어드는 이동은 이동
+      // 시간·빈 시간 손해와 무관하게 항상 받아들인다. 비효율 이동이 그대로일 때만 기존
+      // 온도 기반 확률 수락을 그대로 쓴다.
+      function saAccepts(cost, deltaIneff) {
+        if (deltaIneff > 0) return false;
+        if (deltaIneff < 0) return true;
+        return cost <= 0 || saRandomFn() < Math.exp(-cost / temperature);
+      }
       while (now() < SA_DEADLINE) {
         await maybeYield();
         const elapsedFrac = Math.min(1, (now() - saStart) / saDuration);
@@ -1555,16 +1697,16 @@ export async function runSchedule2Pipeline(
         const moveRoll = saRandomFn();
         if (moveRoll < 0.15) {
           // 누가 2번째 수업을 받는지 자체를 바꿔본다(trySessionCountSwap 주석 참고).
-          applied = trySessionCountSwap(saRandomFn, (dt, di) => {
+          applied = trySessionCountSwap(saRandomFn, (dt, di, dineff) => {
             const cost = dt * SA_TRAVEL_WEIGHT + di;
-            return cost <= 0 || saRandomFn() < Math.exp(-cost / temperature);
+            return saAccepts(cost, dineff);
           });
         } else if (moveRoll < 0.35) {
           const node = pickRandomNode(saRandomFn);
           if (node) {
-            applied = tryEjectChainMove(node, (dt, di) => {
+            applied = tryEjectChainMove(node, (dt, di, dineff) => {
               const cost = dt * SA_TRAVEL_WEIGHT + di;
-              return cost <= 0 || saRandomFn() < Math.exp(-cost / temperature);
+              return saAccepts(cost, dineff);
             });
           }
         } else {
@@ -1573,9 +1715,7 @@ export async function runSchedule2Pipeline(
               ? saProposeSwap(saRandomFn)
               : saProposeRelocate(saRandomFn);
           if (proposal) {
-            const accept =
-              proposal.cost <= 0 ||
-              saRandomFn() < Math.exp(-proposal.cost / temperature);
+            const accept = saAccepts(proposal.cost, proposal.deltaIneff);
             if (accept) {
               proposal.apply();
               applied = true;
@@ -1585,17 +1725,21 @@ export async function runSchedule2Pipeline(
         if (applied) {
           const curTravel = saTotalTravel();
           const curIdle = saTotalIdle();
+          const curIneff = saTotalIneff();
           // "지금까지 최선"도 이동-빈 시간 트레이드오프에 같은 상한을 적용해 비교한다 —
           // 안 그러면 담금질이 잠깐 받아들인, 이동은 줄었지만 빈 시간이 과도하게 늘어난
-          // 상태가 최종 결과로 굳어버릴 수 있다.
+          // 상태가 최종 결과로 굳어버릴 수 있다. 비효율 이동은 그보다 먼저 비교한다.
           const curScore = curTravel * TRAVEL_VALUE_MINUTES + curIdle;
           const bestScore = bestTravelSA * TRAVEL_VALUE_MINUTES + bestIdleSA;
           if (
-            curScore < bestScore ||
-            (curScore === bestScore && curTravel < bestTravelSA)
+            curIneff < bestIneffSA ||
+            (curIneff === bestIneffSA &&
+              (curScore < bestScore ||
+                (curScore === bestScore && curTravel < bestTravelSA)))
           ) {
             bestTravelSA = curTravel;
             bestIdleSA = curIdle;
+            bestIneffSA = curIneff;
             bestSnapshotSA = new Map(dayChains);
           }
         }

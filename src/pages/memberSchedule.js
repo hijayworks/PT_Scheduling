@@ -1827,15 +1827,48 @@ export function removeExtraLocationFromRun(run, locId) {
   showToast("지점이 제거되었습니다", "info");
 }
 
+// 회원의 기본 지점 중, 이 시간대(run)에서만 배정 후보에서 뺀 지점들. 회원의 지점 등록
+// 자체는 그대로 두고(다른 시간대에는 영향 없음) 이 신청들만 후보에서 제외한다.
+export function requestRunExcludedLocationIds(run) {
+  return (run.reqs[0] && run.reqs[0].excludedLocationIds) || [];
+}
+
+export function setRunExcludedLocationIds(run, ids) {
+  run.reqs.forEach((r) => {
+    r.excludedLocationIds = ids.slice();
+  });
+}
+
+export function excludeBaseLocationFromRun(run, locId) {
+  const current = requestRunExcludedLocationIds(run);
+  if (current.includes(locId)) return;
+  setRunExcludedLocationIds(run, current.concat([locId]));
+  runtime.requestsChangedSinceGenerate3 = true;
+  saveState();
+  renderRequestList();
+  showToast("지점이 제거되었습니다", "info");
+}
+
+export function restoreBaseLocationToRun(run, locId) {
+  setRunExcludedLocationIds(
+    run,
+    requestRunExcludedLocationIds(run).filter((id) => id !== locId),
+  );
+  runtime.requestsChangedSinceGenerate3 = true;
+  saveState();
+  renderRequestList();
+  showToast("지점이 복원되었습니다", "success");
+}
+
 // 좌클릭(터치는 탭) 시 뜨는 메뉴: 지점 추가하기(이 시간대만 다른 지점에서도 배정 가능해짐 —
 // 회원의 기본 지점과 이미 추가된 지점을 뺀 나머지 지점을 바로 항목으로 보여준다), 이미
 // 추가해둔 지점 제거하기, 그리고 맨 아래에 구분선과 함께 이 가능 시간 자체를 삭제하는 항목을
 // danger 스타일로 넣는다 — 터치 기기는 마우스 호버(×버튼)를 쓸 수 없으므로 이 메뉴가 유일한
 // 삭제 경로이고, PC에서도 호버 ×버튼과 별개로 똑같이 쓸 수 있다.
 export function buildRequestRunMenu(member, run) {
-  const excluded = new Set(
-    (member.locationIds || []).concat(requestRunExtraLocationIds(run)),
-  );
+  const excludedBaseIds = requestRunExcludedLocationIds(run);
+  const extraIds = requestRunExtraLocationIds(run);
+  const excluded = new Set((member.locationIds || []).concat(extraIds));
   const addableLocations = state.locations.filter((l) => !excluded.has(l.id));
   const items =
     addableLocations.length > 0
@@ -1844,7 +1877,6 @@ export function buildRequestRunMenu(member, run) {
           onClick: () => addExtraLocationToRun(run, l.id),
         }))
       : [{ label: "추가할 수 있는 지점이 없습니다", disabled: true }];
-  const extraIds = requestRunExtraLocationIds(run);
   if (extraIds.length > 0) {
     items.push({ separator: true });
     extraIds.forEach((id) => {
@@ -1854,6 +1886,35 @@ export function buildRequestRunMenu(member, run) {
         label: loc.name + " 제거",
         danger: true,
         onClick: () => removeExtraLocationFromRun(run, id),
+      });
+    });
+  }
+  // 이 시간대에서 실제로 배정 후보가 되는 지점 수(회원 기본 지점 - 제외된 것 + 추가 지점).
+  // 마지막 하나까지 빼면 배정될 지점이 없어지므로, 최소 하나는 항상 남겨둔다.
+  const activeBaseIds = (member.locationIds || []).filter(
+    (id) => !excludedBaseIds.includes(id),
+  );
+  const candidateCount = activeBaseIds.length + extraIds.length;
+  if (activeBaseIds.length > 0 && candidateCount > 1) {
+    items.push({ separator: true });
+    activeBaseIds.forEach((id) => {
+      const loc = locationById(id);
+      if (!loc) return;
+      items.push({
+        label: loc.name + " 제거",
+        danger: true,
+        onClick: () => excludeBaseLocationFromRun(run, id),
+      });
+    });
+  }
+  if (excludedBaseIds.length > 0) {
+    items.push({ separator: true });
+    excludedBaseIds.forEach((id) => {
+      const loc = locationById(id);
+      if (!loc) return;
+      items.push({
+        label: loc.name + " 복원",
+        onClick: () => restoreBaseLocationToRun(run, id),
       });
     });
   }
@@ -2008,13 +2069,6 @@ export function renderRequestList() {
   // 겹치거나 맞닿은 후보들은 그리드에 하나의 블록으로 합쳐서 그린다.
   // (개별 후보를 각각 그리면 촘촘하게 겹쳐서 알아볼 수 없게 된다.)
   const runs = mergeRequestRuns(myReqs);
-  // 신청은 더 이상 지점 하나에 고정되지 않고 회원이 등록한 모든 지점에서 가능하므로,
-  // 블록에는 회원의 지점 전체를 함께 보여준다.
-  const memberLocNames = activeMember.locationIds
-    .map((id) => locationById(id))
-    .filter(Boolean)
-    .map((l) => l.name)
-    .join(" · ");
 
   // 그리드에는 실제로 확보되는 시간을 하나의 블록으로 보여준다(쉬는 시간이 있던 시절의 흔적으로,
   // BREAK_MIN이 0이면 종료 시각을 늘리지 않는다 — 지금은 그렇다).
@@ -2037,7 +2091,15 @@ export function renderRequestList() {
   renderGrid(scheduleGridEl, runtime.availableCells, {
     blocks: runs.map((run) => {
       const displayEndSlot = Math.min(run.endSlot + breakSlots, SLOT_COUNT);
-      // "지점 추가하기"로 이 시간대에만 추가해둔 지점이 있으면 이름 뒤에 덧붙여 보여준다.
+      // 신청은 지점 하나에 고정되지 않고 회원이 등록한 지점들에서 가능하므로 블록에는
+      // 회원의 지점을 보여주되, 이 시간대에서만 삭제/추가로 조정해둔 것을 반영한다.
+      const excludedBaseIds = requestRunExcludedLocationIds(run);
+      const memberLocNames = activeMember.locationIds
+        .filter((id) => !excludedBaseIds.includes(id))
+        .map((id) => locationById(id))
+        .filter(Boolean)
+        .map((l) => l.name)
+        .join(" · ");
       const extraNames = requestRunExtraLocationIds(run)
         .map((id) => locationById(id))
         .filter(Boolean)
@@ -2048,8 +2110,9 @@ export function renderRequestList() {
         duration: (displayEndSlot - run.startSlot) * SLOT_MIN,
         label: memberLabel,
         loc:
-          memberLocNames +
-          (extraNames.length > 0 ? " +" + extraNames.join(",") : ""),
+          memberLocNames && extraNames.length > 0
+            ? memberLocNames + " +" + extraNames.join(",")
+            : memberLocNames || extraNames.join(","),
         sublabel:
           slotLabel(run.startSlot) +
           "~" +

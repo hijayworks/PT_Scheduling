@@ -4,10 +4,15 @@ import {
   MAX_SESSIONS_PER_MEMBER,
   CONSULT_DURATION_MIN_2,
   SESSION_DURATION_MIN_2,
+  COVERAGE_WEIGHT_GAP_THRESHOLD,
 } from "../constants.js";
 import { cellKey, durationToSlots } from "../utils.js";
 import { runtime } from "../state.js";
-import { memberById, travelMinutes } from "../domain.js";
+import {
+  memberById,
+  travelMinutes,
+  isInefficientRoundTrip,
+} from "../domain.js";
 import {
   currentExcludedIds2,
   currentOnceLimitIds2,
@@ -91,7 +96,12 @@ export function buildDayNodes(dayRequests, weightFn, jitterFn) {
 // 하루 이동 횟수 제한까지 반영해 확장한 것). 단순 그리디와 달리 이미 고른 것을 무를 수는
 // 없지만 "앞에서부터 그리디하게 확정"하지 않고 전체를 한 번에 최적화하므로, 이르지만
 // 고립된 신청 하나 때문에 뒤의 더 큰 무리를 놓치는 일이 없다.
-export function runChainDP(nodes, maxTravelsPerDay) {
+export function runChainDP(
+  nodes,
+  maxTravelsPerDay,
+  ineffInfo,
+  coveragePriority,
+) {
   if (maxTravelsPerDay === undefined) maxTravelsPerDay = MAX_TRAVELS_PER_DAY;
   nodes = nodes
     .slice()
@@ -102,16 +112,43 @@ export function runChainDP(nodes, maxTravelsPerDay) {
     tm = new Array(n),
     idle = new Array(n),
     js = new Array(n),
+    ineff = new Array(n),
     prev = new Array(n);
-  // 인원(가중치 합) → 이동 횟수 → 이동 시간 → 빈 시간(이동에 실제로 필요한 시간을 넘어서는
-  // 여분의 간격) → 지터(무작위 값, buildDayNodes 참고) 순으로 비교한다. 세션 수·이동은
-  // 완전히 같은데 시작 시각만 다른 선택지들(예: 15:00 시작과 15:30 시작 둘 다 다음 세션에
-  // 문제없이 이어지는 경우) 사이에서는 빈 시간 기준이, 뒤에 남는 빈 시간을 최소화하는
-  // 시작 시각을 고르게 해준다. 지터는 평소엔 전부 0이라 아무 영향이 없고, 요일 전체
-  // 재섞기 다듬기 단계에서만 값을 채워 넣어 "동점이면 항상 시간순으로만 정해지던" 동점
-  // 처리를 매 시도마다 다르게 흔들어준다.
-  function better(dpA, tcA, tmA, idleA, jsA, dpB, tcB, tmB, idleB, jsB) {
-    if (dpA !== dpB) return dpA > dpB;
+  // 인원(가중치 합) → 비효율 이동(상암점이 낀 A→B→A 왕복) 횟수 → 이동 횟수 → 이동 시간 →
+  // 빈 시간(이동에 실제로 필요한 시간을 넘어서는 여분의 간격) → 지터(무작위 값, buildDayNodes
+  // 참고) 순으로 비교한다. coveragePriority(아직 한 번도 못 받은 회원만 채우는 진짜 커버리지
+  // 단계에서만 true)면 인원을 비효율 이동보다 먼저 보고, 그 외(확장·세션 최대화 단계)에서는
+  // 비효율 이동을 인원보다 먼저 봐서 "비효율 이동을 피하려고 세션 하나를 덜 받는" 선택을
+  // 허용한다 — 다만 커버리지 자체는 항상 최우선으로 지킨다. 세션 수·이동은 완전히 같은데
+  // 시작 시각만 다른 선택지들(예: 15:00 시작과 15:30 시작 둘 다 다음 세션에 문제없이 이어지는
+  // 경우) 사이에서는 빈 시간 기준이, 뒤에 남는 빈 시간을 최소화하는 시작 시각을 고르게
+  // 해준다. 지터는 평소엔 전부 0이라 아무 영향이 없고, 요일 전체 재섞기 다듬기 단계에서만
+  // 값을 채워 넣어 "동점이면 항상 시간순으로만 정해지던" 동점 처리를 매 시도마다 다르게
+  // 흔들어준다.
+  function better(
+    dpA,
+    ineffA,
+    tcA,
+    tmA,
+    idleA,
+    jsA,
+    dpB,
+    ineffB,
+    tcB,
+    tmB,
+    idleB,
+    jsB,
+  ) {
+    // dp 차이가 COVERAGE_WEIGHT_GAP_THRESHOLD를 넘으면 PIN_WEIGHT/REBUILD_TARGET_WEIGHT
+    // 같은 하드 가중치가 걸려 있다는 뜻이므로, coveragePriority와 무관하게 dp를 먼저 본다.
+    const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;
+    if (coveragePriority || hardWeightGap) {
+      if (dpA !== dpB) return dpA > dpB;
+      if (ineffA !== ineffB) return ineffA < ineffB;
+    } else {
+      if (ineffA !== ineffB) return ineffA < ineffB;
+      if (dpA !== dpB) return dpA > dpB;
+    }
     if (tcA !== tcB) return tcA < tcB;
     if (tmA !== tmB) return tmA < tmB;
     if (idleA !== idleB) return idleA < idleB;
@@ -120,6 +157,7 @@ export function runChainDP(nodes, maxTravelsPerDay) {
   for (let i = 0; i < n; i++) {
     const node = nodes[i];
     let bestDp = node.weight,
+      bestIneff = 0,
       bestTc = 0,
       bestTm = 0,
       bestIdle = 0,
@@ -139,14 +177,29 @@ export function runChainDP(nodes, maxTravelsPerDay) {
       const newTm = tm[j] + travelMinutes(p.locationId, node.locationId);
       const newIdle = idle[j] + (gapActual - gapNeed);
       const newJs = js[j] + (node.jitter || 0);
+      // 2칸 전 지점(p가 도착하기 전에 있던 지점)까지 알아야 지금 완성되는 A→B→A 왕복(p 이전
+      // 지점 → p의 지점 → 이번 node의 지점)을 판정할 수 있다.
+      const pTwoBackLoc = prev[j] !== -1 ? nodes[prev[j]].locationId : null;
+      const newIneff =
+        ineff[j] +
+        (isInefficientRoundTrip(
+          ineffInfo,
+          pTwoBackLoc,
+          p.locationId,
+          node.locationId,
+        )
+          ? 1
+          : 0);
       if (
         better(
           newDp,
+          newIneff,
           newTc,
           newTm,
           newIdle,
           newJs,
           bestDp,
+          bestIneff,
           bestTc,
           bestTm,
           bestIdle,
@@ -154,6 +207,7 @@ export function runChainDP(nodes, maxTravelsPerDay) {
         )
       ) {
         bestDp = newDp;
+        bestIneff = newIneff;
         bestTc = newTc;
         bestTm = newTm;
         bestIdle = newIdle;
@@ -162,6 +216,7 @@ export function runChainDP(nodes, maxTravelsPerDay) {
       }
     }
     dp[i] = bestDp;
+    ineff[i] = bestIneff;
     tc[i] = bestTc;
     tm[i] = bestTm;
     idle[i] = bestIdle;
@@ -170,6 +225,7 @@ export function runChainDP(nodes, maxTravelsPerDay) {
   }
   let bestEnd = -1,
     bestDpAll = 0,
+    bestIneffAll = 0,
     bestTcAll = 0,
     bestTmAll = 0,
     bestIdleAll = 0,
@@ -179,11 +235,13 @@ export function runChainDP(nodes, maxTravelsPerDay) {
       bestEnd === -1 ||
       better(
         dp[i],
+        ineff[i],
         tc[i],
         tm[i],
         idle[i],
         js[i],
         bestDpAll,
+        bestIneffAll,
         bestTcAll,
         bestTmAll,
         bestIdleAll,
@@ -191,6 +249,7 @@ export function runChainDP(nodes, maxTravelsPerDay) {
       )
     ) {
       bestDpAll = dp[i];
+      bestIneffAll = ineff[i];
       bestTcAll = tc[i];
       bestTmAll = tm[i];
       bestIdleAll = idle[i];

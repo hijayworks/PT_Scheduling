@@ -1,17 +1,25 @@
 import { SLOT_MIN } from "../constants.js";
 import { durationToSlots } from "../utils.js";
-import { totalTravelCount, totalTravelMinutes, TRAVEL_VALUE_MINUTES } from "./greedy.js";
+import {
+  totalTravelCount,
+  totalTravelMinutes,
+  totalInefficientMoveCount,
+  TRAVEL_VALUE_MINUTES,
+} from "./greedy.js";
 import { requiredGapMin2 } from "./chainDpCore.js";
 
 // "수업 스케줄 생성2" 결과끼리 비교하고 서명(중복 판별)하는 순수 함수 모음. chainDp.js(카드
 // 재시작 오케스트레이션)가 요일 순서 후보·다듬은 결과를 고를 때 이 모듈에 의존한다.
 
-// result가 better보다 더 나은 결과인지 비교한다: 미배정 회원 수(적을수록) → 수업 수(많을수록)
-// → 이동 횟수(적을수록) → 총 이동 시간(적을수록) 순.
+// result가 better보다 더 나은 결과인지 비교한다: 미배정 회원 수(적을수록) → 비효율 이동
+// 횟수(적을수록) → 수업 수(많을수록) → 이동 횟수(적을수록) → 총 이동 시간(적을수록) 순.
 export function isSchedule2ResultBetter(a, b) {
   if (a.unassignedMembers.length !== b.unassignedMembers.length) {
     return a.unassignedMembers.length < b.unassignedMembers.length;
   }
+  const ineffA = totalInefficientMoveCount(a.assigned),
+    ineffB = totalInefficientMoveCount(b.assigned);
+  if (ineffA !== ineffB) return ineffA < ineffB;
   if (a.assigned.length !== b.assigned.length)
     return a.assigned.length > b.assigned.length;
   const travelCountA = totalTravelCount(a.assigned),

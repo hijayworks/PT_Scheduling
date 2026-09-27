@@ -203,5 +203,142 @@ test("runChainDP: maxTravelsPerDay를 넘는 이동은 거부된다", () => {
   assert(travelCount <= 1, "이동 횟수 상한을 넘김");
 });
 
+/* ---------------- engine/greedy.js ---------------- */
+test("candidateLocationsForRequest: excludedLocationIds는 기본 지점에서 빼고, extraLocationIds는 더한다", () => {
+  lib.state.members = [{ id: "m1", locationIds: ["L1", "L2"] }];
+  assertEqual(
+    lib.candidateLocationsForRequest({ memberId: "m1" }),
+    ["L1", "L2"],
+    "제외/추가가 없으면 기본 지점 그대로",
+  );
+  assertEqual(
+    lib.candidateLocationsForRequest({
+      memberId: "m1",
+      excludedLocationIds: ["L1"],
+      extraLocationIds: ["L3"],
+    }),
+    ["L2", "L3"],
+    "제외한 기본 지점은 빠지고 추가 지점은 더해짐",
+  );
+});
+
+/* ---------------- domain.js: isInefficientRoundTrip(비효율 이동 왕복 판정) ---------------- */
+function ineffLocations(extra) {
+  return [
+    { id: "M", name: "마포점" },
+    { id: "Y", name: "여의도점" },
+    { id: "S", name: "상암점" },
+  ].concat(extra || []);
+}
+test("isInefficientRoundTrip: 마포↔여의도 왕복만 허용, 상암이 낀 왕복은 전부 비효율", () => {
+  lib.state.locations = ineffLocations();
+  const info = lib.inefficientRoundTripLocationInfo();
+  assert(!!info, "지점 이름이 정확히 하나씩 매칭되면 활성화돼야 함");
+  assertEqual(lib.isInefficientRoundTrip(info, "M", "Y", "M"), false, "마포>여의도>마포는 허용");
+  assertEqual(lib.isInefficientRoundTrip(info, "Y", "M", "Y"), false, "여의도>마포>여의도는 허용");
+  assertEqual(lib.isInefficientRoundTrip(info, "M", "S", "M"), true, "마포>상암>마포는 비효율");
+  assertEqual(lib.isInefficientRoundTrip(info, "S", "M", "S"), true, "상암>마포>상암은 비효율");
+  assertEqual(lib.isInefficientRoundTrip(info, "S", "Y", "S"), true, "상암>여의도>상암은 비효율");
+  assertEqual(lib.isInefficientRoundTrip(info, "Y", "S", "Y"), true, "여의도>상암>여의도는 비효율");
+});
+test("isInefficientRoundTrip: 같은 지점 반복이나 왕복이 아니면 비효율 아님", () => {
+  lib.state.locations = ineffLocations();
+  const info = lib.inefficientRoundTripLocationInfo();
+  assertEqual(lib.isInefficientRoundTrip(info, "M", "M", "M"), false, "실제 이동이 없으면 왕복이 아님");
+  assertEqual(lib.isInefficientRoundTrip(info, "M", "Y", "S"), false, "제자리로 돌아오지 않으면 왕복이 아님");
+});
+test("isInefficientRoundTrip: 관계없는 지점이 끼면 규칙 대상이 아님", () => {
+  lib.state.locations = ineffLocations([{ id: "X", name: "기타점" }]);
+  const info = lib.inefficientRoundTripLocationInfo();
+  assertEqual(lib.isInefficientRoundTrip(info, "M", "X", "M"), false, "기타점은 세 지점에 속하지 않음");
+});
+test("inefficientRoundTripLocationInfo: 지점 이름이 중복 매칭되면 규칙 비활성화", () => {
+  lib.state.locations = ineffLocations([{ id: "M2", name: "마포점" }]);
+  assertEqual(lib.inefficientRoundTripLocationInfo(), null, "마포점이 2개면 어느 쪽인지 모호하므로 비활성화");
+});
+test("dailyInefficientMoveCount: 하루 체인에서 비효율 왕복만 센다", () => {
+  lib.state.locations = ineffLocations();
+  const info = lib.inefficientRoundTripLocationInfo();
+  const chain = [
+    { locationId: "M" },
+    { locationId: "Y" },
+    { locationId: "M" }, // 마포>여의도>마포: 허용, 카운트 안 됨
+    { locationId: "S" },
+    { locationId: "M" }, // 여의도>마포>상암은 왕복 아님, 마포>상암>마포는 비효율
+  ];
+  assertEqual(lib.dailyInefficientMoveCount(chain, info), 1);
+});
+
+/* ---------------- greedy.js: 후보 생성 우선순위(미배정 없음 > 비효율 이동 > 수업 횟수) ---------------- */
+// 세 회원 A(마포, 0~60분)·B(상암, 70~130분)·C(마포, 140~200분)를 하루 한 체인에 이어붙일 수
+// 있게 구성한다 — A→B→C를 다 이으면 마포>상암>마포 왕복(비효율)이 생기고, B에서 멈추면
+// 비효율 없이 2명만 배정된다. 지점 간 이동 시간은 10분(=1슬롯)으로 둬 정확히 필요한 간격만큼만
+// 벌려 세션을 이어 붙인다.
+function ineffPriorityFixture() {
+  lib.state.locations = ineffLocations();
+  lib.state.travelTimes = {
+    [lib.pairKey("M", "S")]: 10,
+    [lib.pairKey("M", "Y")]: 10,
+    [lib.pairKey("Y", "S")]: 10,
+  };
+  lib.state.members = [
+    { id: "A", locationIds: ["M"], category: "상담" },
+    { id: "B", locationIds: ["S"], category: "상담" },
+    { id: "C", locationIds: ["M"], category: "상담" },
+  ];
+  return [
+    { id: "a", memberId: "A", day: 0, startSlot: 0, duration: 60 }, // M, 슬롯 0~6
+    { id: "b", memberId: "B", day: 0, startSlot: 7, duration: 60 }, // S, 슬롯 7~13 (간격 1슬롯=10분)
+    { id: "c", memberId: "C", day: 0, startSlot: 14, duration: 60 }, // M, 슬롯 14~20 (간격 1슬롯)
+  ];
+}
+test("greedyAssign 우선순위: 비효율 이동 최소화가 수업 횟수 최대보다 우선한다(sessionCountFirst)", () => {
+  const reqs = ineffPriorityFixture();
+  const assigned = lib.greedyAssign(reqs, { sessionCountFirst: true }, []);
+  const memberIds = new Set(assigned.map((r) => r.memberId));
+  assertEqual(memberIds.has("C"), false, "C까지 이으면 비효율 왕복이 생기므로 제외해야 함");
+  assertEqual(memberIds.has("A") && memberIds.has("B"), true, "A·B는 비효율 없이 배정 가능해야 함");
+  const info = lib.inefficientRoundTripLocationInfo();
+  assertEqual(lib.totalInefficientMoveCount(assigned, info), 0);
+});
+test("greedyAssign 우선순위: 미배정 인원 없음이 비효율 이동 최소화보다 우선한다(기본 커버리지 단계)", () => {
+  const reqs = ineffPriorityFixture();
+  const assigned = lib.greedyAssign(reqs, {}, []);
+  const memberIds = new Set(assigned.map((r) => r.memberId));
+  assertEqual(memberIds.size, 3, "세 회원 모두 배정 가능하면(첫 세션 확보) 커버리지가 우선이라 다 배정돼야 함");
+  const info = lib.inefficientRoundTripLocationInfo();
+  assertEqual(
+    lib.totalInefficientMoveCount(assigned, info),
+    1,
+    "이 경우엔 비효율 왕복 1회를 감수하고서라도 전원 배정해야 함",
+  );
+});
+
+/* ---------------- isSchedule2ResultBetter: 비효율 이동 우선순위 ---------------- */
+test("isSchedule2ResultBetter: 미배정이 같으면 비효율 이동이 적은 쪽이 수업 수보다 우선", () => {
+  lib.state.locations = ineffLocations();
+  lib.state.travelTimes = {};
+  const moreSessionsButIneff = scheduleResult(
+    [
+      { memberId: "A", day: 0, startSlot: 0, locationId: "M" },
+      { memberId: "B", day: 0, startSlot: 10, locationId: "S" },
+      { memberId: "C", day: 0, startSlot: 20, locationId: "M" },
+    ],
+    0,
+  );
+  const fewerSessionsNoIneff = scheduleResult(
+    [
+      { memberId: "A", day: 0, startSlot: 0, locationId: "M" },
+      { memberId: "B", day: 0, startSlot: 10, locationId: "S" },
+    ],
+    0,
+  );
+  assert(
+    lib.isSchedule2ResultBetter(fewerSessionsNoIneff, moreSessionsButIneff),
+    "비효율 왕복이 없는 쪽이 수업 수가 적어도 이겨야 함",
+  );
+  assert(!lib.isSchedule2ResultBetter(moreSessionsButIneff, fewerSessionsNoIneff));
+});
+
 console.log(pass + "개 통과, " + fail + "개 실패 (단위 테스트)");
 if (fail > 0) process.exit(1);

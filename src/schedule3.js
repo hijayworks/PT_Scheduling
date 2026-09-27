@@ -41,6 +41,7 @@ import {
   restorePreviousCandidate,
   hasRegenerableEligible,
   totalTravelCount,
+  totalInefficientMoveCount,
 } from "./engine/greedy.js";
 import {
   generateSchedule2Async,
@@ -1327,6 +1328,12 @@ export function renderSchedule3Result() {
     pill3.className = "stat-pill";
     pill3.textContent = "이동 " + totalTravelCount(result.assigned) + "번";
     stats.appendChild(pill3);
+    const ineffCount = totalInefficientMoveCount(result.assigned);
+    const pillIneff = document.createElement("span");
+    pillIneff.className =
+      ineffCount > 0 ? "stat-pill stat-pill-danger" : "stat-pill";
+    pillIneff.textContent = "비효율 이동 " + ineffCount + "번";
+    stats.appendChild(pillIneff);
     if (idleMinutes != null) {
       const pill4 = document.createElement("span");
       if (idleMinutes > 0) {

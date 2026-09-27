@@ -7,6 +7,7 @@ import {
   BREAK_MIN,
   MAX_TRAVELS_PER_DAY,
   FORCE_ONCE_WEIGHT,
+  COVERAGE_WEIGHT_GAP_THRESHOLD,
 } from "../constants.js";
 import { cellKey, durationToSlots, showToast } from "../utils.js";
 import {
@@ -20,6 +21,8 @@ import {
   maxSessionsFor,
   soloTravelMemberIds,
   travelMinutes,
+  inefficientRoundTripLocationInfo,
+  isInefficientRoundTrip,
 } from "../domain.js";
 import { currentExcludedIds } from "../selectionOverride.js";
 
@@ -61,10 +64,14 @@ export function candidateLocationsFor(memberId) {
     : [null];
 }
 
-// 회원의 기본 지점들에 더해, 그 신청 하나에만 "지점 추가하기"로 별도로 허용해둔 지점
-// (req.extraLocationIds)까지 합쳐서 돌려준다 — 다른 신청(시간대)에는 영향을 주지 않는다.
+// 회원의 기본 지점들에서 그 신청 하나만 "지점 제거"로 빼둔 지점(req.excludedLocationIds)을
+// 제외하고, "지점 추가하기"로 별도로 허용해둔 지점(req.extraLocationIds)을 더해 돌려준다 —
+// 다른 신청(시간대)에는 영향을 주지 않는다.
 export function candidateLocationsForRequest(req) {
-  const base = candidateLocationsFor(req.memberId).filter((id) => id !== null);
+  const excluded = req.excludedLocationIds || [];
+  const base = candidateLocationsFor(req.memberId).filter(
+    (id) => id !== null && !excluded.includes(id),
+  );
   const extra = (req.extraLocationIds || []).filter((id) => !base.includes(id));
   const combined = base.concat(extra);
   return combined.length > 0 ? combined : [null];
@@ -100,6 +107,26 @@ export function dailyTravelCount(chain) {
   let count = 0;
   for (let i = 1; i < chain.length; i++) {
     if (travelMinutes(chain[i - 1].locationId, chain[i].locationId) > 0)
+      count++;
+  }
+  return count;
+}
+
+// 그 요일의 체인에서 "비효율 이동"(마포점↔여의도점이 아닌 A→B→A 왕복, 즉 상암점이 낀 왕복)
+// 횟수를 센다. info를 생략하면 매번 구해도 되지만(순수 함수), 후보 하나를 통째로 훑을 때는
+// 호출부에서 한 번만 구해 넘기는 편이 낫다.
+export function dailyInefficientMoveCount(chain, info) {
+  info = info === undefined ? inefficientRoundTripLocationInfo() : info;
+  let count = 0;
+  for (let i = 1; i < chain.length - 1; i++) {
+    if (
+      isInefficientRoundTrip(
+        info,
+        chain[i - 1].locationId,
+        chain[i].locationId,
+        chain[i + 1].locationId,
+      )
+    )
       count++;
   }
   return count;
@@ -183,6 +210,10 @@ export function greedyAssign(eligibleReqs, options, pinned) {
   // arrivedViaTravel 참고). eligibleSwapMembersFor도 수동 교체 시 같은 규칙을 적용한다.
   const soloTravelIds = soloTravelMemberIds();
 
+  // 비효율 이동(A→B→A 왕복 중 마포점↔여의도점이 아닌 것) 판정에 쓸 지점 정보 — 이 호출
+  // 전체에서 바뀌지 않으므로 한 번만 구해 buildBestChain·extendExistingChain이 공유한다.
+  const ineffInfo = inefficientRoundTripLocationInfo();
+
   // 정렬 순서(전략별 동점 처리 포함)를 "이 신청이 얼마나 우선인가"로만 쓴다 — 체인을 이을 때
   // 여러 후보가 동시에 맞물릴 수 있으면 순위가 앞선 쪽을 고르고, 체인 길이가 같으면 순위
   // 합이 더 좋은 체인을 고른다. 순서 자체를 그대로 커밋하지는 않는다(그게 바로 위 문제의 원인).
@@ -258,6 +289,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       weightFn,
       endBefore,
       onlyLocationId,
+      coveragePriority,
     ) {
       weightFn = weightFn || (() => 1);
       // 이 함수 실행 동안(= day 하루치 체인을 짜는 동안) 다른 요일의 확정 이동 횟수는 바뀌지
@@ -318,6 +350,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           travelFirst
             ? a.travelCount - b.travelCount ||
               b.dp - a.dp ||
+              a.ineffCount - b.ineffCount ||
               (travelCountOnly
                 ? 0
                 : a.travelMinutesSum - b.travelMinutesSum ||
@@ -326,7 +359,10 @@ export function greedyAssign(eligibleReqs, options, pinned) {
                   a.soloSlackPenalty - b.soloSlackPenalty) ||
               (preferDaytime ? b.daytimeScore - a.daytimeScore : 0) ||
               (groupByLocation ? b.groupScore - a.groupScore : 0)
-            : b.dp - a.dp ||
+            : (coveragePriority ||
+              Math.abs(a.dp - b.dp) >= COVERAGE_WEIGHT_GAP_THRESHOLD
+                ? b.dp - a.dp || a.ineffCount - b.ineffCount
+                : a.ineffCount - b.ineffCount || b.dp - a.dp) ||
               a.travelCount - b.travelCount ||
               (travelCountOnly
                 ? 0
@@ -347,17 +383,23 @@ export function greedyAssign(eligibleReqs, options, pinned) {
         }
         return s;
       }
-      // (dpA, countA, travelA, timeCostA, alignedA, slackPenA, daytimeA, groupA)가 (dpB, countB,
-      // travelB, timeCostB, alignedB, slackPenB, daytimeB, groupB)보다 나은지, 옵션에 맞게
-      // 비교한다. count는 하루 이동 횟수, travel은 이동 시간 합, timeCost는 이동 시간 합 + 빈
-      // 시간(슬랙) 합이다 — 기본 순서는 "인원 최대화 → 이동 횟수 최소화 → (travelCountOnly가
-      // 아니면) 이동 시간 최소화 → 총 이동시간+빈 시간의 합이 적은 쪽"(마지막 비교는 이동
-      // 시간이 이미 같으므로 사실상 빈 시간만 비교하는 셈이 된다). slackPen은 숨김 하드 로직(세 지점을 모두 다니는 회원)의
-      // 연장선인 숨김 소프트 선호다 — 그런 회원이 같은 지점 앞사람에게서 빈 시간 슬랙을 써서
-      // 이어붙는 것보다는, 슬랙 없이 이어붙고 대신 그 뒤 이동 쪽에 슬랙이 남는 배치를 우선한다.
+      // (dpA, countA, ineffA, travelA, timeCostA, alignedA, slackPenA, daytimeA, groupA)가 (dpB,
+      // countB, ineffB, travelB, timeCostB, alignedB, slackPenB, daytimeB, groupB)보다 나은지,
+      // 옵션에 맞게 비교한다. count는 하루 이동 횟수, ineff는 비효율 이동(상암점이 낀 A→B→A
+      // 왕복) 횟수, travel은 이동 시간 합, timeCost는 이동 시간 합 + 빈 시간(슬랙) 합이다 —
+      // 기본 순서는 "인원 최대화 → 이동 횟수 최소화 → (travelCountOnly가 아니면) 이동 시간
+      // 최소화 → 총 이동시간+빈 시간의 합이 적은 쪽"(마지막 비교는 이동 시간이 이미 같으므로
+      // 사실상 빈 시간만 비교하는 셈이 된다). coveragePriority(진짜 "미배정 없음" 커버리지
+      // 단계, greedyAssign의 1단계에서만 true)면 인원(dp)을 ineff보다 먼저 보고, 그 외(확장·
+      // 세션 최대화 단계)에서는 ineff를 인원보다 먼저 봐서 "비효율 이동을 피하려고 세션 하나를
+      // 덜 받는" 선택을 허용한다 — 다만 커버리지 자체는 항상 최우선으로 지킨다. slackPen은
+      // 숨김 하드 로직(세 지점을 모두 다니는 회원)의 연장선인 숨김 소프트 선호다 — 그런 회원이
+      // 같은 지점 앞사람에게서 빈 시간 슬랙을 써서 이어붙는 것보다는, 슬랙 없이 이어붙고 대신
+      // 그 뒤 이동 쪽에 슬랙이 남는 배치를 우선한다.
       function isBetterPair(
         dpA,
         countA,
+        ineffA,
         travelA,
         timeCostA,
         alignedA,
@@ -366,6 +408,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
         groupA,
         dpB,
         countB,
+        ineffB,
         travelB,
         timeCostB,
         alignedB,
@@ -373,10 +416,20 @@ export function greedyAssign(eligibleReqs, options, pinned) {
         daytimeB,
         groupB,
       ) {
+        // dp 차이가 COVERAGE_WEIGHT_GAP_THRESHOLD를 넘으면 FORCE_ONCE_WEIGHT 같은 하드
+        // 가중치가 걸려 있다는 뜻이므로, coveragePriority와 무관하게 dp를 먼저 본다 — 안
+        // 그러면 "미배정 회원을 강제로 넣는다" 같은 하드 로직이 비효율 이동 회피에 밀릴 수 있다.
+        const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;
         if (travelFirst) {
           if (countA !== countB) return countA < countB;
           if (dpA !== dpB) return dpA > dpB;
+          if (ineffA !== ineffB) return ineffA < ineffB;
+        } else if (coveragePriority || hardWeightGap) {
+          if (dpA !== dpB) return dpA > dpB;
+          if (ineffA !== ineffB) return ineffA < ineffB;
+          if (countA !== countB) return countA < countB;
         } else {
+          if (ineffA !== ineffB) return ineffA < ineffB;
           if (dpA !== dpB) return dpA > dpB;
           if (countA !== countB) return countA < countB;
         }
@@ -406,6 +459,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           bestResultDaytime = -Infinity,
           bestResultGroup = -Infinity,
           bestTravelCount = Infinity,
+          bestResultIneffCount = Infinity,
           bestTransitionMin = 0,
           bestSlackMin = 0;
         allLocIds.forEach((predLoc) => {
@@ -452,11 +506,28 @@ export function greedyAssign(eligibleReqs, options, pinned) {
                   ? slackMin
                   : 0;
               const resultSlackPen = prevNode.soloSlackPenalty + slackPenalty;
+              // 2칸 전 지점(prevNode가 도착하기 전에 있던 지점)까지 알아야 지금 완성되는
+              // A→B→A 왕복(prevNode 이전 지점 → prevNode의 지점 → 이번 node의 지점)을 판정할
+              // 수 있다 — prevNode 자신이 하루의 첫 세션이면(prev 없음) 왕복이 성립할 수 없다.
+              const prevTwoBackLoc = prevNode.prev
+                ? prevNode.prev.locationId
+                : null;
+              const resultIneffCount =
+                prevNode.ineffCount +
+                (isInefficientRoundTrip(
+                  ineffInfo,
+                  prevTwoBackLoc,
+                  prevNode.locationId,
+                  node.locationId,
+                )
+                  ? 1
+                  : 0);
               if (
                 !bestPrev ||
                 isBetterPair(
                   prevNode.dp,
                   tc,
+                  resultIneffCount,
                   resultTravelOnly,
                   resultTimeCost,
                   prevNode.alignedScore,
@@ -465,6 +536,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
                   prevNode.groupScore,
                   bestPrevDp,
                   bestTravelCount,
+                  bestResultIneffCount,
                   bestResultTravelOnly,
                   bestResultTimeCost,
                   bestResultAligned,
@@ -476,6 +548,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
                 bestPrevDp = prevNode.dp;
                 bestPrev = prevNode;
                 bestTravelCount = tc;
+                bestResultIneffCount = resultIneffCount;
                 bestResultTravelOnly = resultTravelOnly;
                 bestResultTimeCost = resultTimeCost;
                 bestTransitionMin = transitionMin;
@@ -494,6 +567,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           node.dp = bestPrev.dp + weightFn(node.cand.memberId);
           node.prev = bestPrev;
           node.travelCount = bestTravelCount;
+          node.ineffCount = bestResultIneffCount;
           node.travelMinutesSum = bestPrev.travelMinutesSum + bestTransitionMin;
           node.idleMinutesSum = bestPrev.idleMinutesSum + bestSlackMin;
           node.alignedScore = bestPrev.alignedScore; // 하루의 첫 세션이 정렬됐는지만 그대로 이어받는다
@@ -509,6 +583,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           node.dp = weightFn(node.cand.memberId);
           node.prev = null;
           node.travelCount = 0;
+          node.ineffCount = 0;
           node.travelMinutesSum = 0;
           node.idleMinutesSum = 0;
           node.alignedScore = isHalfHourStart(node.cand) ? 1 : 0;
@@ -525,6 +600,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           const tie =
             best &&
             node.dp === best.dp &&
+            node.ineffCount === best.ineffCount &&
             node.travelCount === best.travelCount &&
             (travelCountOnly ||
               node.travelMinutesSum === best.travelMinutesSum) &&
@@ -539,6 +615,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
             isBetterPair(
               node.dp,
               node.travelCount,
+              node.ineffCount,
               node.travelMinutesSum,
               nodeTimeCost,
               node.alignedScore,
@@ -547,6 +624,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
               node.groupScore,
               best.dp,
               best.travelCount,
+              best.ineffCount,
               best.travelMinutesSum,
               bestTimeCost,
               best.alignedScore,
@@ -587,6 +665,21 @@ export function greedyAssign(eligibleReqs, options, pinned) {
                 ),
             );
             if (!node) continue;
+            // node.ineffCount는 node까지의 왕복만 반영한다 — endBefore로 이어지는 마지막 전이가
+            // 왕복을 완성시키는지(node 이전 지점 → node의 지점 → endBefore의 지점)까지 반영해
+            // 비교용으로만 더해준다(기존에도 이 블록은 마지막 전이 비용을 완벽히 반영하진
+            // 않는 근사라, 그 패턴을 그대로 따른다).
+            const nodeTwoBackLoc = node.prev ? node.prev.locationId : null;
+            const nodeIneffCount =
+              node.ineffCount +
+              (isInefficientRoundTrip(
+                ineffInfo,
+                nodeTwoBackLoc,
+                node.locationId,
+                endBefore.locationId,
+              )
+                ? 1
+                : 0);
             const nodeTimeCost = timeCostOf(node);
             const chosenTimeCost = chosen ? timeCostOf(chosen) : null;
             if (
@@ -594,6 +687,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
               isBetterPair(
                 node.dp,
                 node.travelCount,
+                nodeIneffCount,
                 node.travelMinutesSum,
                 nodeTimeCost,
                 node.alignedScore,
@@ -602,6 +696,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
                 node.groupScore,
                 chosen.dp,
                 chosen.travelCount,
+                chosen.ineffCount,
                 chosen.travelMinutesSum,
                 chosenTimeCost,
                 chosen.alignedScore,
@@ -635,7 +730,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
 
     // 이미 확정된 체인 뒤에 정확히 맞물리는 다음 신청을, 우선순위가 가장 앞선 것부터 하나씩
     // 이어붙인다(뒤쪽으로만 확장 — 앞쪽 빈 시간은 아래 extendChainBackward가 별도로 채운다).
-    function extendExistingChain(day, eligibleMemberIds) {
+    function extendExistingChain(day, eligibleMemberIds, coveragePriority) {
       let chain = chainByDay.get(day) || [];
       if (chain.length === 0) return;
       const usedMembers = new Set(chain.map((s) => s.memberId));
@@ -644,6 +739,10 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       while (extending) {
         extending = false;
         const chainEnd = chain[chain.length - 1];
+        // 체인 끝에서 두 칸 전 지점 — 다음 후보를 이어붙였을 때 A→B→A 왕복이 완성되는지
+        // 판정하는 데 쓴다.
+        const chainTwoBackLoc =
+          chain.length >= 2 ? chain[chain.length - 2].locationId : null;
         // 숨김 하드 로직: chainEnd가 세 지점을 모두 다니는 회원이고 그 자신도 이동으로
         // 도착했다면, 여기서 또 이동으로 이어붙이는 것은 막는다("이동-회원-이동" 금지,
         // buildBestChain의 동일 로직 참고).
@@ -673,6 +772,20 @@ export function greedyAssign(eligibleReqs, options, pinned) {
             if (actual < need || actual > need + allowGapMin) return;
             const cost = travelMinutes(chainEnd.locationId, locId);
             if (chainEndIsSoloTravelMember && cost > 0) return;
+            // coveragePriority가 아니면(확장·세션 최대화 단계) 비효율 이동이 되는 연장은
+            // 아예 받아들이지 않는다 — 세션 하나를 더 얻으려고 비효율 이동을 만들지 않는다
+            // (우선순위 2가 3보다 우선). coveragePriority면(진짜 커버리지 단계) 인원을
+            // 놓치지 않는 게 더 중요하므로 이 제한을 두지 않는다.
+            if (
+              !coveragePriority &&
+              isInefficientRoundTrip(
+                ineffInfo,
+                chainTwoBackLoc,
+                chainEnd.locationId,
+                locId,
+              )
+            )
+              return;
             if (!bestLoc || cost < bestLoc.cost) bestLoc = { locId, cost };
           });
           if (!bestLoc) return;
@@ -721,7 +834,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
     // 찾는다. 앞뒤를 합친 하루 전체가 "하루 이동 최대 허용 횟수"를 넘기면 적용하지 않는다(앞쪽
     // 체인 자체는 자기 안에서 이 한도를 지키지만, 기존 체인과 이어지는 지점에서의 이동은
     // buildBestChain이 알지 못하므로 합친 뒤 다시 확인해야 한다).
-    function extendChainBackward(day, eligibleMemberIds, weightFn) {
+    function extendChainBackward(day, eligibleMemberIds, weightFn, coveragePriority) {
       const chain = chainByDay.get(day) || [];
       if (chain.length === 0) return;
       const usedMembers = new Set(chain.map((s) => s.memberId));
@@ -730,10 +843,14 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       );
       if (remaining.size === 0) return;
       const chainStart = chain[0];
-      const frontChain = buildBestChain(day, remaining, weightFn, {
-        slot: chainStart.startSlot,
-        locationId: chainStart.locationId,
-      });
+      const frontChain = buildBestChain(
+        day,
+        remaining,
+        weightFn,
+        { slot: chainStart.startSlot, locationId: chainStart.locationId },
+        null,
+        coveragePriority,
+      );
       if (frontChain.length === 0) return;
       const combined = [...frontChain, ...chain];
       if (dailyTravelCount(combined) > maxTravelsPerDay) return;
@@ -751,14 +868,19 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       chainByDay.set(day, combined);
     }
 
-    function fillDay(day, eligibleMemberIds, weightFn) {
+    function fillDay(day, eligibleMemberIds, weightFn, coveragePriority) {
       if ((chainByDay.get(day) || []).length > 0) {
-        extendExistingChain(day, eligibleMemberIds);
-        extendChainBackward(day, eligibleMemberIds, weightFn);
+        extendExistingChain(day, eligibleMemberIds, coveragePriority);
+        extendChainBackward(day, eligibleMemberIds, weightFn, coveragePriority);
       } else {
-        buildBestChain(day, eligibleMemberIds, weightFn).forEach((s) =>
-          commit(day, s),
-        );
+        buildBestChain(
+          day,
+          eligibleMemberIds,
+          weightFn,
+          null,
+          null,
+          coveragePriority,
+        ).forEach((s) => commit(day, s));
       }
     }
 
@@ -833,7 +955,11 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           return withinCaps(id, day);
         }),
       );
-      fillDay(day, elig, fairnessWeight);
+      // coveragePriority: sessionCountFirst가 아닐 때만 이 호출이 진짜 "미배정 없음"
+      // 커버리지 단계다(elig가 아직 못 받은 회원으로 제한돼 있으므로) — 이때만 인원(dp)을
+      // 비효율 이동보다 우선한다. sessionCountFirst(후보B)에서는 이 1단계도 이미 세션 수
+      // 최대화(우선순위 3) 목적이므로 비효율 이동이 그보다 우선한다.
+      fillDay(day, elig, fairnessWeight, !sessionCountFirst);
     });
 
     // 2단계: 남는 자리 중 연속된 요일이 아닌 곳부터 추가로 채운다.
@@ -944,6 +1070,23 @@ export function totalTravelCount(assigned) {
       if (travelMinutes(sorted[i - 1].locationId, sorted[i].locationId) > 0)
         total++;
     }
+  });
+  return total;
+}
+
+// 이 후보의 한 주 전체에서 "비효율 이동"(dailyInefficientMoveCount 참고) 횟수 합. 후보끼리
+// 비교할 때(candidateSearchScore)와 "비효율 이동 n번" 배지에 쓴다.
+export function totalInefficientMoveCount(assigned, info) {
+  info = info === undefined ? inefficientRoundTripLocationInfo() : info;
+  let total = 0;
+  const byDay = new Map();
+  assigned.forEach((r) => {
+    if (!byDay.has(r.day)) byDay.set(r.day, []);
+    byDay.get(r.day).push(r);
+  });
+  byDay.forEach((reqs) => {
+    const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+    total += dailyInefficientMoveCount(sorted, info);
   });
   return total;
 }
@@ -1259,10 +1402,14 @@ export function buildCandidateFromStrategy(
 // 수업 건수가 더 많은 조합을 골라버려(예: 미배정 2명) 후보 설명이 내세우는 상한이 지켜지지
 // 않는다(실제로 이 문제가 있었다). 상한을 지키는 조합이 아예 없을 때만(둘 다 위반) 그 아래
 // 기준으로 비교한다.
+// 튜플 순서 [capOk, ineff, base0, base1, travel] — capOk(미배정 상한 준수) 다음으로 비효율
+// 이동 횟수를 항상 먼저 비교한다("후보 생성 우선순위: 미배정 없음 → 비효율 이동 최소화 →
+// 수업 횟수 최대 → 이동 횟수 최소화"를 후보B("sessions" 우선)에도 예외 없이 적용한다).
 export function candidateSearchScore(cand, primary, maxUnassigned) {
   const count = new Set(cand.assigned.map((r) => r.memberId)).size;
   const sessions = cand.assigned.length;
   const travel = totalTravelCount(cand.assigned);
+  const ineff = totalInefficientMoveCount(cand.assigned);
   const capOk =
     typeof maxUnassigned === "number" &&
     cand.unassignedMembers.length > maxUnassigned
@@ -1272,13 +1419,14 @@ export function candidateSearchScore(cand, primary, maxUnassigned) {
     primary === "sessions"
       ? [sessions, count, travel]
       : [count, sessions, travel];
-  return [capOk, base[0], base[1], base[2]];
+  return [capOk, ineff, base[0], base[1], base[2]];
 }
 export function isCandidateWorse(a, b) {
   if (a[0] !== b[0]) return a[0] < b[0];
-  if (a[1] !== b[1]) return a[1] < b[1];
+  if (a[1] !== b[1]) return a[1] > b[1]; // ineff: 적을수록 좋음
   if (a[2] !== b[2]) return a[2] < b[2];
-  return a[3] > b[3];
+  if (a[3] !== b[3]) return a[3] < b[3];
+  return a[4] > b[4]; // travel: 적을수록 좋음
 }
 // 두 candidateSearchScore 튜플이 완전히 동점인지("배치 페이저"용 — 미배정/수업 건수/이동
 // 횟수까지 전부 같아 카드 pill 표시가 동일한 경우만 같은 풀로 묶는다).

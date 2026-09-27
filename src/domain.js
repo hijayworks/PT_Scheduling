@@ -4,6 +4,7 @@ import {
   SESSION_DURATION_MIN,
   MAX_SESSIONS_PER_MEMBER,
   SOLO_TRAVEL_LOCATION_NAMES,
+  INEFFICIENT_ROUNDTRIP_LOCATION_NAMES,
   BLOCK_COLOR,
   MEMBER_COLORS,
   MEMBER_COLOR_SHADE_STEPS,
@@ -117,4 +118,35 @@ export function travelMinutes(locIdA, locIdB) {
   if (!locIdA || !locIdB || locIdA === locIdB) return 0;
   const v = state.travelTimes[pairKey(locIdA, locIdB)];
   return typeof v === "number" && v >= 0 ? v : 0;
+}
+
+// SOLO_TRAVEL_LOCATION_NAMES와 같은 원칙: 이름이 정확히 하나씩만 매칭돼야 규칙이 활성화된다
+// (중복 등록 시에는 규칙 자체를 비활성화한다). 마포점↔여의도점 왕복만 "가능"이고, 상암점이
+// 낀 나머지 왕복 조합은 전부 "비효율"이라는 규칙(isInefficientRoundTrip)이 쓰는 지점 id들.
+export function inefficientRoundTripLocationInfo() {
+  const matches = state.locations.filter((l) =>
+    INEFFICIENT_ROUNDTRIP_LOCATION_NAMES.includes(l.name),
+  );
+  if (matches.length !== INEFFICIENT_ROUNDTRIP_LOCATION_NAMES.length)
+    return null;
+  const idByName = new Map(matches.map((l) => [l.name, l.id]));
+  return {
+    ids: new Set(idByName.values()),
+    mapoId: idByName.get("마포점"),
+    yeouidoId: idByName.get("여의도점"),
+  };
+}
+
+// A→B→A 왕복(locA에서 나가 locB를 들렀다가 다시 locA로 돌아옴)이 실제로 완성됐고, 그 왕복이
+// 마포점↔여의도점이 아니면(=상암점이 끼면) 비효율로 판정한다. info는
+// inefficientRoundTripLocationInfo()의 결과를 호출부에서 한 번만 구해 넘겨야 한다(순수 함수라
+// DP 안쪽 루프에서 반복 호출해도 안전하지만, info 자체를 반복 계산할 필요는 없다).
+export function isInefficientRoundTrip(info, locA, locB, locC) {
+  if (!info || locA == null || locB == null || locC == null) return false;
+  if (locA !== locC || locA === locB) return false; // 실제로 이동이 있는 A→B→A만
+  if (!info.ids.has(locA) || !info.ids.has(locB)) return false;
+  const isMapoYeouido =
+    (locA === info.mapoId && locB === info.yeouidoId) ||
+    (locA === info.yeouidoId && locB === info.mapoId);
+  return !isMapoYeouido;
 }

@@ -85,13 +85,22 @@ export function deleteLocation(loc) {
   Object.keys(state.travelTimes).forEach((k) => {
     if (k.indexOf(loc.id) !== -1) delete state.travelTimes[k];
   });
-  // "지점 추가하기"로 개별 신청에 얹어둔 추가 지점도 함께 정리한다.
+  // "지점 추가하기"로 개별 신청에 얹어둔 추가 지점, "지점 제거"로 개별 신청에서만 뺀
+  // 기본 지점도 함께 정리한다.
   state.requests.forEach((r) => {
     if (
       Array.isArray(r.extraLocationIds) &&
       r.extraLocationIds.includes(loc.id)
     ) {
       r.extraLocationIds = r.extraLocationIds.filter((id) => id !== loc.id);
+    }
+    if (
+      Array.isArray(r.excludedLocationIds) &&
+      r.excludedLocationIds.includes(loc.id)
+    ) {
+      r.excludedLocationIds = r.excludedLocationIds.filter(
+        (id) => id !== loc.id,
+      );
     }
   });
   saveState();

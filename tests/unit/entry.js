@@ -2,7 +2,12 @@
 // 여기서 다시 내보내는 함수/값만 단위 테스트 대상이 된다 — 새 순수 함수를 테스트하고
 // 싶으면 이 파일에 export를 추가하면 된다.
 export { minutesLabel, slotLabel, endLabel, cellKey, durationToSlots } from "../../src/utils.js";
-export { travelMinutes, pairKey } from "../../src/domain.js";
+export {
+  travelMinutes,
+  pairKey,
+  inefficientRoundTripLocationInfo,
+  isInefficientRoundTrip,
+} from "../../src/domain.js";
 export { state } from "../../src/state.js";
 export {
   mulberry32,
@@ -12,3 +17,11 @@ export {
   schedule2Signature,
   runChainDP,
 } from "../../src/engine/chainDp.js";
+export {
+  candidateLocationsForRequest,
+  greedyAssign,
+  dailyInefficientMoveCount,
+  totalInefficientMoveCount,
+  candidateSearchScore,
+  isCandidateWorse,
+} from "../../src/engine/greedy.js";
