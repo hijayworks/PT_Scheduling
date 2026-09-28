@@ -18,6 +18,7 @@ export {
   schedule2Signature,
   runChainDP,
 } from "../../src/engine/chainDp.js";
+export { setIdleFirst } from "../../src/engine/chainDpCore.js";
 export {
   candidateLocationsForRequest,
   greedyAssign,

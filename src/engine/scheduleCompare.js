@@ -6,7 +6,7 @@ import {
   totalInefficientMoveCount,
   TRAVEL_VALUE_MINUTES,
 } from "./greedy.js";
-import { requiredGapMin2 } from "./chainDpCore.js";
+import { requiredGapMin2, isIdleFirst } from "./chainDpCore.js";
 
 // "수업 스케줄 생성2" 결과끼리 비교하고 서명(중복 판별)하는 순수 함수 모음. chainDp.js(카드
 // 재시작 오케스트레이션)가 요일 순서 후보·다듬은 결과를 고를 때 이 모듈에 의존한다.
@@ -26,6 +26,8 @@ export function isSchedule2ResultBetter(a, b) {
     travelCountB = totalTravelCount(b.assigned);
   const idleA = schedule2TotalIdleMinutes(a.assigned),
     idleB = schedule2TotalIdleMinutes(b.assigned);
+  // 빈 시간 최소화 카드: 이동 횟수와 환산하지 않고 빈 시간을 먼저 본다.
+  if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
   if (travelCountA !== travelCountB) {
     // 이동 횟수가 다르면 무조건 이동이 적은 쪽을 이기게 하지 않고, 이동 1번의 가치를
     // 빈 시간 TRAVEL_VALUE_MINUTES분으로 쳐서 하나의 점수로 합쳐 비교한다 — 이동을

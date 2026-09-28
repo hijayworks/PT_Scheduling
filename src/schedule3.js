@@ -48,9 +48,11 @@ import {
   isSchedule2ResultBetter,
   schedule2Signature,
   SCHEDULE2_CARD_COUNT,
+  IDLE_FIRST_CARD_INDEX,
   schedule2ToIdleBlocks,
   schedule2TotalIdleMinutes,
 } from "./engine/chainDp.js";
+import { setIdleFirst } from "./engine/chainDpCore.js";
 import {
   renderRequestList,
   setActiveScheduleMemberId,
@@ -1453,9 +1455,16 @@ export function renderSchedule3Result() {
   // 동점일 필요가 없고(서로 다른 요일 순서 시드에서 출발해 실제로 배치가 다를 수 있다),
   // 카드 안의 배치 페이저만 그 카드 자신의 탐색에서 나온 동점을 다룬다.
   for (let i = 0; i < SCHEDULE2_CARD_COUNT; i++) {
-    const aTitle = "후보A-" + (i + 1) + " - 인원 최대 (빈 시간 허용)";
-    const aDesc =
-      "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.";
+    const idleFirstCard = i === IDLE_FIRST_CARD_INDEX;
+    const aTitle =
+      "후보A-" +
+      (i + 1) +
+      (idleFirstCard
+        ? " - 인원 최대 (빈 시간 최소화)"
+        : " - 인원 최대 (빈 시간 허용)");
+    const aDesc = idleFirstCard
+      ? "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 빈 시간 최소 → 이동 횟수 최저 순으로 배정합니다."
+      : "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.";
     const a = runtime.schedule3Result.candidateAList[i];
     if (a) {
       buildCard(
@@ -1643,11 +1652,18 @@ export async function runGenerate3({
       const fresh =
         result.genA && result.candidateAList ? result.candidateAList[i] : null;
       if (fresh) {
-        const picked = pickCandidateASlot(
-          prev,
-          fresh,
-          result.candidateAPools && result.candidateAPools[i],
-        );
+        // 빈 시간 최소화 카드는 그 기준으로 이전 결과와 비교한다.
+        setIdleFirst(i === IDLE_FIRST_CARD_INDEX);
+        let picked;
+        try {
+          picked = pickCandidateASlot(
+            prev,
+            fresh,
+            result.candidateAPools && result.candidateAPools[i],
+          );
+        } finally {
+          setIdleFirst(false);
+        }
         candidateAList.push(picked.candidate);
         if (picked.pool !== null) candidateAPools[i] = picked.pool;
       } else {

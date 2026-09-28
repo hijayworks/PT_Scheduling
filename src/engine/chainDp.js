@@ -6,7 +6,7 @@ import {
   MAX_POOL_VARIANTS,
   generateCandidatesAsync,
 } from "./greedy.js";
-import { isEligibleRequest2, runChainDP } from "./chainDpCore.js";
+import { isEligibleRequest2, runChainDP, setIdleFirst } from "./chainDpCore.js";
 import { runSchedule2Pipeline } from "./chainDpPolish.js";
 import { mulberry32, shuffled } from "./rng.js";
 import {
@@ -55,6 +55,9 @@ export {
 // 필요가 없고, 카드 안의 배치 페이저만 그 카드 자신의 탐색(allPolished)에서 나온 진짜
 // 동점을 다룬다. SCHEDULE2_CARD_COUNT가 곧 카드 수이자 독립 탐색 그룹 수다.
 export const SCHEDULE2_CARD_COUNT = 3;
+// 이 번호의 카드(맨 앞 후보A-1)만 "빈 시간 최소화" 기준(chainDpCore.js의 setIdleFirst)으로
+// 탐색·비교한다.
+export const IDLE_FIRST_CARD_INDEX = 0;
 // 담금질 계열 시간 예산은 전부 실측정 시간(ms) 기준이라, 데이터 크기와 무관하게 회원 1명짜리
 // 입력에서도 그대로 다 소모된다(schedule3.js 등에서 실제로 확인됨 — 카드당 최대 7분+α).
 // 스모크 테스트가 매번 이 시간을 다 기다리면 CI에서 못 돌리므로(현재 CI는 그래서
@@ -139,45 +142,45 @@ async function searchWithinBase(
   for (let k = 0; k < shuffleCount; k++)
     dayOrdersToTry.push(shuffled(daysWithReqs, randomFn));
   const deadline = performance.now() + deadlineMs;
-    let best = null,
-      bestOrder = null,
-      bestSeedOffset = null;
-    const evaluated = [];
-    for (let i = 0; i < dayOrdersToTry.length; i++) {
-      // seedOffset을 안 넘기면(undefined→0) 그리디 1·2단계의 지터(stage1RandomFn, 하루 안에서
-      // 동점인 회원들 중 누구를 먼저 배정할지 정하는 값)가 요일 순서·그룹과 무관하게 항상 같은
-      // 고정 시드로 고정돼버린다 — 그러면 그룹마다 "요일을 처리하는 순서"만 다를 뿐, "그 요일
-      // 안에서 동점인 회원 중 누구를 고를지"는 항상 같아서, 실제로는 한두 명만 자리가 바뀐
-      // 정도의 배치만 나온다(실제로 이 문제로 확인됨 — 페이저에 뜬 배치들이 골격은 거의 같고
-      // 소수만 자리를 바꾼 수준이었음). base·시도 번호로 벌린 시드를 넘겨, base마다는 물론
-      // 한 base 안의 요일 순서 시도끼리도 하루 안 배정이 서로 다르게 갈리도록 한다.
-      const seedOffset = seedBase + i;
-      const result = await runSchedule2Pipeline(
-        reqs,
-        reqsByDay,
-        daysWithReqs,
-        dayOrdersToTry[i],
-        true,
-        false,
-        undefined,
-        seedOffset,
-      );
-      // seedOffset을 결과와 함께 기억해둔다 — 다듬기 단계가 이 요일 순서를 다시 쓸 때 시드까지
-      // 그대로 재현해야, 그리디 1·2단계의 동점 처리가 달라져 수업 건수 자체가 바뀌는 일 없이
-      // "이 결과"를 다듬을 수 있다(아래 다듬기 후보 구성부 참고 — seedOffset을 안 넘겨주면
-      // 다듬기가 매번 새 시드로 그리디 1·2단계를 다시 돌려, 탐색에서 찾은 최고 수업 건수를
-      // 다듬은 결과가 재현하지 못하고 잃어버리는 문제가 있었다: 실제로 탐색 단계에서 30건을
-      // 찾고도 다듬은 최종 결과는 29건으로 떨어지는 사례로 확인됨).
-      evaluated.push({ order: dayOrdersToTry[i], seedOffset, result });
-      if (!best || isSchedule2ResultBetter(result, best)) {
-        best = result;
-        bestOrder = dayOrdersToTry[i];
-        bestSeedOffset = seedOffset;
-      }
-      if (onEval) await onEval();
-      if (performance.now() >= deadline) break;
+  let best = null,
+    bestOrder = null,
+    bestSeedOffset = null;
+  const evaluated = [];
+  for (let i = 0; i < dayOrdersToTry.length; i++) {
+    // seedOffset을 안 넘기면(undefined→0) 그리디 1·2단계의 지터(stage1RandomFn, 하루 안에서
+    // 동점인 회원들 중 누구를 먼저 배정할지 정하는 값)가 요일 순서·그룹과 무관하게 항상 같은
+    // 고정 시드로 고정돼버린다 — 그러면 그룹마다 "요일을 처리하는 순서"만 다를 뿐, "그 요일
+    // 안에서 동점인 회원 중 누구를 고를지"는 항상 같아서, 실제로는 한두 명만 자리가 바뀐
+    // 정도의 배치만 나온다(실제로 이 문제로 확인됨 — 페이저에 뜬 배치들이 골격은 거의 같고
+    // 소수만 자리를 바꾼 수준이었음). base·시도 번호로 벌린 시드를 넘겨, base마다는 물론
+    // 한 base 안의 요일 순서 시도끼리도 하루 안 배정이 서로 다르게 갈리도록 한다.
+    const seedOffset = seedBase + i;
+    const result = await runSchedule2Pipeline(
+      reqs,
+      reqsByDay,
+      daysWithReqs,
+      dayOrdersToTry[i],
+      true,
+      false,
+      undefined,
+      seedOffset,
+    );
+    // seedOffset을 결과와 함께 기억해둔다 — 다듬기 단계가 이 요일 순서를 다시 쓸 때 시드까지
+    // 그대로 재현해야, 그리디 1·2단계의 동점 처리가 달라져 수업 건수 자체가 바뀌는 일 없이
+    // "이 결과"를 다듬을 수 있다(아래 다듬기 후보 구성부 참고 — seedOffset을 안 넘겨주면
+    // 다듬기가 매번 새 시드로 그리디 1·2단계를 다시 돌려, 탐색에서 찾은 최고 수업 건수를
+    // 다듬은 결과가 재현하지 못하고 잃어버리는 문제가 있었다: 실제로 탐색 단계에서 30건을
+    // 찾고도 다듬은 최종 결과는 29건으로 떨어지는 사례로 확인됨).
+    evaluated.push({ order: dayOrdersToTry[i], seedOffset, result });
+    if (!best || isSchedule2ResultBetter(result, best)) {
+      best = result;
+      bestOrder = dayOrdersToTry[i];
+      bestSeedOffset = seedOffset;
     }
-    return { evaluated, best, bestOrder, bestSeedOffset };
+    if (onEval) await onEval();
+    if (performance.now() >= deadline) break;
+  }
+  return { evaluated, best, bestOrder, bestSeedOffset };
 }
 
 // 재시작 그룹 하나를 처음부터 끝까지(요일 순서 탐색 → 다듬기) 돌려 그 그룹의 최종 결과
@@ -435,16 +438,24 @@ export async function generateSchedule2Async(onProgress) {
     const groupStart =
       GREEDY_BASELINE_PROGRESS_SHARE +
       (g / SCHEDULE2_CARD_COUNT) * cardProgressShare;
-    const card = await runSchedule2RestartGroup(
-      eligibleReqs,
-      groupSeed,
-      g,
-      (p) => {
-        if (onProgress)
-          onProgress(groupStart + (p / SCHEDULE2_CARD_COUNT) * cardProgressShare);
-      },
-      targetFloor,
-    );
+    let card;
+    setIdleFirst(g === IDLE_FIRST_CARD_INDEX);
+    try {
+      card = await runSchedule2RestartGroup(
+        eligibleReqs,
+        groupSeed,
+        g,
+        (p) => {
+          if (onProgress)
+            onProgress(
+              groupStart + (p / SCHEDULE2_CARD_COUNT) * cardProgressShare,
+            );
+        },
+        targetFloor,
+      );
+    } finally {
+      setIdleFirst(false);
+    }
     cards.push(
       card || { result: { assigned: [], unassignedMembers: [] }, pool: [] },
     );
@@ -465,67 +476,76 @@ export async function generateSchedule2Async(onProgress) {
   // 그대로 호환된다)를 가장 좋은 것부터 찾아, 그보다 못한 카드는 그 결과를 즉시 가져다 쓴다.
   // 추가 탐색이 전혀 없어 순간적으로 끝나므로, 진행률 바가 카드 3장을 다 만든 뒤에도 한참
   // 100%에 멈춰 있던 문제도 이걸로 함께 없어진다.
-  if (targetFloor) {
-    let best = null;
-    function considerAsCandidate(result) {
-      if (!result || floorIsBetter(targetFloor, result)) return;
-      if (!best || isSchedule2ResultBetter(result, best)) best = result;
-    }
-    // greedyBaseline.built는 전략별 "1등"만 담고 있어, 그 1등과 이미 완전히 동점인 다른
-    // 배치들(greedyBaseline.pools[idx], generateCandidatesAsync가 이미 찾아둔 것)을 함께
-    // 넣지 않으면 best가 그리디 쪽에서 왔을 때 bestPool이 1개로 줄어버린다(실제로 이 문제로
-    // 확인됨 — 그리디 자체 tiedPool은 3인데 A-1/2/3 카드가 모두 그 1등으로 바뀌면서
-    // 페이저가 사라지고 세 카드가 서로 구분 없이 똑같아졌다).
-    const externalCandidates = (greedyBaseline.built || [])
-      .concat(runtime.candidates || [])
-      .concat([].concat(...(greedyBaseline.pools || [])))
-      .map((cand) => {
-        if (!cand || !cand.assigned) return null;
-        return {
-          assigned: cand.assigned,
-          unassignedMembers: cand.unassignedMembers || [],
-        };
-      })
-      .filter(Boolean);
-    cards.forEach((c) => considerAsCandidate(c.result));
-    externalCandidates.forEach((asResult) => considerAsCandidate(asResult));
-    if (best) {
-      // best로 카드를 통째로 바꿔치기하면 그 카드는 더 이상 "자기 자신의 탐색"에서 나온
-      // 결과가 아니게 된다 — best 혼자만(pool 1개) 들고 오면 배치 페이저가 사라져버리므로
-      // (실제로 이 문제로 확인됨), best와 정확히 동점인 배치를 카드들의 결과·각자 풀·
-      // 그리디/후보B·C 쪽에서 모두 긁어모아 새 풀을 만든다. best보다 못한 동점 아닌 배치는
-      // 절대 섞지 않는다(동점 풀은 늘 진짜 동점만 보여줘야 한다).
-      const bestSig = schedule2Signature(best);
-      const bestPool = [];
-      const seenTieSig = new Set();
-      function addTie(result) {
-        if (!result) return;
-        if (
-          isSchedule2ResultBetter(best, result) ||
-          isSchedule2ResultBetter(result, best)
-        )
-          return;
-        const sig = schedule2Signature(result);
-        if (seenTieSig.has(sig)) return;
-        seenTieSig.add(sig);
-        if (bestPool.length < MAX_POOL_VARIANTS)
-          bestPool.push(sig === bestSig ? best : result);
+  // 빈 시간 최소화 카드(IDLE_FIRST_CARD_INDEX)는 빈 시간 최소화 기준으로, 나머지는 기존 기준으로
+  // 각각 따로 가장 좋은 결과를 고른다.
+  for (const idleMode of [false, true]) {
+    if (!targetFloor) break;
+    setIdleFirst(idleMode);
+    try {
+      let best = null;
+      function considerAsCandidate(result) {
+        if (!result || floorIsBetter(targetFloor, result)) return;
+        if (!best || isSchedule2ResultBetter(result, best)) best = result;
       }
-      addTie(best);
-      cards.forEach((c) => {
-        addTie(c.result);
-        (c.pool || []).forEach(addTie);
-      });
-      externalCandidates.forEach(addTie);
-      for (let g = 0; g < cards.length; g++) {
-        const c = cards[g];
-        if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
-        if (!isSchedule2ResultBetter(best, c.result)) continue;
-        // bestPool을 그대로(참조로) 나눠주면 여러 카드가 같은 배열을 공유하게 되어, 한
-        // 카드에서 페이저로 다른 배치를 골라(pickCandidateASlot의 pool.unshift 등) 배열을
-        // 바꾸면 다른 카드의 풀까지 조용히 같이 바뀐다 — 카드마다 독립된 복사본을 준다.
-        cards[g] = { result: best, pool: bestPool.slice() };
+      // greedyBaseline.built는 전략별 "1등"만 담고 있어, 그 1등과 이미 완전히 동점인 다른
+      // 배치들(greedyBaseline.pools[idx], generateCandidatesAsync가 이미 찾아둔 것)을 함께
+      // 넣지 않으면 best가 그리디 쪽에서 왔을 때 bestPool이 1개로 줄어버린다(실제로 이 문제로
+      // 확인됨 — 그리디 자체 tiedPool은 3인데 A-1/2/3 카드가 모두 그 1등으로 바뀌면서
+      // 페이저가 사라지고 세 카드가 서로 구분 없이 똑같아졌다).
+      const externalCandidates = (greedyBaseline.built || [])
+        .concat(runtime.candidates || [])
+        .concat([].concat(...(greedyBaseline.pools || [])))
+        .map((cand) => {
+          if (!cand || !cand.assigned) return null;
+          return {
+            assigned: cand.assigned,
+            unassignedMembers: cand.unassignedMembers || [],
+          };
+        })
+        .filter(Boolean);
+      cards.forEach((c) => considerAsCandidate(c.result));
+      externalCandidates.forEach((asResult) => considerAsCandidate(asResult));
+      if (best) {
+        // best로 카드를 통째로 바꿔치기하면 그 카드는 더 이상 "자기 자신의 탐색"에서 나온
+        // 결과가 아니게 된다 — best 혼자만(pool 1개) 들고 오면 배치 페이저가 사라져버리므로
+        // (실제로 이 문제로 확인됨), best와 정확히 동점인 배치를 카드들의 결과·각자 풀·
+        // 그리디/후보B·C 쪽에서 모두 긁어모아 새 풀을 만든다. best보다 못한 동점 아닌 배치는
+        // 절대 섞지 않는다(동점 풀은 늘 진짜 동점만 보여줘야 한다).
+        const bestSig = schedule2Signature(best);
+        const bestPool = [];
+        const seenTieSig = new Set();
+        function addTie(result) {
+          if (!result) return;
+          if (
+            isSchedule2ResultBetter(best, result) ||
+            isSchedule2ResultBetter(result, best)
+          )
+            return;
+          const sig = schedule2Signature(result);
+          if (seenTieSig.has(sig)) return;
+          seenTieSig.add(sig);
+          if (bestPool.length < MAX_POOL_VARIANTS)
+            bestPool.push(sig === bestSig ? best : result);
+        }
+        addTie(best);
+        cards.forEach((c) => {
+          addTie(c.result);
+          (c.pool || []).forEach(addTie);
+        });
+        externalCandidates.forEach(addTie);
+        for (let g = 0; g < cards.length; g++) {
+          const c = cards[g];
+          if ((g === IDLE_FIRST_CARD_INDEX) !== idleMode) continue;
+          if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
+          if (!isSchedule2ResultBetter(best, c.result)) continue;
+          // bestPool을 그대로(참조로) 나눠주면 여러 카드가 같은 배열을 공유하게 되어, 한
+          // 카드에서 페이저로 다른 배치를 골라(pickCandidateASlot의 pool.unshift 등) 배열을
+          // 바꾸면 다른 카드의 풀까지 조용히 같이 바뀐다 — 카드마다 독립된 복사본을 준다.
+          cards[g] = { result: best, pool: bestPool.slice() };
+        }
       }
+    } finally {
+      setIdleFirst(false);
     }
   }
 

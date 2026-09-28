@@ -1014,6 +1014,13 @@
   }
 
   // src/engine/chainDpCore.js
+  var idleFirst = false;
+  function isIdleFirst() {
+    return idleFirst;
+  }
+  function setIdleFirst(on) {
+    idleFirst = on;
+  }
   function sessionDurationFor2(member) {
     return (member && (member.category || "상담")) === "상담" ? CONSULT_DURATION_MIN_2 : SESSION_DURATION_MIN_2;
   }
@@ -1074,6 +1081,7 @@
         if (ineffA !== ineffB) return ineffA < ineffB;
         if (dpA !== dpB) return dpA > dpB;
       }
+      if (idleFirst && idleA !== idleB) return idleA < idleB;
       if (tcA !== tcB) return tcA < tcB;
       if (tmA !== tmB) return tmA < tmB;
       if (idleA !== idleB) return idleA < idleB;
@@ -1187,6 +1195,7 @@
       return a.assigned.length > b.assigned.length;
     const travelCountA = totalTravelCount(a.assigned), travelCountB = totalTravelCount(b.assigned);
     const idleA = schedule2TotalIdleMinutes(a.assigned), idleB = schedule2TotalIdleMinutes(b.assigned);
+    if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
     if (travelCountA !== travelCountB) {
       const netA = travelCountA * TRAVEL_VALUE_MINUTES + idleA;
       const netB = travelCountB * TRAVEL_VALUE_MINUTES + idleB;
@@ -1334,6 +1343,7 @@
     const travelCountOnly = !!options.travelCountOnly;
     const forceOnceMemberIds = options.forceOnceMemberIds ? new Set(options.forceOnceMemberIds) : null;
     const externalDayOrder = options.stage1DayOrder || null;
+    const forbidInefficient = !!options.forbidInefficient;
     const soloTravelIds = soloTravelMemberIds();
     const ineffInfo = inefficientRoundTripLocationInfo();
     const priorityRank = new Map(eligibleReqs.map((r, i) => [r.id, i]));
@@ -1474,6 +1484,8 @@
                   prevNode.locationId,
                   node.locationId
                 ) ? 1 : 0);
+                if (forbidInefficient && resultIneffCount > prevNode.ineffCount)
+                  continue;
                 if (!bestPrev || isBetterPair(
                   prevNode.dp,
                   tc,
@@ -1593,6 +1605,7 @@
                 node.locationId,
                 endBefore.locationId
               ) ? 1 : 0);
+              if (forbidInefficient && nodeIneffCount > node.ineffCount) continue;
               const nodeTimeCost = timeCostOf(node);
               const chosenTimeCost = chosen ? timeCostOf(chosen) : null;
               if (!chosen || isBetterPair(
@@ -1663,7 +1676,7 @@
               if (actual < need || actual > need + allowGapMin) return;
               const cost = travelMinutes(chainEnd.locationId, locId);
               if (chainEndIsSoloTravelMember && cost > 0) return;
-              if (!coveragePriority && isInefficientRoundTrip(
+              if ((forbidInefficient || !coveragePriority) && isInefficientRoundTrip(
                 ineffInfo,
                 chainTwoBackLoc,
                 chainEnd.locationId,
@@ -1719,6 +1732,8 @@
         if (frontChain.length === 0) return;
         const combined = [...frontChain, ...chain];
         if (dailyTravelCount(combined) > maxTravelsPerDay) return;
+        if (forbidInefficient && dailyInefficientMoveCount(combined, ineffInfo) > dailyInefficientMoveCount(chain, ineffInfo))
+          return;
         if (maxTravelsPerWeek != null && weeklyTravelUsedExcluding(day) + dailyTravelCount(combined) > maxTravelsPerWeek)
           return;
         frontChain.forEach((s) => {
@@ -1963,6 +1978,9 @@
       sessionCountFirst: !options.sessionCountFirst
     });
     consider(flippedOptions);
+    [options, flippedOptions].forEach(
+      (o) => consider(Object.assign({}, o, { forbidInefficient: true }))
+    );
     if (state.locations.length >= 2) {
       [options, flippedOptions].forEach((optsVariant) => {
         DAYS.forEach((d, day) => {
@@ -2720,7 +2738,10 @@
       }
     }
     if (runPolish) {
-      let dayIdleMinutes = function(chain) {
+      let fewerTravelOrIdle = function(travelA, idleA, travelB, idleB) {
+        if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
+        return travelA < travelB;
+      }, dayIdleMinutes = function(chain) {
         const sorted = [...chain].sort((a, b) => a.startSlot - b.startSlot);
         let idle = 0;
         for (let i = 1; i < sorted.length; i++) {
@@ -2736,6 +2757,7 @@
         ineffA = ineffA || 0;
         ineffB = ineffB || 0;
         if (ineffA !== ineffB) return ineffA < ineffB;
+        if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
         const scoreA = travelA * TRAVEL_VALUE_MINUTES + idleA;
         const scoreB = travelB * TRAVEL_VALUE_MINUTES + idleB;
         if (scoreA !== scoreB) return scoreA < scoreB;
@@ -2745,6 +2767,7 @@
         deltaIneff = deltaIneff || 0;
         if (deltaIneff > 0) return false;
         if (deltaIneff < 0) return true;
+        if (isIdleFirst() && deltaIdle !== 0) return deltaIdle < 0;
         if (deltaTravel > 0) return false;
         if (deltaTravel === 0) return deltaIdle < 0;
         return deltaIdle <= -deltaTravel * TRAVEL_VALUE_MINUTES;
@@ -2824,7 +2847,11 @@
               deltaIdle = currentDayWithoutIdle + dayIdleMinutes(newChain) - (beforeCurrentDayIdle + beforeTargetDayIdle);
               deltaIneff = currentDayWithoutIneff + dailyInefficientMoveCount(newChain, ineffInfo) - (beforeCurrentDayIneff + beforeTargetDayIneff);
             }
-            const improves = travelIdleImproves(deltaTravel, deltaIdle, deltaIneff);
+            const improves = travelIdleImproves(
+              deltaTravel,
+              deltaIdle,
+              deltaIneff
+            );
             if (improves && (!bestMove || isTravelIdleBetter(
               deltaTravel,
               deltaIdle,
@@ -3211,6 +3238,7 @@
                 0
               ),
               pairTravel: totalTravelCount(firstChain) + totalTravelCount(secondChain),
+              pairIdle: dayIdleMinutes(firstChain) + dayIdleMinutes(secondChain),
               pairIneff: dailyInefficientMoveCount(firstChain, ineffInfo) + dailyInefficientMoveCount(secondChain, ineffInfo),
               chainA: firstDay === dayA ? firstChain : secondChain,
               chainB: firstDay === dayA ? secondChain : firstChain
@@ -3232,6 +3260,7 @@
             0
           );
           const beforePairTravel = totalTravelCount(existingA) + totalTravelCount(existingB);
+          const beforePairIdle = dayIdleMinutes(existingA) + dayIdleMinutes(existingB);
           const beforePairIneff = dailyInefficientMoveCount(existingA, ineffInfo) + dailyInefficientMoveCount(existingB, ineffInfo);
           existingA.forEach((node) => uncommit(dayA, node));
           existingB.forEach((node) => uncommit(dayB, node));
@@ -3252,9 +3281,20 @@
             if (opt.pairIneff > beforePairIneff) return;
             if (opt.pairIneff === beforePairIneff) {
               if (opt.totalSessions < beforeTotalSessions) return;
-              if (opt.pairTravel >= beforePairTravel) return;
+              if (!fewerTravelOrIdle(
+                opt.pairTravel,
+                opt.pairIdle,
+                beforePairTravel,
+                beforePairIdle
+              ))
+                return;
             }
-            const better = !bestOption || opt.pairIneff < bestOption.pairIneff || opt.pairIneff === bestOption.pairIneff && opt.pairTravel < bestOption.pairTravel;
+            const better = !bestOption || opt.pairIneff < bestOption.pairIneff || opt.pairIneff === bestOption.pairIneff && fewerTravelOrIdle(
+              opt.pairTravel,
+              opt.pairIdle,
+              bestOption.pairTravel,
+              bestOption.pairIdle
+            );
             if (better) bestOption = opt;
           });
           if (bestOption) {
@@ -3283,10 +3323,15 @@
         (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),
         0
       );
+      const baselineIdle = Array.from(dayChains.values()).reduce(
+        (sum, c) => sum + dayIdleMinutes(c),
+        0
+      );
       let bestSnapshot = {
         unassigned: baselineUnassigned,
         sessions: baselineSessions,
         travel: baselineTravel,
+        idle: baselineIdle,
         ineff: baselineIneff,
         chains: new Map(dayChains)
       };
@@ -3323,12 +3368,22 @@
           (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),
           0
         );
-        const accept = attemptUnassigned <= bestSnapshot.unassigned && (attemptIneff < bestSnapshot.ineff || attemptIneff === bestSnapshot.ineff && attemptSessions >= bestSnapshot.sessions && attemptTravel < bestSnapshot.travel);
+        const attemptIdle = Array.from(dayChains.values()).reduce(
+          (sum, c) => sum + dayIdleMinutes(c),
+          0
+        );
+        const accept = attemptUnassigned <= bestSnapshot.unassigned && (attemptIneff < bestSnapshot.ineff || attemptIneff === bestSnapshot.ineff && attemptSessions >= bestSnapshot.sessions && fewerTravelOrIdle(
+          attemptTravel,
+          attemptIdle,
+          bestSnapshot.travel,
+          bestSnapshot.idle
+        ));
         if (accept) {
           bestSnapshot = {
             unassigned: attemptUnassigned,
             sessions: attemptSessions,
             travel: attemptTravel,
+            idle: attemptIdle,
             ineff: attemptIneff,
             chains: new Map(dayChains)
           };
@@ -3510,7 +3565,7 @@
           if (deltaIneff < 0) return true;
           return cost <= 0 || saRandomFn() < Math.exp(-cost / temperature);
         };
-        const SA_TRAVEL_WEIGHT = TRAVEL_VALUE_MINUTES;
+        const SA_TRAVEL_WEIGHT = isIdleFirst() ? 0.01 : TRAVEL_VALUE_MINUTES;
         const saRandomFn = mulberry32(552233 + seedOffset);
         const SA_START_TEMP = 200, SA_END_TEMP = 1;
         const saStart = now();
@@ -3553,8 +3608,8 @@
             const curTravel = saTotalTravel();
             const curIdle = saTotalIdle();
             const curIneff = saTotalIneff();
-            const curScore = curTravel * TRAVEL_VALUE_MINUTES + curIdle;
-            const bestScore = bestTravelSA * TRAVEL_VALUE_MINUTES + bestIdleSA;
+            const curScore = curTravel * SA_TRAVEL_WEIGHT + curIdle;
+            const bestScore = bestTravelSA * SA_TRAVEL_WEIGHT + bestIdleSA;
             if (curIneff < bestIneffSA || curIneff === bestIneffSA && (curScore < bestScore || curScore === bestScore && curTravel < bestTravelSA)) {
               bestTravelSA = curTravel;
               bestIdleSA = curIdle;
@@ -3643,6 +3698,7 @@
 
   // src/engine/chainDp.js
   var SCHEDULE2_CARD_COUNT = 3;
+  var IDLE_FIRST_CARD_INDEX = 2;
   var TEST_BUDGET_SCALE = typeof window !== "undefined" && window.__PT_TEST_BUDGET_SCALE__ > 0 && window.__PT_TEST_BUDGET_SCALE__ <= 1 && window.__PT_TEST_BUDGET_SCALE__ || 1;
   function scaledBudgetMs(fullMs, minMs) {
     return Math.max(minMs, Math.round(fullMs * TEST_BUDGET_SCALE));
@@ -3857,63 +3913,78 @@
     for (let g = 0; g < SCHEDULE2_CARD_COUNT; g++) {
       const groupSeed = 20260823 + g * 104729;
       const groupStart = GREEDY_BASELINE_PROGRESS_SHARE + g / SCHEDULE2_CARD_COUNT * cardProgressShare;
-      const card = await runSchedule2RestartGroup(
-        eligibleReqs,
-        groupSeed,
-        g,
-        (p) => {
-          if (onProgress)
-            onProgress(groupStart + p / SCHEDULE2_CARD_COUNT * cardProgressShare);
-        },
-        targetFloor
-      );
+      let card;
+      setIdleFirst(g === IDLE_FIRST_CARD_INDEX);
+      try {
+        card = await runSchedule2RestartGroup(
+          eligibleReqs,
+          groupSeed,
+          g,
+          (p) => {
+            if (onProgress)
+              onProgress(
+                groupStart + p / SCHEDULE2_CARD_COUNT * cardProgressShare
+              );
+          },
+          targetFloor
+        );
+      } finally {
+        setIdleFirst(false);
+      }
       cards.push(
         card || { result: { assigned: [], unassignedMembers: [] }, pool: [] }
       );
       if (card && card.result && floorIsBetter(card.result, targetFloor))
         targetFloor = card.result;
     }
-    if (targetFloor) {
-      let considerAsCandidate = function(result) {
-        if (!result || floorIsBetter(targetFloor, result)) return;
-        if (!best || isSchedule2ResultBetter(result, best)) best = result;
-      };
-      let best = null;
-      const externalCandidates = (greedyBaseline.built || []).concat(runtime.candidates || []).concat([].concat(...greedyBaseline.pools || [])).map((cand) => {
-        if (!cand || !cand.assigned) return null;
-        return {
-          assigned: cand.assigned,
-          unassignedMembers: cand.unassignedMembers || []
+    for (const idleMode of [false, true]) {
+      if (!targetFloor) break;
+      setIdleFirst(idleMode);
+      try {
+        let considerAsCandidate = function(result) {
+          if (!result || floorIsBetter(targetFloor, result)) return;
+          if (!best || isSchedule2ResultBetter(result, best)) best = result;
         };
-      }).filter(Boolean);
-      cards.forEach((c) => considerAsCandidate(c.result));
-      externalCandidates.forEach((asResult) => considerAsCandidate(asResult));
-      if (best) {
-        let addTie = function(result) {
-          if (!result) return;
-          if (isSchedule2ResultBetter(best, result) || isSchedule2ResultBetter(result, best))
-            return;
-          const sig = schedule2Signature(result);
-          if (seenTieSig.has(sig)) return;
-          seenTieSig.add(sig);
-          if (bestPool.length < MAX_POOL_VARIANTS)
-            bestPool.push(sig === bestSig ? best : result);
-        };
-        const bestSig = schedule2Signature(best);
-        const bestPool = [];
-        const seenTieSig = /* @__PURE__ */ new Set();
-        addTie(best);
-        cards.forEach((c) => {
-          addTie(c.result);
-          (c.pool || []).forEach(addTie);
-        });
-        externalCandidates.forEach(addTie);
-        for (let g = 0; g < cards.length; g++) {
-          const c = cards[g];
-          if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
-          if (!isSchedule2ResultBetter(best, c.result)) continue;
-          cards[g] = { result: best, pool: bestPool.slice() };
+        let best = null;
+        const externalCandidates = (greedyBaseline.built || []).concat(runtime.candidates || []).concat([].concat(...greedyBaseline.pools || [])).map((cand) => {
+          if (!cand || !cand.assigned) return null;
+          return {
+            assigned: cand.assigned,
+            unassignedMembers: cand.unassignedMembers || []
+          };
+        }).filter(Boolean);
+        cards.forEach((c) => considerAsCandidate(c.result));
+        externalCandidates.forEach((asResult) => considerAsCandidate(asResult));
+        if (best) {
+          let addTie = function(result) {
+            if (!result) return;
+            if (isSchedule2ResultBetter(best, result) || isSchedule2ResultBetter(result, best))
+              return;
+            const sig = schedule2Signature(result);
+            if (seenTieSig.has(sig)) return;
+            seenTieSig.add(sig);
+            if (bestPool.length < MAX_POOL_VARIANTS)
+              bestPool.push(sig === bestSig ? best : result);
+          };
+          const bestSig = schedule2Signature(best);
+          const bestPool = [];
+          const seenTieSig = /* @__PURE__ */ new Set();
+          addTie(best);
+          cards.forEach((c) => {
+            addTie(c.result);
+            (c.pool || []).forEach(addTie);
+          });
+          externalCandidates.forEach(addTie);
+          for (let g = 0; g < cards.length; g++) {
+            const c = cards[g];
+            if (g === IDLE_FIRST_CARD_INDEX !== idleMode) continue;
+            if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
+            if (!isSchedule2ResultBetter(best, c.result)) continue;
+            cards[g] = { result: best, pool: bestPool.slice() };
+          }
         }
+      } finally {
+        setIdleFirst(false);
       }
     }
     if (onProgress) onProgress(1);
@@ -6653,8 +6724,9 @@
       columnEl.appendChild(card);
     }
     for (let i = 0; i < SCHEDULE2_CARD_COUNT; i++) {
-      const aTitle = "후보A-" + (i + 1) + " - 인원 최대 (빈 시간 허용)";
-      const aDesc = "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.";
+      const idleFirstCard = i === IDLE_FIRST_CARD_INDEX;
+      const aTitle = "후보A-" + (i + 1) + (idleFirstCard ? " - 인원 최대 (빈 시간 최소화)" : " - 인원 최대 (빈 시간 허용)");
+      const aDesc = idleFirstCard ? "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 빈 시간 최소 → 이동 횟수 최저 순으로 배정합니다." : "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.";
       const a = runtime.schedule3Result.candidateAList[i];
       if (a) {
         buildCard(
@@ -6813,11 +6885,17 @@
         const prev = prevCandidateAList[i] || null;
         const fresh = result.genA && result.candidateAList ? result.candidateAList[i] : null;
         if (fresh) {
-          const picked = pickCandidateASlot(
-            prev,
-            fresh,
-            result.candidateAPools && result.candidateAPools[i]
-          );
+          setIdleFirst(i === IDLE_FIRST_CARD_INDEX);
+          let picked;
+          try {
+            picked = pickCandidateASlot(
+              prev,
+              fresh,
+              result.candidateAPools && result.candidateAPools[i]
+            );
+          } finally {
+            setIdleFirst(false);
+          }
           candidateAList.push(picked.candidate);
           if (picked.pool !== null) candidateAPools[i] = picked.pool;
         } else {

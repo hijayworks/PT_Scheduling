@@ -201,6 +201,10 @@ export function greedyAssign(eligibleReqs, options, pinned) {
   // 무작위로 섞어 넘겨줄 수 있다 — minimizeUnassigned의 "대안이 좁은 요일부터" 순서와 마찬가지로
   // runWithGapPolicy가 기본 순서와 비교해 실제로 더 나을 때만 채택한다(아래 참고).
   const externalDayOrder = options.stage1DayOrder || null;
+  // 비효율 이동(아래 ineffInfo 참고)을 우선순위가 아니라 하드 제약으로 막는다 — 1단계
+  // 커버리지에서도 비효율 체인을 아예 만들지 않아, 그 회원을 다른 요일에서 받도록 유도한다.
+  // strengthenCandidate가 "미배정 없음 + 비효율 없음" 조합을 찾으려고 추가로 시도할 때만 켠다.
+  const forbidInefficient = !!options.forbidInefficient;
 
   // 숨김 하드 로직(회원 개인 사정으로 인한 예외, 후보 조건에는 노출하지 않음): 상암점·여의도점·
   // 마포점 세 지점을 모두 다니는 회원은 "이동-회원-이동"(도착도 이동, 떠날 때도 이동 — 그
@@ -525,6 +529,8 @@ export function greedyAssign(eligibleReqs, options, pinned) {
                 )
                   ? 1
                   : 0);
+              if (forbidInefficient && resultIneffCount > prevNode.ineffCount)
+                continue;
               if (
                 !bestPrev ||
                 isBetterPair(
@@ -687,6 +693,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
               )
                 ? 1
                 : 0);
+            if (forbidInefficient && nodeIneffCount > node.ineffCount) continue;
             const nodeTimeCost = timeCostOf(node);
             const chosenTimeCost = chosen ? timeCostOf(chosen) : null;
             if (
@@ -787,7 +794,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
             // (우선순위 2가 3보다 우선). coveragePriority면(진짜 커버리지 단계) 인원을
             // 놓치지 않는 게 더 중요하므로 이 제한을 두지 않는다.
             if (
-              !coveragePriority &&
+              (forbidInefficient || !coveragePriority) &&
               isInefficientRoundTrip(
                 ineffInfo,
                 chainTwoBackLoc,
@@ -869,6 +876,12 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       if (frontChain.length === 0) return;
       const combined = [...frontChain, ...chain];
       if (dailyTravelCount(combined) > maxTravelsPerDay) return;
+      if (
+        forbidInefficient &&
+        dailyInefficientMoveCount(combined, ineffInfo) >
+          dailyInefficientMoveCount(chain, ineffInfo)
+      )
+        return;
       if (
         maxTravelsPerWeek != null &&
         weeklyTravelUsedExcluding(day) + dailyTravelCount(combined) >
@@ -1260,6 +1273,14 @@ export function strengthenCandidate(
     sessionCountFirst: !options.sessionCountFirst,
   });
   consider(flippedOptions);
+  // 1단계 커버리지는 요일마다 "인원 > 비효율 이동" 순으로 그리디하게 확정하므로, 다른
+  // 요일에서 비효율 없이 받을 수 있는 회원을 앞 요일의 비효율 체인으로 먼저 잡아버릴 수
+  // 있다. 비효율 이동을 하드 금지한 채로도 돌려보면 "미배정 없음 + 비효율 없음" 조합이
+  // 실제로 있을 때 그걸 찾는다 — 인원이 줄면 score 비교에서 자연히 탈락한다.
+  // ponytail: 기본/뒤집은 순서 2가지만 시도, day×지점 사전 배정까지 곱하면 비용이 2배.
+  [options, flippedOptions].forEach((o) =>
+    consider(Object.assign({}, o, { forbidInefficient: true })),
+  );
 
   if (state.locations.length >= 2) {
     [options, flippedOptions].forEach((optsVariant) => {

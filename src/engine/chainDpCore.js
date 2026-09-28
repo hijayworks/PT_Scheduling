@@ -27,6 +27,17 @@ import { candidateLocationsForRequest } from "./greedy.js";
      공통으로 이 모듈에 의존한다 — chainDp.js의 크기를 줄이려고 원래 그 파일에 있던 걸
      그대로 옮긴 것으로, 로직 자체는 바뀌지 않았다. */
 
+// "빈 시간 최소화" 후보A 카드(chainDp.js의 IDLE_FIRST_CARD_INDEX)를 만드는 동안만 켜진다 — 켜져 있으면 체인 DP·다듬기·결과 비교
+// 전 단계가 "미배정 → 비효율 이동 → 수업 수" 다음에 이동 횟수보다 빈 시간을 먼저 본다.
+// 카드는 한 장씩 순서대로(await) 만들어지므로 모듈 전역 플래그로 충분하다.
+let idleFirst = false;
+export function isIdleFirst() {
+  return idleFirst;
+}
+export function setIdleFirst(on) {
+  idleFirst = on;
+}
+
 export function sessionDurationFor2(member) {
   return (member && (member.category || "상담")) === "상담"
     ? CONSULT_DURATION_MIN_2
@@ -150,6 +161,7 @@ export function runChainDP(
       if (ineffA !== ineffB) return ineffA < ineffB;
       if (dpA !== dpB) return dpA > dpB;
     }
+    if (idleFirst && idleA !== idleB) return idleA < idleB;
     if (tcA !== tcB) return tcA < tcB;
     if (tmA !== tmB) return tmA < tmB;
     if (idleA !== idleB) return idleA < idleB;

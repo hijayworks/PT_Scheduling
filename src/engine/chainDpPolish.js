@@ -18,6 +18,7 @@ import {
   requiredGapMin2,
   buildDayNodes,
   runChainDP,
+  isIdleFirst,
 } from "./chainDpCore.js";
 import { mulberry32, shuffled } from "./rng.js";
 
@@ -547,7 +548,8 @@ export async function runSchedule2Pipeline(
       const worse =
         stillUnassignedIds().length > beforeUnassignedCount ||
         afterIneff > beforeIneff ||
-        (afterIneff === beforeIneff && afterTotalSessions < beforeTotalSessions);
+        (afterIneff === beforeIneff &&
+          afterTotalSessions < beforeTotalSessions);
       if (worse) {
         newChain.forEach((node) => uncommit(day, node));
         existingChain.forEach((node) => commit(day, node));
@@ -567,6 +569,12 @@ export async function runSchedule2Pipeline(
     // 둘 다 월·금 모두 가능한데 어느 요일에 누가 들어가느냐로 이동 횟수가 갈리는 경우)를
     // 이 결정론적 동점 처리로는 절대 못 찾는다. 그래서 순서 2가지 외에도 지터를 준 여러
     // 조합을 추가로 시도해 동점을 다르게 풀어본다.
+    // 6·6.5단계가 "이동이 더 적은가"를 볼 때 쓰는 기준 — 빈 시간 최소화 카드에서는
+    // 빈 시간을 먼저 보고, 같을 때만 이동 횟수를 본다.
+    function fewerTravelOrIdle(travelA, idleA, travelB, idleB) {
+      if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
+      return travelA < travelB;
+    }
     const stage6RandomFn = mulberry32(445566 + seedOffset);
     stage6: for (
       let i = 0;
@@ -587,6 +595,8 @@ export async function runSchedule2Pipeline(
         );
         const beforePairTravel =
           totalTravelCount(existingA) + totalTravelCount(existingB);
+        const beforePairIdle =
+          dayIdleMinutes(existingA) + dayIdleMinutes(existingB);
         const beforePairIneff =
           dailyInefficientMoveCount(existingA, ineffInfo) +
           dailyInefficientMoveCount(existingB, ineffInfo);
@@ -630,6 +640,7 @@ export async function runSchedule2Pipeline(
             ),
             pairTravel:
               totalTravelCount(firstChain) + totalTravelCount(secondChain),
+            pairIdle: dayIdleMinutes(firstChain) + dayIdleMinutes(secondChain),
             pairIneff:
               dailyInefficientMoveCount(firstChain, ineffInfo) +
               dailyInefficientMoveCount(secondChain, ineffInfo),
@@ -660,13 +671,27 @@ export async function runSchedule2Pipeline(
           if (opt.pairIneff === beforePairIneff) {
             // 비효율 이동이 그대로일 때만 기존처럼 수업 수·이동 시간으로 판단한다.
             if (opt.totalSessions < beforeTotalSessions) return;
-            if (opt.pairTravel >= beforePairTravel) return; // 개선되지 않으면 굳이 바꾸지 않는다
+            // 개선되지 않으면 굳이 바꾸지 않는다
+            if (
+              !fewerTravelOrIdle(
+                opt.pairTravel,
+                opt.pairIdle,
+                beforePairTravel,
+                beforePairIdle,
+              )
+            )
+              return;
           }
           const better =
             !bestOption ||
             opt.pairIneff < bestOption.pairIneff ||
             (opt.pairIneff === bestOption.pairIneff &&
-              opt.pairTravel < bestOption.pairTravel);
+              fewerTravelOrIdle(
+                opt.pairTravel,
+                opt.pairIdle,
+                bestOption.pairTravel,
+                bestOption.pairIdle,
+              ));
           if (better) bestOption = opt;
         });
 
@@ -704,10 +729,15 @@ export async function runSchedule2Pipeline(
       (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),
       0,
     );
+    const baselineIdle = Array.from(dayChains.values()).reduce(
+      (sum, c) => sum + dayIdleMinutes(c),
+      0,
+    );
     let bestSnapshot = {
       unassigned: baselineUnassigned,
       sessions: baselineSessions,
       travel: baselineTravel,
+      idle: baselineIdle,
       ineff: baselineIneff,
       chains: new Map(dayChains),
     };
@@ -752,6 +782,10 @@ export async function runSchedule2Pipeline(
         (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),
         0,
       );
+      const attemptIdle = Array.from(dayChains.values()).reduce(
+        (sum, c) => sum + dayIdleMinutes(c),
+        0,
+      );
       // 비효율 이동이 줄면(우선순위 2) 수업 수·이동 시간이 나빠져도 받아들인다 — 비효율
       // 이동이 그대로일 때만 기존처럼 수업 수·이동 시간으로 판단한다.
       const accept =
@@ -759,12 +793,18 @@ export async function runSchedule2Pipeline(
         (attemptIneff < bestSnapshot.ineff ||
           (attemptIneff === bestSnapshot.ineff &&
             attemptSessions >= bestSnapshot.sessions &&
-            attemptTravel < bestSnapshot.travel));
+            fewerTravelOrIdle(
+              attemptTravel,
+              attemptIdle,
+              bestSnapshot.travel,
+              bestSnapshot.idle,
+            )));
       if (accept) {
         bestSnapshot = {
           unassigned: attemptUnassigned,
           sessions: attemptSessions,
           travel: attemptTravel,
+          idle: attemptIdle,
           ineff: attemptIneff,
           chains: new Map(dayChains),
         };
@@ -808,10 +848,18 @@ export async function runSchedule2Pipeline(
     // TRAVEL_VALUE_MINUTES분으로 쳐서 하나의 점수로 합쳐 비교한다(이동이 줄어도 그 대가로
     // 늘어난 빈 시간이 너무 크면 더 나은 것으로 치지 않는다). ineffA/ineffB(비효율 이동
     // 횟수, 기본 0)는 이동·빈 시간보다 먼저 비교한다(우선순위 2가 4보다 우선).
-    function isTravelIdleBetter(travelA, idleA, travelB, idleB, ineffA, ineffB) {
+    function isTravelIdleBetter(
+      travelA,
+      idleA,
+      travelB,
+      idleB,
+      ineffA,
+      ineffB,
+    ) {
       ineffA = ineffA || 0;
       ineffB = ineffB || 0;
       if (ineffA !== ineffB) return ineffA < ineffB;
+      if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
       const scoreA = travelA * TRAVEL_VALUE_MINUTES + idleA;
       const scoreB = travelB * TRAVEL_VALUE_MINUTES + idleB;
       if (scoreA !== scoreB) return scoreA < scoreB;
@@ -827,6 +875,7 @@ export async function runSchedule2Pipeline(
       deltaIneff = deltaIneff || 0;
       if (deltaIneff > 0) return false;
       if (deltaIneff < 0) return true;
+      if (isIdleFirst() && deltaIdle !== 0) return deltaIdle < 0;
       if (deltaTravel > 0) return false;
       if (deltaTravel === 0) return deltaIdle < 0;
       return deltaIdle <= -deltaTravel * TRAVEL_VALUE_MINUTES;
@@ -943,7 +992,11 @@ export async function runSchedule2Pipeline(
               dailyInefficientMoveCount(newChain, ineffInfo) -
               (beforeCurrentDayIneff + beforeTargetDayIneff);
           }
-          const improves = travelIdleImproves(deltaTravel, deltaIdle, deltaIneff);
+          const improves = travelIdleImproves(
+            deltaTravel,
+            deltaIdle,
+            deltaIneff,
+          );
           if (
             improves &&
             (!bestMove ||
@@ -1448,7 +1501,9 @@ export async function runSchedule2Pipeline(
       }
       // 이동 1번의 "무게"를 TRAVEL_VALUE_MINUTES분과 같게 쳐서 비용을 하나의 숫자로
       // 합친다 — 이동 1번을 줄이는 대가로 이보다 더 큰 빈 시간이 필요하면 손해로 친다.
-      const SA_TRAVEL_WEIGHT = TRAVEL_VALUE_MINUTES;
+      // 빈 시간 최소화 카드에서는 이동 1번을 0.01분으로만 쳐서, 빈 시간(10분 단위)이
+      // 같을 때의 동점 처리에만 쓰이게 한다.
+      const SA_TRAVEL_WEIGHT = isIdleFirst() ? 0.01 : TRAVEL_VALUE_MINUTES;
 
       function pickRandomNode(randomFn) {
         const all = Array.from(dayChains.values()).flat();
@@ -1729,8 +1784,8 @@ export async function runSchedule2Pipeline(
           // "지금까지 최선"도 이동-빈 시간 트레이드오프에 같은 상한을 적용해 비교한다 —
           // 안 그러면 담금질이 잠깐 받아들인, 이동은 줄었지만 빈 시간이 과도하게 늘어난
           // 상태가 최종 결과로 굳어버릴 수 있다. 비효율 이동은 그보다 먼저 비교한다.
-          const curScore = curTravel * TRAVEL_VALUE_MINUTES + curIdle;
-          const bestScore = bestTravelSA * TRAVEL_VALUE_MINUTES + bestIdleSA;
+          const curScore = curTravel * SA_TRAVEL_WEIGHT + curIdle;
+          const bestScore = bestTravelSA * SA_TRAVEL_WEIGHT + bestIdleSA;
           if (
             curIneff < bestIneffSA ||
             (curIneff === bestIneffSA &&

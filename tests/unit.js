@@ -322,6 +322,19 @@ test("greedyAssign 우선순위: 미배정 인원 없음이 비효율 이동 최
   );
 });
 
+test("greedyAssign forbidInefficient: 다른 요일로 돌려 미배정 없음 + 비효율 없음을 찾는다", () => {
+  // C가 화요일에도 신청했다 — 기본 커버리지는 월요일에서 A>B>C 비효율 체인으로 C를 먼저 잡지만,
+  // 비효율을 하드 금지하면 C를 화요일로 보내 둘 다 만족한다.
+  const reqs = ineffPriorityFixture().concat([
+    { id: "c2", memberId: "C", day: 1, startSlot: 0, duration: 60 },
+  ]);
+  const info = lib.inefficientRoundTripLocationInfo();
+  assertEqual(lib.totalInefficientMoveCount(lib.greedyAssign(reqs, {}, []), info), 1);
+  const forbid = lib.greedyAssign(reqs, { forbidInefficient: true }, []);
+  assertEqual(new Set(forbid.map((r) => r.memberId)).size, 3);
+  assertEqual(lib.totalInefficientMoveCount(forbid, info), 0);
+});
+
 /* ---------------- isSchedule2ResultBetter: 비효율 이동 우선순위 ---------------- */
 test("isSchedule2ResultBetter: 미배정이 같으면 비효율 이동이 적은 쪽이 수업 수보다 우선", () => {
   lib.state.locations = ineffLocations();
@@ -346,6 +359,22 @@ test("isSchedule2ResultBetter: 미배정이 같으면 비효율 이동이 적은
     "비효율 왕복이 없는 쪽이 수업 수가 적어도 이겨야 함",
   );
   assert(!lib.isSchedule2ResultBetter(moreSessionsButIneff, fewerSessionsNoIneff));
+});
+
+test("isSchedule2ResultBetter: 빈 시간 최소화 모드에서는 이동 횟수보다 빈 시간이 우선", () => {
+  lib.state.locations = ineffLocations();
+  lib.state.travelTimes = { [lib.pairKey("M", "S")]: 20 };
+  const s = (memberId, startSlot, locationId) => ({ memberId, day: 0, startSlot, locationId, duration: 50 });
+  // 이동 0·빈 시간 50분 vs 이동 1(20분)·빈 시간 0분
+  const noTravelIdle50 = scheduleResult([s("A", 0, "M"), s("B", 10, "M")], 0);
+  const oneTravelLessIdle = scheduleResult([s("A", 0, "M"), s("B", 7, "S")], 0);
+  assert(lib.isSchedule2ResultBetter(noTravelIdle50, oneTravelLessIdle), "기본 모드는 이동 1번 = 60분");
+  lib.setIdleFirst(true);
+  try {
+    assert(lib.isSchedule2ResultBetter(oneTravelLessIdle, noTravelIdle50), "빈 시간 모드는 빈 시간이 적은 쪽");
+  } finally {
+    lib.setIdleFirst(false);
+  }
 });
 
 /* ---------------- candidateSearchScore: 미배정 → 비효율 이동 → 수업 수 ---------------- */
