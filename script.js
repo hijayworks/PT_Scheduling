@@ -6981,7 +6981,9 @@
   function candidatePreservesConfirmed(prev, candidate) {
     const confirmedIds = prev && Array.isArray(prev.confirmedIds) ? prev.confirmedIds : [];
     if (confirmedIds.length === 0) return true;
-    const assignedIds = new Set(((candidate && candidate.assigned) || []).map((a) => a.id));
+    const assignedIds = new Set(
+      (candidate && candidate.assigned || []).map((a) => a.id)
+    );
     return confirmedIds.every((id) => assignedIds.has(id));
   }
   async function runGenerate3({
