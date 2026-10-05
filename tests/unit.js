@@ -553,5 +553,87 @@ test("removeRequestRun: 지점 블록을 지우면 공통 시각은 다른 지�
   assertEqual(after.map((r) => r.allowed.join("") + " " + lib.slotLabel(r.startSlot)), ["Y 20:00"]);
 });
 
+/* ---------------- 회귀: 후보A 무결성 / migration / 확정 ---------------- */
+test("후보A 빈 시간 압축: 현재 지점에서 가능한 더 이른 신청만 선택", () => {
+  lib.state.members = [
+    { id: "m1", name: "홍", locationIds: ["M", "Y"], category: "등록" },
+  ];
+  const requests = [
+    {
+      id: "m-only",
+      memberId: "m1",
+      day: 0,
+      startSlot: 6,
+      duration: 60,
+      excludedLocationIds: ["Y"],
+    },
+    {
+      id: "y-ok",
+      memberId: "m1",
+      day: 0,
+      startSlot: 8,
+      duration: 60,
+      excludedLocationIds: ["M"],
+    },
+  ];
+  const found = lib.findEarlierRequestForLocation(requests, 6, 10, "Y");
+  assertEqual(found && found.id, "y-ok", "더 이른 마포 전용 신청으로 당기면 안 됨");
+});
+
+test("후보A 빈 시간 압축: 시간 변경 시 request id와 startSlot을 함께 갱신", () => {
+  const node = { id: "old", startSlot: 10, duration: 60, end: 16 };
+  lib.moveNodeToRequest(node, { id: "new", startSlot: 8 });
+  assertEqual(
+    { id: node.id, startSlot: node.startSlot, end: node.end },
+    { id: "new", startSlot: 8, end: 14 },
+  );
+});
+
+test("START_MIN migration: request/근무 슬롯 이동 후 후보A/B/C를 모두 초기화", () => {
+  const parsed = {
+    startMinBase: 13 * 60,
+    availableCells: ["0-0"],
+    requests: [{ id: "r1", startSlot: 0 }],
+    candidates: [{ assigned: [{ id: "b" }] }],
+    schedule3Result: {
+      candidateAList: [{ assigned: [{ id: "a" }] }, null, null],
+    },
+  };
+  lib.migrateStartMinShift(parsed);
+  assertEqual(parsed.availableCells, ["0-6"]);
+  assertEqual(parsed.requests[0].startSlot, 6);
+  assertEqual(parsed.candidates, []);
+  assertEqual(parsed.schedule3Result.candidateAList, [null, null, null]);
+});
+
+test("runtime 후보 전체 초기화: 후보A/B/C가 함께 제거됨", () => {
+  lib.runtime.candidates = [{ id: "b" }];
+  lib.runtime.schedule3Result = {
+    candidateAList: [{ id: "a1" }, { id: "a2" }, null],
+  };
+  lib.clearRuntimeScheduleCandidates();
+  assertEqual(lib.runtime.candidates, []);
+  assertEqual(lib.runtime.schedule3Result.candidateAList, [null, null, null]);
+});
+
+test("후보A 재생성: 확정 request가 빠진 새 후보는 보존 조건을 통과하지 못함", () => {
+  const prev = {
+    assigned: [{ id: "r1" }, { id: "r2" }],
+    confirmedIds: ["r1"],
+  };
+  assert(
+    lib.candidatePreservesConfirmed(prev, {
+      assigned: [{ id: "r1" }, { id: "r3" }],
+    }),
+    "확정 request가 남아 있으면 통과해야 함",
+  );
+  assert(
+    !lib.candidatePreservesConfirmed(prev, {
+      assigned: [{ id: "r2" }, { id: "r3" }],
+    }),
+    "확정 request가 빠진 새 후보는 거부해야 함",
+  );
+});
+
 console.log(pass + "개 통과, " + fail + "개 실패 (단위 테스트)");
 if (fail > 0) process.exit(1);
