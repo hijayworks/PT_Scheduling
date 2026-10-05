@@ -81,6 +81,156 @@ export async function decryptBackupText(base64Text, pin) {
   return new TextDecoder().decode(plainBuf);
 }
 
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function assertArrayField(data, key) {
+  if (data[key] !== undefined && !Array.isArray(data[key]))
+    throw new Error(key + " must be an array");
+}
+
+function assertOptionalStringArray(value, label) {
+  if (value === undefined) return;
+  if (!Array.isArray(value) || value.some((v) => typeof v !== "string"))
+    throw new Error(label + " must be a string array");
+}
+
+// 복원 데이터는 암호화에 성공했다는 이유만으로 신뢰하지 않는다. 구버전 백업과의 호환성을
+// 위해 필드 자체는 optional로 두되, 존재하는 필드는 현재 코드가 안전하게 다룰 수 있는 타입과
+// 참조 관계인지 확인한다. 명백히 손상된 백업은 localStorage에 쓰기 전에 여기서 거부한다.
+export function validateBackupState(data) {
+  if (!isPlainObject(data)) throw new Error("backup root must be an object");
+
+  ["locations", "members", "requests", "availableCells", "candidates"].forEach(
+    (key) => assertArrayField(data, key),
+  );
+  if (data.travelTimes !== undefined && !isPlainObject(data.travelTimes))
+    throw new Error("travelTimes must be an object");
+  if (
+    data.schedule3Result !== undefined &&
+    !isPlainObject(data.schedule3Result)
+  )
+    throw new Error("schedule3Result must be an object");
+
+  assertOptionalStringArray(
+    data.onceLimitedMemberIds3,
+    "onceLimitedMemberIds3",
+  );
+  assertOptionalStringArray(data.excludedMemberIds3, "excludedMemberIds3");
+
+  const locations = data.locations || [];
+  const members = data.members || [];
+  const requests = data.requests || [];
+  const locationIds = new Set();
+  locations.forEach((loc, i) => {
+    if (
+      !isPlainObject(loc) ||
+      typeof loc.id !== "string" ||
+      !loc.id ||
+      typeof loc.name !== "string" ||
+      !loc.name
+    )
+      throw new Error("invalid location at index " + i);
+    if (locationIds.has(loc.id)) throw new Error("duplicate location id");
+    locationIds.add(loc.id);
+  });
+
+  const memberIds = new Set();
+  members.forEach((member, i) => {
+    if (
+      !isPlainObject(member) ||
+      typeof member.id !== "string" ||
+      !member.id ||
+      typeof member.name !== "string"
+    )
+      throw new Error("invalid member at index " + i);
+    if (memberIds.has(member.id)) throw new Error("duplicate member id");
+    memberIds.add(member.id);
+
+    if (member.locationIds !== undefined) {
+      assertOptionalStringArray(member.locationIds, "member.locationIds");
+      if (member.locationIds.some((id) => !locationIds.has(id)))
+        throw new Error("member references unknown location");
+    } else if (
+      member.locationId !== undefined &&
+      (typeof member.locationId !== "string" ||
+        !locationIds.has(member.locationId))
+    ) {
+      throw new Error("member references unknown legacy location");
+    }
+    if (member.memo !== undefined && typeof member.memo !== "string")
+      throw new Error("member.memo must be a string");
+  });
+
+  const requestIds = new Set();
+  requests.forEach((req, i) => {
+    if (
+      !isPlainObject(req) ||
+      typeof req.id !== "string" ||
+      !req.id ||
+      typeof req.memberId !== "string" ||
+      !memberIds.has(req.memberId) ||
+      !Number.isInteger(req.day) ||
+      req.day < 0 ||
+      req.day >= 7 ||
+      !Number.isInteger(req.startSlot) ||
+      req.startSlot < 0 ||
+      typeof req.duration !== "number" ||
+      !Number.isFinite(req.duration) ||
+      req.duration <= 0
+    )
+      throw new Error("invalid request at index " + i);
+    if (requestIds.has(req.id)) throw new Error("duplicate request id");
+    requestIds.add(req.id);
+
+    assertOptionalStringArray(
+      req.extraLocationIds,
+      "request.extraLocationIds",
+    );
+    assertOptionalStringArray(
+      req.excludedLocationIds,
+      "request.excludedLocationIds",
+    );
+    for (const id of (req.extraLocationIds || []).concat(
+      req.excludedLocationIds || [],
+    )) {
+      if (!locationIds.has(id))
+        throw new Error("request references unknown location");
+    }
+  });
+
+  (data.availableCells || []).forEach((key) => {
+    if (typeof key !== "string" || !/^\d+-\d+$/.test(key))
+      throw new Error("invalid available cell");
+    const [day, slot] = key.split("-").map(Number);
+    if (!Number.isInteger(day) || day < 0 || day >= 7 || !Number.isInteger(slot) || slot < 0)
+      throw new Error("invalid available cell range");
+  });
+
+  Object.entries(data.travelTimes || {}).forEach(([key, value]) => {
+    if (
+      typeof value !== "number" ||
+      !Number.isFinite(value) ||
+      value < 0
+    )
+      throw new Error("invalid travel time");
+    const ids = key.split("|");
+    if (
+      ids.length !== 2 ||
+      !locationIds.has(ids[0]) ||
+      !locationIds.has(ids[1])
+    )
+      throw new Error("travel time references unknown location");
+  });
+
+  return data;
+}
+
+export function parseAndValidateBackupText(plainText) {
+  return validateBackupState(JSON.parse(plainText));
+}
+
 export const backupExportBtnEl = document.getElementById("backupExportBtn");
 export const backupExportResultEl =
   document.getElementById("backupExportResult");
@@ -175,20 +325,32 @@ backupImportApplyBtnEl.addEventListener("click", async () => {
     backupImportHintEl.textContent = "백업 코드와 PIN을 모두 입력해주세요.";
     return;
   }
-  let plainText;
+  let parsedBackup;
   try {
-    plainText = await decryptBackupText(code, pin);
-    JSON.parse(plainText); // 형식 검증(손상되거나 PIN이 맞아도 다른 형식의 데이터면 여기서 걸러짐)
-  } catch {
+    const plainText = await decryptBackupText(code, pin);
+    parsedBackup = parseAndValidateBackupText(plainText);
+  } catch (e) {
+    console.warn("backup import validation failed", e);
     backupImportHintEl.textContent =
-      "복원에 실패했습니다. 백업 코드와 PIN을 다시 확인해주세요.";
+      "복원에 실패했습니다. 백업 코드가 손상되었거나 현재 데이터 형식과 맞지 않습니다.";
     return;
   }
   if (
     !confirm("복원하면 이 기기에 현재 저장된 데이터를 덮어씁니다. 계속할까요?")
   )
     return;
+  // 복호화·schema 검증·사용자 확인이 모두 끝난 뒤에야 현재 데이터를 덮어쓴다.
+  // 이 시점 이전에는 localStorage를 전혀 건드리지 않으므로 잘못된 백업으로 현재 데이터가
+  // 손상되지 않는다.
   runtime.suppressAutosave = true;
-  localStorage.setItem(STORAGE_KEY, plainText);
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedBackup));
+  } catch (e) {
+    runtime.suppressAutosave = false;
+    console.warn("backup import save failed", e);
+    backupImportHintEl.textContent =
+      "복원 데이터를 저장하지 못했습니다. 현재 데이터는 그대로 유지됩니다.";
+    return;
+  }
   location.reload();
 });
