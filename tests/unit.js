@@ -93,10 +93,14 @@ test("slotLabel/endLabel: START_MIN(12:00) 기준으로 계산", () => {
 test("pairKey: 인자 순서와 무관하게 같은 키", () => {
   assertEqual(lib.pairKey("a", "b"), lib.pairKey("b", "a"));
 });
-test("travelMinutes: 같은 지점/기록 없음은 0, 등록된 값은 순서 무관", () => {
+test("travelMinutes: 같은 지점은 0, 이동시간 누락은 연결 불가능, 등록된 값은 순서 무관", () => {
   lib.state.travelTimes = {};
   assertEqual(lib.travelMinutes("L1", "L1"), 0);
-  assertEqual(lib.travelMinutes("L1", "L2"), 0); // 기록 없음
+  assertEqual(
+    lib.travelMinutes("L1", "L2"),
+    Infinity,
+    "서로 다른 지점의 이동시간 누락을 0분으로 간주하면 안 됨",
+  );
   lib.state.travelTimes[lib.pairKey("L1", "L2")] = 15;
   assertEqual(lib.travelMinutes("L1", "L2"), 15);
   assertEqual(lib.travelMinutes("L2", "L1"), 15);
@@ -179,10 +183,7 @@ test("runChainDP: 완전히 겹치는 신청 중 가중치가 큰 쪽만 채택�
   ]);
   assertEqual(chain.map((n) => n.id), ["big"]);
 });
-test("runChainDP: 같은 회원이 하루에 두 번 배정되지 않는다(비인접 안전망)", () => {
-  // A(0~2)->B(2~4)->A(4~6): DP 전이 규칙은 '바로 앞' 노드와만 회원 중복을 비교하므로,
-  // A가 인접하지 않게 두 번 낀 조합도 전이 자체는 막히지 않는다 — 최종 조립 단계의
-  // 안전망(runChainDP 안 used Set)이 이걸 걸러내야 한다.
+test("runChainDP: 같은 회원이 비인접 위치에 있어도 전이 단계에서 하루 1회를 지킨다", () => {
   const chain = lib.runChainDP([
     node({ id: "a1", memberId: "A", startSlot: 0, duration: 20, locationId: "L1" }),
     node({ id: "b1", memberId: "B", startSlot: 2, duration: 20, locationId: "L1" }),
@@ -190,6 +191,31 @@ test("runChainDP: 같은 회원이 하루에 두 번 배정되지 않는다(비�
   ]);
   const memberIds = chain.map((n) => n.memberId);
   assertEqual(new Set(memberIds).size, memberIds.length, "회원이 하루에 두 번 배정됨");
+});
+
+test("runChainDP: A→B→A 중복 경로를 3점으로 세어 유효한 3인 체인을 놓치지 않는다", () => {
+  // 입력 순서상 기존 구현은 A1→B→A2를 3점으로 고른 뒤 reconstruction에서 A1을 지워
+  // 2명만 반환할 수 있었다. 동시에 실제 유효한 3인 체인이 있으므로 결과는 반드시 3명이어야 한다.
+  const chain = lib.runChainDP([
+    node({ id: "a1", memberId: "A", startSlot: 0, duration: 20, locationId: "L1" }),
+    node({ id: "c1", memberId: "C", startSlot: 0, duration: 20, locationId: "L1" }),
+    node({ id: "b1", memberId: "B", startSlot: 2, duration: 20, locationId: "L1" }),
+    node({ id: "d1", memberId: "D", startSlot: 2, duration: 20, locationId: "L1" }),
+    node({ id: "a2", memberId: "A", startSlot: 4, duration: 20, locationId: "L1" }),
+    node({ id: "e1", memberId: "E", startSlot: 4, duration: 20, locationId: "L1" }),
+  ]);
+  const memberIds = chain.map((n) => n.memberId);
+  assertEqual(chain.length, 3, "유효한 3인 체인이 있는데 중복 경로 후처리 때문에 2명으로 줄면 안 됨");
+  assertEqual(new Set(memberIds).size, 3, "결과 3명은 모두 서로 다른 회원이어야 함");
+});
+
+test("runChainDP: 이동시간이 누락된 서로 다른 지점 세션은 연속 배정하지 않는다", () => {
+  lib.state.travelTimes = {};
+  const chain = lib.runChainDP([
+    node({ id: "a", memberId: "A", startSlot: 0, duration: 20, locationId: "L1" }),
+    node({ id: "b", memberId: "B", startSlot: 2, duration: 20, locationId: "L2" }),
+  ]);
+  assertEqual(chain.length, 1, "이동시간을 모르는 지점 사이를 0분 이동으로 연결하면 안 됨");
 });
 test("runChainDP: maxTravelsPerDay를 넘는 이동은 거부된다", () => {
   lib.state.travelTimes = {
@@ -214,6 +240,11 @@ test("runChainDP: maxTravelsPerDay를 넘는 이동은 거부된다", () => {
 
 /* ---------------- engine/greedy.js ---------------- */
 test("candidateLocationsForRequest: excludedLocationIds는 기본 지점에서 빼고, extraLocationIds는 더한다", () => {
+  lib.state.locations = [
+    { id: "L1", name: "1" },
+    { id: "L2", name: "2" },
+    { id: "L3", name: "3" },
+  ];
   lib.state.members = [{ id: "m1", locationIds: ["L1", "L2"] }];
   assertEqual(
     lib.candidateLocationsForRequest({ memberId: "m1" }),
@@ -228,6 +259,24 @@ test("candidateLocationsForRequest: excludedLocationIds는 기본 지점에서 �
     }),
     ["L2", "L3"],
     "제외한 기본 지점은 빠지고 추가 지점은 더해짐",
+  );
+});
+
+test("candidateLocationsForRequest: 허용 가능한 실제 지점이 하나도 없으면 빈 배열", () => {
+  lib.state.locations = [{ id: "L1", name: "1" }];
+  lib.state.members = [{ id: "m1", locationIds: ["DELETED"] }];
+  assertEqual(
+    lib.candidateLocationsForRequest({ memberId: "m1" }),
+    [],
+    "삭제된 지점 id를 가짜 null 지점으로 배정하면 안 됨",
+  );
+  assertEqual(
+    lib.candidateLocationsForRequest({
+      memberId: "m1",
+      extraLocationIds: ["ALSO_DELETED"],
+    }),
+    [],
+    "존재하지 않는 추가 지점도 후보에 포함하면 안 됨",
   );
 });
 
