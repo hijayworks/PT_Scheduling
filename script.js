@@ -6856,7 +6856,9 @@
       if (result.unassignedMembers.length > 0) {
         const box = document.createElement("div");
         box.className = "unassigned-box unassigned-box-danger";
-        box.innerHTML = "<b>미배정 회원 (" + result.unassignedMembers.length + "명)</b> · " + result.unassignedMembers.map((m) => m.name).join(", ");
+        const title = document.createElement("b");
+        title.textContent = "미배정 회원 (" + result.unassignedMembers.length + "명)";
+        box.append(title, " · ", result.unassignedMembers.map((m) => m.name).join(", "));
         card.appendChild(box);
       }
       const sessionsByMember = /* @__PURE__ */ new Map();
@@ -6887,7 +6889,13 @@
       if (doubleAssignedMembers.length > 0) {
         const box = document.createElement("div");
         box.className = "unassigned-box double-assigned-box";
-        box.innerHTML = "<b>2회 배정 회원 (" + doubleAssignedMembers.length + "명)</b> · " + doubleAssignedMembers.map((d) => d.locLabel + " " + d.member.name).join(", ");
+        const title = document.createElement("b");
+        title.textContent = "2회 배정 회원 (" + doubleAssignedMembers.length + "명)";
+        box.append(
+          title,
+          " · ",
+          doubleAssignedMembers.map((d) => d.locLabel + " " + d.member.name).join(", ")
+        );
         card.appendChild(box);
       }
       columnEl.appendChild(card);
@@ -7600,6 +7608,95 @@
     );
     return new TextDecoder().decode(plainBuf);
   }
+  function isPlainObject(value) {
+    return !!value && typeof value === "object" && !Array.isArray(value);
+  }
+  function assertArrayField(data, key) {
+    if (data[key] !== void 0 && !Array.isArray(data[key]))
+      throw new Error(key + " must be an array");
+  }
+  function assertOptionalStringArray(value, label) {
+    if (value === void 0) return;
+    if (!Array.isArray(value) || value.some((v) => typeof v !== "string"))
+      throw new Error(label + " must be a string array");
+  }
+  function validateBackupState(data) {
+    if (!isPlainObject(data)) throw new Error("backup root must be an object");
+    ["locations", "members", "requests", "availableCells", "candidates"].forEach(
+      (key) => assertArrayField(data, key)
+    );
+    if (data.travelTimes !== void 0 && !isPlainObject(data.travelTimes))
+      throw new Error("travelTimes must be an object");
+    if (data.schedule3Result !== void 0 && !isPlainObject(data.schedule3Result))
+      throw new Error("schedule3Result must be an object");
+    assertOptionalStringArray(
+      data.onceLimitedMemberIds3,
+      "onceLimitedMemberIds3"
+    );
+    assertOptionalStringArray(data.excludedMemberIds3, "excludedMemberIds3");
+    const locations = data.locations || [];
+    const members = data.members || [];
+    const requests = data.requests || [];
+    const locationIds = /* @__PURE__ */ new Set();
+    locations.forEach((loc, i) => {
+      if (!isPlainObject(loc) || typeof loc.id !== "string" || !loc.id || typeof loc.name !== "string" || !loc.name)
+        throw new Error("invalid location at index " + i);
+      if (locationIds.has(loc.id)) throw new Error("duplicate location id");
+      locationIds.add(loc.id);
+    });
+    const memberIds = /* @__PURE__ */ new Set();
+    members.forEach((member, i) => {
+      if (!isPlainObject(member) || typeof member.id !== "string" || !member.id || typeof member.name !== "string")
+        throw new Error("invalid member at index " + i);
+      if (memberIds.has(member.id)) throw new Error("duplicate member id");
+      memberIds.add(member.id);
+      if (member.locationIds !== void 0) {
+        assertOptionalStringArray(member.locationIds, "member.locationIds");
+        if (member.locationIds.some((id) => !locationIds.has(id)))
+          throw new Error("member references unknown location");
+      } else if (member.locationId !== void 0 && (typeof member.locationId !== "string" || !locationIds.has(member.locationId))) {
+        throw new Error("member references unknown legacy location");
+      }
+      if (member.memo !== void 0 && typeof member.memo !== "string")
+        throw new Error("member.memo must be a string");
+    });
+    const requestIds = /* @__PURE__ */ new Set();
+    requests.forEach((req, i) => {
+      if (!isPlainObject(req) || typeof req.id !== "string" || !req.id || typeof req.memberId !== "string" || !memberIds.has(req.memberId) || !Number.isInteger(req.day) || req.day < 0 || req.day >= 7 || !Number.isInteger(req.startSlot) || req.startSlot < 0 || typeof req.duration !== "number" || !Number.isFinite(req.duration) || req.duration <= 0)
+        throw new Error("invalid request at index " + i);
+      if (requestIds.has(req.id)) throw new Error("duplicate request id");
+      requestIds.add(req.id);
+      assertOptionalStringArray(req.extraLocationIds, "request.extraLocationIds");
+      assertOptionalStringArray(
+        req.excludedLocationIds,
+        "request.excludedLocationIds"
+      );
+      for (const id of (req.extraLocationIds || []).concat(
+        req.excludedLocationIds || []
+      )) {
+        if (!locationIds.has(id))
+          throw new Error("request references unknown location");
+      }
+    });
+    (data.availableCells || []).forEach((key) => {
+      if (typeof key !== "string" || !/^\d+-\d+$/.test(key))
+        throw new Error("invalid available cell");
+      const [day, slot] = key.split("-").map(Number);
+      if (!Number.isInteger(day) || day < 0 || day >= 7 || !Number.isInteger(slot) || slot < 0)
+        throw new Error("invalid available cell range");
+    });
+    Object.entries(data.travelTimes || {}).forEach(([key, value]) => {
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+        throw new Error("invalid travel time");
+      const ids = key.split("|");
+      if (ids.length !== 2 || !locationIds.has(ids[0]) || !locationIds.has(ids[1]))
+        throw new Error("travel time references unknown location");
+    });
+    return data;
+  }
+  function parseAndValidateBackupText(plainText) {
+    return validateBackupState(JSON.parse(plainText));
+  }
   var backupExportBtnEl = document.getElementById("backupExportBtn");
   var backupExportResultEl = document.getElementById("backupExportResult");
   var backupExportTextareaEl = document.getElementById(
@@ -7688,18 +7785,26 @@
       backupImportHintEl.textContent = "백업 코드와 PIN을 모두 입력해주세요.";
       return;
     }
-    let plainText;
+    let parsedBackup;
     try {
-      plainText = await decryptBackupText(code, pin);
-      JSON.parse(plainText);
-    } catch {
-      backupImportHintEl.textContent = "복원에 실패했습니다. 백업 코드와 PIN을 다시 확인해주세요.";
+      const plainText = await decryptBackupText(code, pin);
+      parsedBackup = parseAndValidateBackupText(plainText);
+    } catch (e) {
+      console.warn("backup import validation failed", e);
+      backupImportHintEl.textContent = "복원에 실패했습니다. 백업 코드가 손상되었거나 현재 데이터 형식과 맞지 않습니다.";
       return;
     }
     if (!confirm("복원하면 이 기기에 현재 저장된 데이터를 덮어씁니다. 계속할까요?"))
       return;
     runtime.suppressAutosave = true;
-    localStorage.setItem(STORAGE_KEY, plainText);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedBackup));
+    } catch (e) {
+      runtime.suppressAutosave = false;
+      console.warn("backup import save failed", e);
+      backupImportHintEl.textContent = "복원 데이터를 저장하지 못했습니다. 현재 데이터는 그대로 유지됩니다.";
+      return;
+    }
     location.reload();
   });
 
