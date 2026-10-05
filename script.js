@@ -326,9 +326,9 @@
   };
   function emitStorageStatus(ok, error = null) {
     runtime.storageError = ok ? null : error;
-    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof window.CustomEvent === "function") {
       window.dispatchEvent(
-        new CustomEvent("pt-storage-status", {
+        new window.CustomEvent("pt-storage-status", {
           detail: { ok, error: error ? String(error.message || error) : null }
         })
       );
@@ -7951,7 +7951,7 @@
       return;
     const currentRaw = localStorage.getItem(STORAGE_KEY);
     try {
-      sessionStorage.setItem(
+      window.sessionStorage.setItem(
         RESTORE_RECOVERY_KEY,
         JSON.stringify({
           createdAt: Date.now(),
@@ -7974,7 +7974,7 @@
     }
     location.reload();
   });
-  function readRestoreRecoverySnapshot(storage = typeof sessionStorage !== "undefined" ? sessionStorage : null) {
+  function readRestoreRecoverySnapshot(storage = typeof window !== "undefined" && window.sessionStorage ? window.sessionStorage : null) {
     if (!storage) return null;
     const raw = storage.getItem(RESTORE_RECOVERY_KEY);
     if (!raw) return null;
@@ -7987,7 +7987,7 @@
       return null;
     }
   }
-  function restoreRecoverySnapshot(storage = typeof sessionStorage !== "undefined" ? sessionStorage : null, targetStorage = typeof localStorage !== "undefined" ? localStorage : null) {
+  function restoreRecoverySnapshot(storage = typeof window !== "undefined" && window.sessionStorage ? window.sessionStorage : null, targetStorage = typeof localStorage !== "undefined" ? localStorage : null) {
     if (!storage || !targetStorage) return false;
     const snapshot = readRestoreRecoverySnapshot(storage);
     if (!snapshot) return false;
@@ -8030,8 +8030,8 @@
     dismissBtn.className = "btn btn-ghost";
     dismissBtn.textContent = "복구 지점 삭제";
     dismissBtn.addEventListener("click", () => {
-      if (typeof sessionStorage !== "undefined")
-        sessionStorage.removeItem(RESTORE_RECOVERY_KEY);
+      if (typeof window !== "undefined" && window.sessionStorage)
+        window.sessionStorage.removeItem(RESTORE_RECOVERY_KEY);
       banner.remove();
     });
     actions.append(undoBtn, dismissBtn);
