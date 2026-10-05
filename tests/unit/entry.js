@@ -20,7 +20,9 @@ export {
   dropSessionsForBalance,
   schedule2Signature,
   runChainDP,
+  generateSchedule2Async,
 } from "../../src/engine/chainDp.js";
+export { scheduleMetrics, scheduleViolations } from "../../src/engine/scheduleQuality.js";
 export { setIdleFirst } from "../../src/engine/chainDpCore.js";
 export {
   candidateLocationsForRequest,

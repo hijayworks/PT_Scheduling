@@ -4356,12 +4356,15 @@
     }
     return { result: bestPolished, pool: tied };
   }
-  async function generateSchedule2Async(onProgress) {
+  async function generateSchedule2Async(onProgress, options = {}) {
     const eligibleReqs = state.requests.filter(isEligibleRequest2);
     const GREEDY_BASELINE_PROGRESS_SHARE = 0.08;
-    const greedyBaseline = await generateCandidatesAsync((p) => {
-      if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
-    });
+    const greedyBaseline = await generateCandidatesAsync(
+      (p) => {
+        if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
+      },
+      { attempts: options.greedyAttempts }
+    );
     const cardProgressShare = 1 - GREEDY_BASELINE_PROGRESS_SHARE;
     const cards = [];
     let targetFloor = null;
