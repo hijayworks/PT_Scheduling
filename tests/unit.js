@@ -75,6 +75,113 @@ function assert(cond, msg) {
   if (!cond) throw new Error(msg || "assertion failed");
 }
 
+/* ---------------- backup.js: 복원 schema 검증 ---------------- */
+function validBackupFixture() {
+  return {
+    locations: [
+      { id: "L1", name: "마포점" },
+      { id: "L2", name: "여의도점" },
+    ],
+    travelTimes: { "L1|L2": 20 },
+    members: [
+      {
+        id: "M1",
+        name: "홍길동",
+        locationIds: ["L1"],
+        category: "등록",
+        memo: "",
+      },
+    ],
+    requests: [
+      {
+        id: "R1",
+        memberId: "M1",
+        day: 0,
+        startSlot: 6,
+        duration: 60,
+        extraLocationIds: ["L2"],
+        excludedLocationIds: [],
+      },
+    ],
+    availableCells: ["0-6", "0-7"],
+    candidates: [],
+    onceLimitedMemberIds3: [],
+    excludedMemberIds3: [],
+    schedule3Result: { candidateAList: [null, null, null] },
+  };
+}
+
+test("backup schema: 정상 백업은 통과", () => {
+  const data = validBackupFixture();
+  assertEqual(lib.validateBackupState(data), data);
+  assertEqual(
+    lib.parseAndValidateBackupText(JSON.stringify(data)).members[0].id,
+    "M1",
+  );
+});
+
+test("backup schema: root/주요 컬렉션 타입이 잘못되면 거부", () => {
+  let threw = false;
+  try {
+    lib.validateBackupState([]);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "배열 root는 거부해야 함");
+
+  threw = false;
+  try {
+    lib.validateBackupState({ ...validBackupFixture(), members: {} });
+  } catch {
+    threw = true;
+  }
+  assert(threw, "members가 배열이 아니면 거부해야 함");
+});
+
+test("backup schema: 존재하지 않는 회원/지점 참조를 거부", () => {
+  const badMember = validBackupFixture();
+  badMember.requests[0].memberId = "MISSING";
+  let threw = false;
+  try {
+    lib.validateBackupState(badMember);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "request가 없는 회원을 참조하면 거부해야 함");
+
+  const badLocation = validBackupFixture();
+  badLocation.members[0].locationIds = ["DELETED"];
+  threw = false;
+  try {
+    lib.validateBackupState(badLocation);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "회원이 없는 지점을 참조하면 거부해야 함");
+});
+
+test("backup schema: 손상된 근무 셀/이동시간을 거부", () => {
+  const badCell = validBackupFixture();
+  badCell.availableCells = ["not-a-cell"];
+  let threw = false;
+  try {
+    lib.validateBackupState(badCell);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "잘못된 available cell을 거부해야 함");
+
+  const badTravel = validBackupFixture();
+  badTravel.travelTimes["L1|L2"] = -10;
+  threw = false;
+  try {
+    lib.validateBackupState(badTravel);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "음수 이동시간을 거부해야 함");
+});
+
 /* ---------------- utils.js ---------------- */
 test("minutesLabel: 절대 분을 HH:MM으로 변환", () => {
   assertEqual(lib.minutesLabel(0), "00:00");
