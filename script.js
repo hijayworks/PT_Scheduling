@@ -639,23 +639,48 @@
       }, LONG_PRESS_MS);
     });
   }
+  function clearPlacementClasses(el) {
+    Array.from(el.classList).forEach((name) => {
+      if (name.startsWith("grid-col-") || name.startsWith("grid-row-start-") || name.startsWith("grid-row-span-") || name.startsWith("lane-"))
+        el.classList.remove(name);
+    });
+  }
+  function setGridPlacement(el, column, rowStart, rowSpan = 1) {
+    clearPlacementClasses(el);
+    el.classList.add(
+      "grid-col-" + column,
+      "grid-row-start-" + rowStart,
+      "grid-row-span-" + rowSpan
+    );
+  }
+  function blockColorClass(color) {
+    if (color === BLOCK_COLOR) return "member-color-fallback";
+    let index = 0;
+    for (let tier = 0; tier < MEMBER_COLOR_SHADE_STEPS.length; tier++) {
+      for (let hue = 0; hue < MEMBER_COLORS.length; hue++) {
+        if (shadeColor(MEMBER_COLORS[hue], MEMBER_COLOR_SHADE_STEPS[tier]) === color)
+          return "member-color-" + index;
+        index++;
+      }
+    }
+    return "member-color-fallback";
+  }
   function renderGrid(container, availableSet, options) {
     options = options || {};
     const rangeStart = typeof options.rangeStartSlot === "number" ? options.rangeStartSlot : 0;
     const rangeEnd = typeof options.rangeEndSlot === "number" ? options.rangeEndSlot : SLOT_COUNT;
     container.innerHTML = "";
-    container.style.gridTemplateRows = "30px repeat(" + (rangeEnd - rangeStart) + ", 16px)";
+    Array.from(container.classList).filter((name) => name.startsWith("grid-rows-")).forEach((name) => container.classList.remove(name));
+    container.classList.add("grid-rows-" + (rangeEnd - rangeStart));
     const corner = document.createElement("div");
     corner.className = "cal-head corner";
-    corner.style.gridColumn = "1";
-    corner.style.gridRow = "1";
+    setGridPlacement(corner, 1, 1);
     container.appendChild(corner);
     DAYS.forEach((d, di) => {
       const head = document.createElement("div");
       head.className = "cal-head";
       head.textContent = d;
-      head.style.gridColumn = String(di + 2);
-      head.style.gridRow = "1";
+      setGridPlacement(head, di + 2, 1);
       container.appendChild(head);
     });
     for (let s = rangeStart; s < rangeEnd; s++) {
@@ -665,8 +690,7 @@
         const label = document.createElement("div");
         label.className = "cal-timelabel" + (s === rangeStart ? " cal-timelabel-first" : "");
         label.textContent = slotLabel(s);
-        label.style.gridColumn = "1";
-        label.style.gridRow = String(row);
+        setGridPlacement(label, 1, row);
         container.appendChild(label);
       }
       for (let di = 0; di < DAYS.length; di++) {
@@ -676,8 +700,7 @@
         cell.className = "cal-cell" + (isHour ? " hour-start" : "") + (isAvailable ? " available" : "");
         cell.dataset.day = String(di);
         cell.dataset.slot = String(s);
-        cell.style.gridColumn = String(di + 2);
-        cell.style.gridRow = String(row);
+        setGridPlacement(cell, di + 2, row);
         container.appendChild(cell);
       }
     }
@@ -690,8 +713,12 @@
       if (clippedEnd <= clippedStart) return;
       const travel = document.createElement("div");
       travel.className = t.type === "idle" ? "cal-idle-block" : t.type === "break" ? "cal-break-block" : "cal-travel-block";
-      travel.style.gridColumn = String(t.day + 2);
-      travel.style.gridRow = clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
+      setGridPlacement(
+        travel,
+        t.day + 2,
+        clippedStart - rangeStart + 2,
+        clippedEnd - clippedStart
+      );
       travel.title = t.label;
       travel.textContent = t.label;
       if (t.onMove) {
@@ -723,12 +750,11 @@
         });
       }
       if (t.contextMenuItems) {
-        travel.style.cursor = "pointer";
+        travel.classList.add("clickable");
         travel.addEventListener("click", (e) => {
           e.stopPropagation();
           openContextMenu(
-            e.clientX,
-            e.clientY,
+            travel,
             t.contextMenuItems(e.clientX, e.clientY)
           );
         });
@@ -744,15 +770,17 @@
       if (clippedEnd <= clippedStart) return;
       const block = document.createElement("div");
       block.className = "cal-block" + (b.excluded ? " excluded" : "") + (b.confirmed ? " confirmed" : "");
-      if (!b.excluded) {
-        block.style.background = b.confirmed ? "linear-gradient(rgba(255,255,255,0.72), rgba(255,255,255,0.72)), " + b.color : b.color;
-        if (b.confirmed) block.style.borderColor = b.color;
-      }
-      block.style.gridColumn = String(b.day + 2);
-      block.style.gridRow = clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
+      if (!b.excluded) block.classList.add(blockColorClass(b.color));
+      setGridPlacement(
+        block,
+        b.day + 2,
+        clippedStart - rangeStart + 2,
+        clippedEnd - clippedStart
+      );
       if (b.laneCount > 1) {
-        block.style.width = 100 / b.laneCount + "%";
-        block.style.marginLeft = 100 * b.lane / b.laneCount + "%";
+        const laneCount = Math.min(40, Math.max(2, b.laneCount));
+        const lane = Math.min(laneCount - 1, Math.max(0, b.lane || 0));
+        block.classList.add("lane-" + laneCount + "-" + lane);
       }
       block.title = b.label + (b.loc ? " (" + b.loc + ")" : "") + (b.sublabel ? " · " + b.sublabel : "");
       const nameEl = document.createElement("span");
@@ -817,16 +845,15 @@
         block.appendChild(delBtn);
       }
       if (!b.excluded && b.onClick) {
-        block.style.cursor = "pointer";
+        block.classList.add("clickable");
         block.addEventListener("click", () => b.onClick());
       }
       if (!b.excluded && b.contextMenuItems) {
-        block.style.cursor = "pointer";
+        block.classList.add("clickable");
         block.addEventListener("click", (e) => {
           e.stopPropagation();
           openContextMenu(
-            e.clientX,
-            e.clientY,
+            block,
             b.contextMenuItems(e.clientX, e.clientY)
           );
         });
@@ -877,8 +904,12 @@
         dropPreviewEl.className = "cal-drop-preview";
         container.appendChild(dropPreviewEl);
       }
-      dropPreviewEl.style.gridColumn = String(day + 2);
-      dropPreviewEl.style.gridRow = clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
+      setGridPlacement(
+        dropPreviewEl,
+        day + 2,
+        clippedStart - rangeStart + 2,
+        clippedEnd - clippedStart
+      );
       dropPreviewEl.classList.toggle("invalid", kind === "invalid");
       dropPreviewEl.classList.toggle("swap", kind === "swap");
     }
@@ -928,13 +959,18 @@
     }
   }
   var activeContextMenuEl = null;
+  var activeContextMenuAnchorEl = null;
   function closeContextMenu() {
     if (activeContextMenuEl) {
       activeContextMenuEl.remove();
       activeContextMenuEl = null;
     }
+    if (activeContextMenuAnchorEl) {
+      activeContextMenuAnchorEl.classList.remove("context-menu-open");
+      activeContextMenuAnchorEl = null;
+    }
   }
-  function openContextMenu(x, y, items) {
+  function openContextMenu(anchorEl, items) {
     closeContextMenu();
     const menu = document.createElement("div");
     menu.className = "block-context-menu";
@@ -957,12 +993,9 @@
       });
       menu.appendChild(btn);
     });
-    document.body.appendChild(menu);
-    const rect = menu.getBoundingClientRect();
-    const left = Math.min(x, Math.max(0, window.innerWidth - rect.width - 8));
-    const top = Math.min(y, Math.max(0, window.innerHeight - rect.height - 8));
-    menu.style.left = left + "px";
-    menu.style.top = top + "px";
+    anchorEl.classList.add("context-menu-open");
+    anchorEl.appendChild(menu);
+    activeContextMenuAnchorEl = anchorEl;
     activeContextMenuEl = menu;
   }
   document.addEventListener("click", (e) => {
@@ -993,25 +1026,24 @@
       const canvas = await html2canvas(cardEl, {
         backgroundColor: "#ffffff",
         scale: 2,
+        width: neededWidth || void 0,
+        windowWidth: neededWidth || void 0,
         ignoreElements: (el) => el.classList && el.classList.contains("candidate-card-actions"),
         // html2canvas가 repeating-linear-gradient 배경을 그리지 못하고 흰 배경으로 남기는 문제가
         // 있어(이동 시간 블록·제외 회원 블록에 사용 중), 캡처용 복제 문서에서만 무늬를 대표하는
         // 단색으로 바꿔치기한다. 화면에 실제로 보이는 원본 요소는 건드리지 않는다.
         onclone: (clonedDoc) => {
           clonedDoc.querySelectorAll(".cal-travel-block").forEach((el) => {
-            el.style.background = "#ffedd5";
+            el.classList.add("capture-travel-solid");
           });
           clonedDoc.querySelectorAll(".cal-block.excluded").forEach((el) => {
-            el.style.background = "#e5e7eb";
+            el.classList.add("capture-excluded-solid");
           });
           if (neededWidth) {
             const clonedCard = clonedDoc.querySelector(`[${CAPTURE_ATTR}]`);
-            if (clonedCard) {
-              clonedCard.style.width = neededWidth + "px";
-              clonedCard.style.maxWidth = "none";
-            }
+            if (clonedCard) clonedCard.classList.add("capture-card-wide");
             clonedDoc.querySelectorAll(".grid-scroll").forEach((el) => {
-              el.style.overflow = "visible";
+              el.classList.add("capture-grid-scroll");
             });
           }
         }
@@ -4558,8 +4590,8 @@
   var bulkImportRows = [];
   function openBulkImportModal() {
     bulkImportTextareaEl.value = "";
-    bulkImportStepInputEl.style.display = "";
-    bulkImportStepPreviewEl.style.display = "none";
+    bulkImportStepInputEl.hidden = false;
+    bulkImportStepPreviewEl.hidden = true;
     bulkImportOverlayEl.classList.add("open");
     setTimeout(() => bulkImportTextareaEl.focus(), 0);
   }
@@ -4598,8 +4630,8 @@
     if (e.target === bulkImportOverlayEl) closeBulkImportModal();
   });
   bulkImportBackBtn.addEventListener("click", () => {
-    bulkImportStepInputEl.style.display = "";
-    bulkImportStepPreviewEl.style.display = "none";
+    bulkImportStepInputEl.hidden = false;
+    bulkImportStepPreviewEl.hidden = true;
   });
   function renderBulkImportPreview() {
     const lines = parseBulkImportText(bulkImportTextareaEl.value);
@@ -4723,7 +4755,7 @@
       });
       function renderRowState() {
         rowEl.classList.toggle("skip", row.choice === "__skip__");
-        newFields.style.display = row.choice === "__new__" ? "flex" : "none";
+        newFields.hidden = row.choice !== "__new__";
       }
       renderRowState();
       bulkImportPreviewListEl.appendChild(rowEl);
@@ -4732,8 +4764,8 @@
       else willApply++;
     });
     bulkImportPreviewSummaryEl.innerHTML = "기존 회원 적용 " + willApply + "명 · 신규 등록 " + willCreate + "명 · 건너뛰기 " + willSkip + "명<br>적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다.";
-    bulkImportStepInputEl.style.display = "none";
-    bulkImportStepPreviewEl.style.display = "";
+    bulkImportStepInputEl.hidden = true;
+    bulkImportStepPreviewEl.hidden = false;
   }
   bulkImportPreviewBtn.addEventListener("click", renderBulkImportPreview);
   bulkImportApplyBtn.addEventListener("click", () => {
@@ -5122,12 +5154,9 @@
         const locBadge = document.createElement("span");
         locBadge.className = "chip location-chip";
         locBadge.textContent = loc.name;
-        const color = locationColor(locId);
-        if (color) {
-          locBadge.style.background = color;
-          locBadge.style.borderColor = color;
-          locBadge.style.color = "#fff";
-        }
+        const colorIndex = state.locations.findIndex((l) => l.id === locId);
+        if (colorIndex >= 0)
+          locBadge.classList.add("location-color-" + colorIndex % 8);
         locBadgeWrap.appendChild(locBadge);
       });
       locCell.appendChild(locBadgeWrap);
@@ -5218,11 +5247,11 @@
       const memoInput = document.createElement("textarea");
       memoInput.rows = 1;
       memoInput.value = member.memo || "";
-      const growMemo = () => {
-        memoInput.style.height = "auto";
-        memoInput.style.height = memoInput.scrollHeight + "px";
-      };
-      memoInput.addEventListener("input", growMemo);
+      memoInput.classList.add("member-memo-input");
+      memoInput.addEventListener("input", () => {
+        const lineHeight = 20;
+        memoInput.rows = Math.max(1, Math.ceil(memoInput.scrollHeight / lineHeight));
+      });
       memoInput.addEventListener(
         "change",
         () => setMemberMemo(member, memoInput.value)
@@ -5371,8 +5400,8 @@
   }
   function openMemberBulkImportModal() {
     memberBulkImportTextareaEl.value = "";
-    memberBulkImportStepInputEl.style.display = "";
-    memberBulkImportStepPreviewEl.style.display = "none";
+    memberBulkImportStepInputEl.hidden = false;
+    memberBulkImportStepPreviewEl.hidden = true;
     memberBulkImportOverlayEl.classList.add("open");
     setTimeout(() => memberBulkImportTextareaEl.focus(), 0);
   }
@@ -5386,8 +5415,8 @@
     if (e.target === memberBulkImportOverlayEl) closeMemberBulkImportModal();
   });
   memberBulkImportBackBtn.addEventListener("click", () => {
-    memberBulkImportStepInputEl.style.display = "";
-    memberBulkImportStepPreviewEl.style.display = "none";
+    memberBulkImportStepInputEl.hidden = false;
+    memberBulkImportStepPreviewEl.hidden = true;
   });
   function memberBulkRowIsDuplicate(row) {
     return state.members.some(
@@ -5410,8 +5439,7 @@
       const nameInput = document.createElement("input");
       nameInput.type = "text";
       nameInput.value = row.name;
-      nameInput.className = "bulk-preview-name";
-      nameInput.style.cssText = "border:1px solid var(--border);border-radius:8px;height:32px;padding:0 8px;width:120px;font-family:inherit;";
+      nameInput.className = "bulk-preview-name bulk-preview-name-input";
       nameInput.addEventListener("input", () => {
         row.name = nameInput.value.trim();
         renderMemberBulkImportPreview();
@@ -5432,7 +5460,7 @@
       });
       head.appendChild(catSelect);
       const skipLabel = document.createElement("label");
-      skipLabel.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:12.5px;color:var(--text-mute);margin-left:auto;";
+      skipLabel.className = "bulk-preview-skip-label";
       const skipCheckbox = document.createElement("input");
       skipCheckbox.type = "checkbox";
       skipCheckbox.checked = row.skip;
@@ -5449,7 +5477,7 @@
       locWrap.className = "bulk-preview-new-fields";
       state.locations.forEach((loc) => {
         const label = document.createElement("label");
-        label.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:12.5px;";
+        label.className = "bulk-preview-location-label";
         const cb = document.createElement("input");
         cb.type = "checkbox";
         cb.checked = row.locationIds.includes(loc.id);
@@ -5493,8 +5521,8 @@
       return;
     }
     memberBulkImportRows = lines;
-    memberBulkImportStepInputEl.style.display = "none";
-    memberBulkImportStepPreviewEl.style.display = "";
+    memberBulkImportStepInputEl.hidden = true;
+    memberBulkImportStepPreviewEl.hidden = false;
     renderMemberBulkImportPreview();
   });
   memberBulkImportApplyBtn.addEventListener("click", () => {
@@ -5785,11 +5813,11 @@
         })(),
         "에서 먼저 회원을 등록해 주세요."
       );
-      requestSummaryEl.style.display = "";
-      scheduleInteractiveEl.style.display = "none";
+      requestSummaryEl.hidden = false;
+      scheduleInteractiveEl.hidden = true;
       return;
     }
-    scheduleInteractiveEl.style.display = "";
+    scheduleInteractiveEl.hidden = false;
     const locOrder = new Map(state.locations.map((l, i) => [l.id, i]));
     const sortedMembers = state.members.map((member, index) => ({ member, index })).sort((a, b) => {
       const ao = locOrder.has(a.member.locationIds[0]) ? locOrder.get(a.member.locationIds[0]) : Infinity;
@@ -5802,7 +5830,7 @@
     const activeMember = activeScheduleMemberId ? memberById(activeScheduleMemberId) : null;
     const registeredCount = new Set(state.requests.map((r) => r.memberId)).size;
     requestSummaryEl.textContent = "등록 " + registeredCount + "명 · 미등록 " + (state.members.length - registeredCount) + "명";
-    requestSummaryEl.style.display = "";
+    requestSummaryEl.hidden = false;
     sortedMembers.forEach((member) => {
       const reqCount = state.requests.filter(
         (r) => r.memberId === member.id
@@ -5840,8 +5868,8 @@
       });
       memberTabsEl.appendChild(tab);
     });
-    rangeAddRowEl.style.display = activeMember && activeMember.locationIds.length > 0 ? "" : "none";
-    scheduleGridScrollEl.style.display = activeMember ? "" : "none";
+    rangeAddRowEl.hidden = !(activeMember && activeMember.locationIds.length > 0);
+    scheduleGridScrollEl.hidden = !activeMember;
     if (!activeMember) {
       const hint = document.createElement("p");
       hint.className = "generate-hint";
@@ -7064,11 +7092,11 @@
     btnEl.disabled = true;
     btnEl.classList.add("loading");
     labelEl.textContent = "후보 생성 중...";
-    progressWrapEl.style.display = "";
-    progressFillEl.style.width = "0%";
+    progressWrapEl.hidden = false;
+    progressFillEl.className = "generate-progress-fill progress-pct-0";
     progressTextEl.textContent = "0%";
     progressWrapEl.setAttribute("aria-valuenow", "0");
-    cancelEl.style.display = "";
+    cancelEl.hidden = false;
     cancelEl.disabled = false;
     cancelEl.textContent = "생성 취소";
     await acquireWakeLock();
@@ -7113,7 +7141,7 @@
       const result = await generateSchedule3Async(
         (progress) => {
           const pct = Math.round(progress * 100);
-          progressFillEl.style.width = pct + "%";
+          progressFillEl.className = "generate-progress-fill progress-pct-" + pct;
           progressTextEl.textContent = pct + "%";
           progressWrapEl.setAttribute("aria-valuenow", String(pct));
         },
@@ -7173,8 +7201,8 @@
       btnEl.disabled = false;
       btnEl.classList.remove("loading");
       labelEl.textContent = idleLabel;
-      progressWrapEl.style.display = "none";
-      cancelEl.style.display = "none";
+      progressWrapEl.hidden = true;
+      cancelEl.hidden = true;
       runtime.generationInProgress = false;
       runtime.generationCancelRequested = false;
       releaseWakeLock();
@@ -7374,10 +7402,10 @@
     travelMatrixEl.innerHTML = "";
     const locs = state.locations;
     if (locs.length < 2) {
-      travelTitleEl.style.display = "none";
+      travelTitleEl.hidden = true;
       return;
     }
-    travelTitleEl.style.display = "";
+    travelTitleEl.hidden = false;
     for (let i = 0; i < locs.length; i++) {
       for (let j = i + 1; j < locs.length; j++) {
         const a = locs[i], b = locs[j];
@@ -7875,7 +7903,7 @@
         password
       );
       backupExportTextareaEl.value = backupCode;
-      backupExportResultEl.style.display = "";
+      backupExportResultEl.hidden = false;
       showToast("백업 코드를 만들었습니다. 백업 비밀번호도 함께 기억해주세요.", "success");
     } catch (e) {
       console.warn("backup export failed", e);
