@@ -331,6 +331,14 @@
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   }
   var LEGACY_START_MIN = 13 * 60;
+  function clearParsedScheduleCandidates(parsed) {
+    parsed.candidates = [];
+    parsed.schedule3Result = { candidateAList: [null, null, null] };
+  }
+  function clearRuntimeScheduleCandidates() {
+    runtime.candidates = [];
+    runtime.schedule3Result = { candidateAList: [null, null, null] };
+  }
   function migrateStartMinShift(parsed) {
     const savedBase = typeof parsed.startMinBase === "number" ? parsed.startMinBase : LEGACY_START_MIN;
     if (savedBase === START_MIN) return;
@@ -342,7 +350,7 @@
     (parsed.requests || []).forEach((r) => {
       r.startSlot += shiftSlots;
     });
-    parsed.candidates = [];
+    clearParsedScheduleCandidates(parsed);
   }
   function pageFromLegacyStep(step) {
     if (step <= 2) return "settings";
@@ -477,11 +485,11 @@
         hadDurationMismatch = true;
       }
     });
-    if (hadDurationMismatch) runtime.candidates = [];
+    if (hadDurationMismatch) clearRuntimeScheduleCandidates();
     if (runtime.candidates.some(
       (c) => c.strategyIndex < 0 || c.strategyIndex >= STRATEGY_COUNT
     ))
-      runtime.candidates = [];
+      clearRuntimeScheduleCandidates();
     state.onceLimitedMemberIds3 = state.onceLimitedMemberIds3.filter(
       (id) => isOnceLimitEligible(memberById(id))
     );
@@ -498,7 +506,7 @@
           (k) => parseInt(k.split("-")[0], 10) < DAYS.length
         )
       );
-      runtime.candidates = [];
+      clearRuntimeScheduleCandidates();
     }
   }
 
@@ -2454,6 +2462,20 @@
   }
 
   // src/engine/chainDpPolish.js
+  function findEarlierRequestForLocation(requests, minStart, currentStart, locationId) {
+    let earliest = null;
+    requests.forEach((r) => {
+      if (r.startSlot < minStart || r.startSlot >= currentStart) return;
+      if (!candidateLocationsForRequest(r).includes(locationId)) return;
+      if (!earliest || r.startSlot < earliest.startSlot) earliest = r;
+    });
+    return earliest;
+  }
+  function moveNodeToRequest(node, request) {
+    node.id = request.id;
+    node.startSlot = request.startSlot;
+    node.end = request.startSlot + durationToSlots(node.duration);
+  }
   async function runSchedule2Pipeline(eligibleReqs, reqsByDay, daysWithReqs, stage1DayOrder, runRepair, runPolish, polishBudgetMs, seedOffset) {
     seedOffset = seedOffset || 0;
     const ineffInfo = inefficientRoundTripLocationInfo();
@@ -3699,13 +3721,14 @@
           const node = chain[idx];
           const minStart = prev.startSlot + durationToSlots(prev.duration) + durationToSlots(requiredGapMin2(prev.locationId, node.locationId));
           if (node.startSlot <= minStart) continue;
-          const earlierReqs = reqsFor(node.memberId, day).filter(
-            (r) => r.startSlot >= minStart && r.startSlot < node.startSlot
+          const earlierReq = findEarlierRequestForLocation(
+            reqsFor(node.memberId, day),
+            minStart,
+            node.startSlot,
+            node.locationId
           );
-          if (earlierReqs.length === 0) continue;
-          const earliestSlot = Math.min(...earlierReqs.map((r) => r.startSlot));
-          node.startSlot = earliestSlot;
-          node.end = earliestSlot + durationToSlots(node.duration);
+          if (!earlierReq) continue;
+          moveNodeToRequest(node, earlierReq);
         }
         dayChains.set(day, chain);
       });
@@ -6955,6 +6978,14 @@
       );
     }
   }
+  function candidatePreservesConfirmed(prev, candidate) {
+    const confirmedIds = prev && Array.isArray(prev.confirmedIds) ? prev.confirmedIds : [];
+    if (confirmedIds.length === 0) return true;
+    const assignedIds = new Set(
+      (candidate && candidate.assigned || []).map((a) => a.id)
+    );
+    return confirmedIds.every((id) => assignedIds.has(id));
+  }
   async function runGenerate3({
     genA,
     genBC,
@@ -7002,9 +7033,21 @@
     await acquireWakeLock();
     try {
       let pickCandidateASlot = function(prev, freshResult, freshPool) {
+        if (prev && !candidatePreservesConfirmed(prev, freshResult)) {
+          return { candidate: prev, pool: null };
+        }
+        const confirmedIds = prev && Array.isArray(prev.confirmedIds) ? prev.confirmedIds : [];
+        if (confirmedIds.length > 0)
+          freshResult.confirmedIds = confirmedIds.slice();
+        const compatiblePool = (freshPool || []).filter(
+          (c) => candidatePreservesConfirmed(prev, c)
+        );
+        compatiblePool.forEach((c) => {
+          if (confirmedIds.length > 0) c.confirmedIds = confirmedIds.slice();
+        });
         const newIsBetter = !prev || isSchedule2ResultBetter(freshResult, prev);
         if (newIsBetter) {
-          const pool = freshPool || [];
+          const pool = compatiblePool;
           if (!pool.includes(freshResult)) {
             if (pool.length >= MAX_POOL_VARIANTS)
               pool.length = MAX_POOL_VARIANTS - 1;
@@ -7015,7 +7058,7 @@
         const newIsWorse = prev && isSchedule2ResultBetter(prev, freshResult);
         if (!newIsWorse) {
           const prevSig = schedule2Signature(prev);
-          const pool = (freshPool || []).map(
+          const pool = compatiblePool.map(
             (c) => schedule2Signature(c) === prevSig ? prev : c
           );
           if (!pool.includes(prev)) {

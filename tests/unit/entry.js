@@ -35,3 +35,14 @@ export {
   mergeRequestRuns,
   removeRequestRun,
 } from "../../src/pages/memberSchedule.js";
+
+export {
+  findEarlierRequestForLocation,
+  moveNodeToRequest,
+} from "../../src/engine/chainDpPolish.js";
+export {
+  migrateStartMinShift,
+  clearRuntimeScheduleCandidates,
+  runtime,
+} from "../../src/state.js";
+export { candidatePreservesConfirmed } from "../../src/schedule3.js";

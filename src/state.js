@@ -124,7 +124,18 @@ export function saveState() {
 // 그대로 두면 시각이 1시간씩 밀려 보이므로, 새 기준에 맞게 전부 +shiftSlots만큼 옮겨준다.
 // 이미 새 기준으로 저장된 데이터(startMinBase === START_MIN)는 다시 옮기지 않는다.
 const LEGACY_START_MIN = 13 * 60;
-function migrateStartMinShift(parsed) {
+
+function clearParsedScheduleCandidates(parsed) {
+  parsed.candidates = [];
+  parsed.schedule3Result = { candidateAList: [null, null, null] };
+}
+
+export function clearRuntimeScheduleCandidates() {
+  runtime.candidates = [];
+  runtime.schedule3Result = { candidateAList: [null, null, null] };
+}
+
+export function migrateStartMinShift(parsed) {
   const savedBase =
     typeof parsed.startMinBase === "number"
       ? parsed.startMinBase
@@ -138,8 +149,8 @@ function migrateStartMinShift(parsed) {
   (parsed.requests || []).forEach((r) => {
     r.startSlot += shiftSlots;
   });
-  // 옛 기준으로 계산된 후보는 시각이 안 맞으므로 다시 생성하도록 비운다.
-  parsed.candidates = [];
+  // 옛 기준으로 계산된 후보A/B/C는 시각이 안 맞으므로 모두 다시 생성하도록 비운다.
+  clearParsedScheduleCandidates(parsed);
 }
 
 // Pre-page-nav saves stored a numeric wizard step (1~5); map it onto the closest page.
@@ -304,7 +315,7 @@ export function loadState() {
       hadDurationMismatch = true;
     }
   });
-  if (hadDurationMismatch) runtime.candidates = [];
+  if (hadDurationMismatch) clearRuntimeScheduleCandidates();
   // 전략(STRATEGIES) 목록이 줄어들어, 더 이상 존재하지 않는 strategyIndex를 가리키는 옛
   // 후보가 남아있으면 "다음 후보" 클릭 시 STRATEGIES[strategyIndex]가 undefined라 에러가
   // 나므로, 그런 후보가 하나라도 있으면 전체를 비워 다시 생성하게 한다.
@@ -313,7 +324,7 @@ export function loadState() {
       (c) => c.strategyIndex < 0 || c.strategyIndex >= STRATEGY_COUNT,
     )
   )
-    runtime.candidates = [];
+    clearRuntimeScheduleCandidates();
   // 삭제된 회원이나 상담 회원(이미 항상 1회로 제한됨)을 가리키는 1회 제한 설정은 정리한다.
   state.onceLimitedMemberIds3 = state.onceLimitedMemberIds3.filter((id) =>
     isOnceLimitEligible(memberById(id)),
@@ -334,7 +345,7 @@ export function loadState() {
         (k) => parseInt(k.split("-")[0], 10) < DAYS.length,
       ),
     );
-    // 일요일 배정이 포함됐을 수 있는 기존 후보는 다시 계산하도록 비운다.
-    runtime.candidates = [];
+    // 일요일 배정이 포함됐을 수 있는 기존 후보A/B/C는 모두 다시 계산하도록 비운다.
+    clearRuntimeScheduleCandidates();
   }
 }

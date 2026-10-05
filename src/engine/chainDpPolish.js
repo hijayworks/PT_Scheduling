@@ -22,6 +22,30 @@ import {
 } from "./chainDpCore.js";
 import { mulberry32, shuffled } from "./rng.js";
 
+// 같은 회원·요일의 더 이른 신청 중 현재 배정 지점에서도 실제로 가능한 가장 이른 신청을 찾는다.
+// 빈 시간 압축 단계에서 시간만 당기고 지점 제약을 놓치는 일을 막기 위해 별도 함수로 둔다.
+export function findEarlierRequestForLocation(
+  requests,
+  minStart,
+  currentStart,
+  locationId,
+) {
+  let earliest = null;
+  requests.forEach((r) => {
+    if (r.startSlot < minStart || r.startSlot >= currentStart) return;
+    if (!candidateLocationsForRequest(r).includes(locationId)) return;
+    if (!earliest || r.startSlot < earliest.startSlot) earliest = r;
+  });
+  return earliest;
+}
+
+// 배정 시간을 다른 실제 신청으로 옮길 때 request id와 시각을 항상 함께 갱신한다.
+export function moveNodeToRequest(node, request) {
+  node.id = request.id;
+  node.startSlot = request.startSlot;
+  node.end = request.startSlot + durationToSlots(node.duration);
+}
+
 // chainDp.js에서 그대로 옮겨온 "수업 스케줄 생성2" 다듬기 파이프라인 — chainDp.js의 크기를
 // 줄이려고 파일만 옮겼을 뿐 로직은 바뀌지 않았다(요일 순서 하나를 받아 1~9단계를 그대로
 // 실행). 요일 순서 자체를 여러 개 시도하며 이 파이프라인을 반복 호출하는 쪽(재시작 그룹
@@ -1886,13 +1910,14 @@ export async function runSchedule2Pipeline(
           durationToSlots(prev.duration) +
           durationToSlots(requiredGapMin2(prev.locationId, node.locationId));
         if (node.startSlot <= minStart) continue;
-        const earlierReqs = reqsFor(node.memberId, day).filter(
-          (r) => r.startSlot >= minStart && r.startSlot < node.startSlot,
+        const earlierReq = findEarlierRequestForLocation(
+          reqsFor(node.memberId, day),
+          minStart,
+          node.startSlot,
+          node.locationId,
         );
-        if (earlierReqs.length === 0) continue;
-        const earliestSlot = Math.min(...earlierReqs.map((r) => r.startSlot));
-        node.startSlot = earliestSlot;
-        node.end = earliestSlot + durationToSlots(node.duration);
+        if (!earlierReq) continue;
+        moveNodeToRequest(node, earlierReq);
       }
       dayChains.set(day, chain);
     });
