@@ -51,10 +51,18 @@ export {
   BACKUP_VERSION,
   BACKUP_PREFIX,
   BACKUP_PBKDF2_ITERATIONS,
+  BACKUP_PASSWORD_MIN_LENGTH,
+  RESTORE_RECOVERY_KEY,
+  isValidBackupPassword,
   parseBackupEnvelope,
   validateBackupState,
   parseAndValidateBackupText,
   createPortableBackupState,
   prepareBackupStateForRestore,
+  readRestoreRecoverySnapshot,
+  restoreRecoverySnapshot,
 } from "../../src/backup.js";
-export { CURRENT_SCHEMA_VERSION } from "../../src/state.js";
+export {
+  CURRENT_SCHEMA_VERSION,
+  saveState,
+} from "../../src/state.js";

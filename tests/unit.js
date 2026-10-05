@@ -257,6 +257,75 @@ test("backup envelope: version과 KDF 파라미터를 코드 자체에서 읽을
   assertEqual(lib.parseBackupEnvelope("legacy-base64-code"), null);
 });
 
+test("backup password: 새 백업은 12자 이상만 허용", () => {
+  assertEqual(lib.BACKUP_PASSWORD_MIN_LENGTH, 12);
+  assert(!lib.isValidBackupPassword("12345678901"), "11자는 거부해야 함");
+  assert(lib.isValidBackupPassword("123456789012"), "12자는 허용해야 함");
+  assert(
+    lib.isValidBackupPassword("coffee-river-train"),
+    "긴 passphrase를 허용해야 함",
+  );
+});
+
+test("restore recovery: session snapshot에서 기존 localStorage를 복원", () => {
+  const sessionData = new Map();
+  const localData = new Map([["pt_schedule_state_v3", "new-state"]]);
+  const fakeSession = {
+    getItem: (k) => sessionData.has(k) ? sessionData.get(k) : null,
+    setItem: (k, v) => sessionData.set(k, v),
+    removeItem: (k) => sessionData.delete(k),
+  };
+  const fakeLocal = {
+    getItem: (k) => localData.has(k) ? localData.get(k) : null,
+    setItem: (k, v) => localData.set(k, v),
+    removeItem: (k) => localData.delete(k),
+  };
+  fakeSession.setItem(
+    lib.RESTORE_RECOVERY_KEY,
+    JSON.stringify({ createdAt: 1, state: "old-state" }),
+  );
+  assertEqual(lib.readRestoreRecoverySnapshot(fakeSession).state, "old-state");
+  assert(lib.restoreRecoverySnapshot(fakeSession, fakeLocal));
+  assertEqual(fakeLocal.getItem("pt_schedule_state_v3"), "old-state");
+  assertEqual(fakeSession.getItem(lib.RESTORE_RECOVERY_KEY), null);
+});
+
+test("restore recovery: 이전에 저장 데이터가 없던 상태도 되돌릴 수 있음", () => {
+  const sessionData = new Map();
+  const localData = new Map([["pt_schedule_state_v3", "restored-state"]]);
+  const fakeSession = {
+    getItem: (k) => sessionData.has(k) ? sessionData.get(k) : null,
+    setItem: (k, v) => sessionData.set(k, v),
+    removeItem: (k) => sessionData.delete(k),
+  };
+  const fakeLocal = {
+    getItem: (k) => localData.has(k) ? localData.get(k) : null,
+    setItem: (k, v) => localData.set(k, v),
+    removeItem: (k) => localData.delete(k),
+  };
+  fakeSession.setItem(
+    lib.RESTORE_RECOVERY_KEY,
+    JSON.stringify({ createdAt: 1, state: null }),
+  );
+  assert(lib.restoreRecoverySnapshot(fakeSession, fakeLocal));
+  assertEqual(fakeLocal.getItem("pt_schedule_state_v3"), null);
+});
+
+test("saveState: localStorage 쓰기 실패를 밖으로 던지지 않고 false 반환", () => {
+  const originalSetItem = globalThis.localStorage.setItem;
+  globalThis.localStorage.setItem = () => {
+    throw new Error("quota exceeded");
+  };
+  let result;
+  try {
+    result = lib.saveState();
+  } finally {
+    globalThis.localStorage.setItem = originalSetItem;
+    lib.runtime.storageError = null;
+  }
+  assertEqual(result, false);
+});
+
 /* ---------------- utils.js ---------------- */
 test("minutesLabel: 절대 분을 HH:MM으로 변환", () => {
   assertEqual(lib.minutesLabel(0), "00:00");

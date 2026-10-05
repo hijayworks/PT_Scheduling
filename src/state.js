@@ -66,6 +66,7 @@ export const runtime = {
   // 백업 복원 직후 reload()할 때 beforeunload/visibilitychange 핸들러가 옛 메모리 상태로
   // saveState()를 한 번 더 실행해 방금 덮어쓴 localStorage를 되돌리지 않도록 막는 플래그.
   suppressAutosave: false,
+  storageError: null,
 };
 
 export class GenerationCancelledError extends Error {}
@@ -112,15 +113,38 @@ export const OLD_PAGE_TO_NEW = {
 };
 
 /* ---------------- Persistence ---------------- */
+function emitStorageStatus(ok, error = null) {
+  runtime.storageError = ok ? null : error;
+  if (
+    typeof window !== "undefined" &&
+    typeof window.dispatchEvent === "function" &&
+    typeof window.CustomEvent === "function"
+  ) {
+    window.dispatchEvent(
+      new window.CustomEvent("pt-storage-status", {
+        detail: { ok, error: error ? String(error.message || error) : null },
+      }),
+    );
+  }
+}
+
 export function saveState() {
-  if (runtime.suppressAutosave) return;
+  if (runtime.suppressAutosave) return true;
   state.schemaVersion = CURRENT_SCHEMA_VERSION;
   state.availableCells = Array.from(runtime.availableCells);
   state.candidates = runtime.candidates;
   state.schedule3Result = runtime.schedule3Result;
   state.currentPage = runtime.currentPage;
   state.startMinBase = START_MIN; // 슬롯 인덱스가 어느 시작 시각을 기준으로 저장됐는지 기록 (마이그레이션용)
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    emitStorageStatus(true);
+    return true;
+  } catch (error) {
+    console.warn("failed to persist state", error);
+    emitStorageStatus(false, error);
+    return false;
+  }
 }
 
 // 근무 가능 시간 시작 선택창에 12:00, 12:30을 추가하면서 하루 슬롯의 기준 시각이 13:00에서

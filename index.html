@@ -15,6 +15,12 @@
   </div>
 </header>
 
+<div class="storage-error-banner" id="storageErrorBanner" role="alert" hidden>
+  <strong>변경사항을 브라우저에 저장하지 못했습니다.</strong>
+  페이지를 닫거나 새로고침하면 최근 변경사항이 사라질 수 있습니다.
+  저장 공간이나 브라우저 설정을 확인한 뒤, 가능하면 백업 코드를 만들어 보관하세요.
+</div>
+
 <div class="app-shell">
 
   <nav class="sidebar" id="sidebar">
@@ -64,7 +70,7 @@
 
         <div class="settings-section settings-section--backup">
           <h3 class="subsection-title">데이터 백업 · 복원</h3>
-          <p class="card-desc subsection-desc">모든 데이터는 이 브라우저에만 저장되어 다른 기기·브라우저와 자동으로 공유되지 않습니다. 다른 기기에서도 같은 데이터를 쓰고 싶을 때, 여기서 백업 코드를 만들어 복사한 뒤 그 기기에서 붙여넣어 복원하세요. 백업 코드는 PIN으로 암호화되어, PIN을 모르면 코드만으로는 내용을 볼 수 없습니다.</p>
+          <p class="card-desc subsection-desc">모든 데이터는 이 브라우저에만 저장되어 다른 기기·브라우저와 자동으로 공유되지 않습니다. 다른 기기에서도 같은 데이터를 쓰고 싶을 때, 여기서 백업 코드를 만들어 복사한 뒤 그 기기에서 붙여넣어 복원하세요. 백업 코드는 백업 비밀번호로 암호화되어, 비밀번호를 모르면 코드만으로는 내용을 볼 수 없습니다. 새 백업 비밀번호는 12자 이상을 사용하세요.</p>
 
           <div class="request-form backup-actions">
             <button type="button" class="btn btn-ghost" id="backupExportBtn">백업 코드 만들기</button>
@@ -417,7 +423,7 @@
 
     <div class="modal-body">
       <p class="card-desc subsection-desc">
-        다른 기기에서 만든 백업 코드와, 그 코드를 만들 때 입력한 PIN을 입력하세요.
+        다른 기기에서 만든 백업 코드와, 그 코드를 만들 때 입력한 백업 비밀번호를 입력하세요.
         복원하면 이 기기에 현재 저장된 데이터는 백업 코드의 내용으로 덮어써집니다.
       </p>
       <div class="field">
@@ -425,7 +431,7 @@
         <textarea id="backupImportTextarea" class="bulk-import-textarea" rows="4" style="font-family:monospace;font-size:12px;"></textarea>
       </div>
       <div class="field" style="margin-top:10px;">
-        <label for="backupImportPinInput">PIN</label>
+        <label for="backupImportPinInput">백업 비밀번호</label>
         <input type="password" id="backupImportPinInput" autocomplete="off" />
       </div>
       <p class="generate-hint" id="backupImportHint"></p>
