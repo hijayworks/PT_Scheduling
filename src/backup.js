@@ -536,7 +536,10 @@ backupImportApplyBtnEl.addEventListener("click", async () => {
 });
 
 
-export function readRestoreRecoverySnapshot(storage = sessionStorage) {
+export function readRestoreRecoverySnapshot(
+  storage = typeof sessionStorage !== "undefined" ? sessionStorage : null,
+) {
+  if (!storage) return null;
   const raw = storage.getItem(RESTORE_RECOVERY_KEY);
   if (!raw) return null;
   try {
@@ -554,9 +557,10 @@ export function readRestoreRecoverySnapshot(storage = sessionStorage) {
 }
 
 export function restoreRecoverySnapshot(
-  storage = sessionStorage,
-  targetStorage = localStorage,
+  storage = typeof sessionStorage !== "undefined" ? sessionStorage : null,
+  targetStorage = typeof localStorage !== "undefined" ? localStorage : null,
 ) {
+  if (!storage || !targetStorage) return false;
   const snapshot = readRestoreRecoverySnapshot(storage);
   if (!snapshot) return false;
   if (snapshot.state === null) targetStorage.removeItem(STORAGE_KEY);
@@ -605,7 +609,8 @@ function renderRestoreRecoveryBanner() {
   dismissBtn.className = "btn btn-ghost";
   dismissBtn.textContent = "복구 지점 삭제";
   dismissBtn.addEventListener("click", () => {
-    sessionStorage.removeItem(RESTORE_RECOVERY_KEY);
+    if (typeof sessionStorage !== "undefined")
+      sessionStorage.removeItem(RESTORE_RECOVERY_KEY);
     banner.remove();
   });
 
