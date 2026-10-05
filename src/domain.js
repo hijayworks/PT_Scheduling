@@ -117,7 +117,11 @@ export function pairKey(idA, idB) {
 export function travelMinutes(locIdA, locIdB) {
   if (!locIdA || !locIdB || locIdA === locIdB) return 0;
   const v = state.travelTimes[pairKey(locIdA, locIdB)];
-  return typeof v === "number" && v >= 0 ? v : 0;
+  // 서로 다른 지점의 이동 시간이 없거나 손상된 경우 0분으로 간주하면 물리적으로 불가능한
+  // 연속 수업이 생길 수 있다. 계산상 연결 불가능(Infinity)으로 취급해 해당 전이를 막는다.
+  return typeof v === "number" && Number.isFinite(v) && v >= 0
+    ? v
+    : Infinity;
 }
 
 // SOLO_TRAVEL_LOCATION_NAMES와 같은 원칙: 이름이 정확히 하나씩만 매칭돼야 규칙이 활성화된다

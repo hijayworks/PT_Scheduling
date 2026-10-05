@@ -213,7 +213,7 @@
   function travelMinutes(locIdA, locIdB) {
     if (!locIdA || !locIdB || locIdA === locIdB) return 0;
     const v = state.travelTimes[pairKey(locIdA, locIdB)];
-    return typeof v === "number" && v >= 0 ? v : 0;
+    return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : Infinity;
   }
   function inefficientRoundTripLocationInfo() {
     const matches = state.locations.filter(
@@ -1099,12 +1099,20 @@
       if (idleA !== idleB) return idleA < idleB;
       return jsA < jsB;
     }
+    function chainContainsMember(endIndex, memberId) {
+      let cur2 = endIndex;
+      while (cur2 !== -1 && cur2 !== void 0) {
+        if (nodes[cur2].memberId === memberId) return true;
+        cur2 = prev[cur2];
+      }
+      return false;
+    }
     for (let i = 0; i < n; i++) {
       const node = nodes[i];
       let bestDp = node.weight, bestIneff = 0, bestTc = 0, bestTm = 0, bestIdle = 0, bestJs = node.jitter || 0, bestPrev = -1;
       for (let j = 0; j < i; j++) {
         const p = nodes[j];
-        if (p.memberId === node.memberId) continue;
+        if (chainContainsMember(j, node.memberId)) continue;
         const gapNeed = requiredGapMin2(p.locationId, node.locationId);
         const gapActual = (node.startSlot - p.end) * SLOT_MIN;
         if (gapActual < gapNeed) continue;
@@ -1183,14 +1191,9 @@
       }
     }
     const chain = [];
-    const used = /* @__PURE__ */ new Set();
     let cur = bestEnd;
     while (cur !== -1 && cur !== void 0) {
-      const node = nodes[cur];
-      if (!used.has(node.memberId)) {
-        chain.unshift(node);
-        used.add(node.memberId);
-      }
+      chain.unshift(nodes[cur]);
       cur = prev[cur];
     }
     return chain;
@@ -1314,16 +1317,20 @@
   }
   function candidateLocationsFor(memberId) {
     const member = memberById(memberId);
-    return member && member.locationIds && member.locationIds.length > 0 ? member.locationIds : [null];
+    if (!member || !Array.isArray(member.locationIds)) return [];
+    const knownLocationIds = new Set(state.locations.map((l) => l.id));
+    return member.locationIds.filter((id) => knownLocationIds.has(id));
   }
   function candidateLocationsForRequest(req) {
     const excluded = req.excludedLocationIds || [];
     const base = candidateLocationsFor(req.memberId).filter(
       (id) => id !== null && !excluded.includes(id)
     );
-    const extra = (req.extraLocationIds || []).filter((id) => !base.includes(id));
-    const combined = base.concat(extra);
-    return combined.length > 0 ? combined : [null];
+    const knownLocationIds = new Set(state.locations.map((l) => l.id));
+    const extra = (req.extraLocationIds || []).filter(
+      (id) => knownLocationIds.has(id) && !base.includes(id)
+    );
+    return base.concat(extra);
   }
   function requiredGapMin(locA, locB) {
     const raw = Math.max(BREAK_MIN, travelMinutes(locA, locB));

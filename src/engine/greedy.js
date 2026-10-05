@@ -61,9 +61,9 @@ export function isAdjacentDay(day, days) {
 // 실제로 사용할 지점을 그 순간의 상황(이동 시간)에 맞춰 고른다.
 export function candidateLocationsFor(memberId) {
   const member = memberById(memberId);
-  return member && member.locationIds && member.locationIds.length > 0
-    ? member.locationIds
-    : [null];
+  if (!member || !Array.isArray(member.locationIds)) return [];
+  const knownLocationIds = new Set(state.locations.map((l) => l.id));
+  return member.locationIds.filter((id) => knownLocationIds.has(id));
 }
 
 // 회원의 기본 지점들에서 그 신청 하나만 "지점 제거"로 빼둔 지점(req.excludedLocationIds)을
@@ -74,9 +74,11 @@ export function candidateLocationsForRequest(req) {
   const base = candidateLocationsFor(req.memberId).filter(
     (id) => id !== null && !excluded.includes(id),
   );
-  const extra = (req.extraLocationIds || []).filter((id) => !base.includes(id));
-  const combined = base.concat(extra);
-  return combined.length > 0 ? combined : [null];
+  const knownLocationIds = new Set(state.locations.map((l) => l.id));
+  const extra = (req.extraLocationIds || []).filter(
+    (id) => knownLocationIds.has(id) && !base.includes(id),
+  );
+  return base.concat(extra);
 }
 
 // 두 세션 사이에 실제로 확보해야 하는 최소 간격(분): 쉬는 시간 없이, 지점이 다를 때만 그
