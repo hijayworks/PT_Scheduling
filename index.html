@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none';" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none';" />
 <title>수업 스케줄 자동 생성기</title>
 <link rel="stylesheet" href="style.css?v=93e5920f" />
 </head>
@@ -55,7 +55,7 @@
           <p class="card-desc subsection-desc">근무하는 지점을 등록하고, 지점 쌍마다 실제 이동에 걸리는 시간을 입력해주세요. 후보 생성 시 이동 시간이 부족하면 해당 조합은 배정되지 않습니다.</p>
 
           <form id="locationForm" class="request-form">
-            <div class="field" style="flex:1 1 220px;">
+            <div class="field field-flex-220">
               <label for="locationName">지점 이름</label>
               <input type="text" id="locationName" placeholder="예: 상암점" autocomplete="off" />
               <p class="generate-hint" id="locationHint"></p>
@@ -65,7 +65,7 @@
 
           <div id="locationList" class="location-list"></div>
 
-          <h4 class="subsection-subtitle" id="travelTitle" style="display:none;">지점 간 이동 시간 (분)</h4>
+          <h4 class="subsection-subtitle" id="travelTitle" hidden>지점 간 이동 시간 (분)</h4>
           <div id="travelMatrix" class="travel-matrix"></div>
         </div>
 
@@ -78,10 +78,10 @@
             <button type="button" class="btn btn-ghost" id="backupImportOpenBtn">백업 코드로 복원</button>
           </div>
 
-          <div id="backupExportResult" style="display:none;margin-top:12px;">
+          <div id="backupExportResult" class="backup-export-result" hidden>
             <label for="backupExportTextarea">백업 코드 (복사해서 다른 기기에 붙여넣으세요)</label>
-            <textarea id="backupExportTextarea" class="bulk-import-textarea" readonly rows="4" style="font-family:monospace;font-size:12px;"></textarea>
-            <button type="button" class="btn btn-primary" id="backupExportCopyBtn" style="margin-top:6px;">복사</button>
+            <textarea id="backupExportTextarea" class="bulk-import-textarea backup-code-textarea" readonly rows="4"></textarea>
+            <button type="button" class="btn btn-primary backup-copy-btn" id="backupExportCopyBtn">복사</button>
           </div>
         </div>
       </div>
@@ -153,9 +153,9 @@
                   <span class="btn-spinner" id="generateBtnA3Spinner" aria-hidden="true"></span>
                   <span id="generateBtnA3Label">후보A 생성하기</span>
                 </button>
-                <button type="button" class="btn btn-ghost" id="generateBtnA3Cancel" style="display:none;">생성 취소</button>
+                <button type="button" class="btn btn-ghost" id="generateBtnA3Cancel" hidden>생성 취소</button>
               </div>
-              <div class="generate-progress" id="generateProgressWrapA3" style="display:none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnA3Label">
+              <div class="generate-progress" id="generateProgressWrapA3" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnA3Label">
                 <div class="generate-progress-track">
                   <div class="generate-progress-fill" id="generateProgressFillA3"></div>
                 </div>
@@ -170,9 +170,9 @@
                   <span class="btn-spinner" id="generateBtnBC3Spinner" aria-hidden="true"></span>
                   <span id="generateBtnBC3Label">후보B·C 생성하기</span>
                 </button>
-                <button type="button" class="btn btn-ghost" id="generateBtnBC3Cancel" style="display:none;">생성 취소</button>
+                <button type="button" class="btn btn-ghost" id="generateBtnBC3Cancel" hidden>생성 취소</button>
               </div>
-              <div class="generate-progress" id="generateProgressWrapBC3" style="display:none;" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnBC3Label">
+              <div class="generate-progress" id="generateProgressWrapBC3" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnBC3Label">
                 <div class="generate-progress-track">
                   <div class="generate-progress-fill" id="generateProgressFillBC3"></div>
                 </div>
@@ -227,7 +227,7 @@
           <input type="text" id="memberName" placeholder="예: 홍길동" autocomplete="off" />
           <p class="generate-hint" id="memberNameHint"></p>
         </div>
-        <div class="field" style="flex:1 1 220px;">
+        <div class="field field-flex-220">
           <label for="memberMemo">메모</label>
           <input type="text" id="memberMemo" placeholder="예: 무릎 부상 주의" autocomplete="off" />
         </div>
@@ -360,7 +360,7 @@
       </div>
     </div>
 
-    <div class="modal-body" id="bulkImportStepPreview" style="display:none;">
+    <div class="modal-body" id="bulkImportStepPreview" hidden>
       <p class="card-desc subsection-desc" id="bulkImportPreviewSummary"></p>
       <div id="bulkImportPreviewList" class="bulk-preview-list"></div>
       <div class="modal-actions">
@@ -404,7 +404,7 @@
       </div>
     </div>
 
-    <div class="modal-body" id="memberBulkImportStepPreview" style="display:none;">
+    <div class="modal-body" id="memberBulkImportStepPreview" hidden>
       <p class="card-desc subsection-desc" id="memberBulkImportPreviewSummary"></p>
       <div id="memberBulkImportPreviewList" class="bulk-preview-list"></div>
       <div class="modal-actions">
@@ -429,9 +429,9 @@
       </p>
       <div class="field">
         <label for="backupImportTextarea">백업 코드</label>
-        <textarea id="backupImportTextarea" class="bulk-import-textarea" rows="4" style="font-family:monospace;font-size:12px;"></textarea>
+        <textarea id="backupImportTextarea" class="bulk-import-textarea backup-code-textarea" rows="4"></textarea>
       </div>
-      <div class="field" style="margin-top:10px;">
+      <div class="field field-top-gap">
         <label for="backupImportPinInput">백업 비밀번호</label>
         <input type="password" id="backupImportPinInput" autocomplete="off" />
       </div>
