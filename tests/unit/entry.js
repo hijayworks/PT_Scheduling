@@ -46,3 +46,8 @@ export {
   runtime,
 } from "../../src/state.js";
 export { candidatePreservesConfirmed } from "../../src/schedule3.js";
+
+export {
+  validateBackupState,
+  parseAndValidateBackupText,
+} from "../../src/backup.js";

@@ -1370,11 +1370,10 @@ export function renderSchedule3Result() {
     if (result.unassignedMembers.length > 0) {
       const box = document.createElement("div");
       box.className = "unassigned-box unassigned-box-danger";
-      box.innerHTML =
-        "<b>미배정 회원 (" +
-        result.unassignedMembers.length +
-        "명)</b> · " +
-        result.unassignedMembers.map((m) => m.name).join(", ");
+      const title = document.createElement("b");
+      title.textContent =
+        "미배정 회원 (" + result.unassignedMembers.length + "명)";
+      box.append(title, " · ", result.unassignedMembers.map((m) => m.name).join(", "));
       card.appendChild(box);
     }
     // 회원별 배정 세션을 모아 정확히 2회 배정된 회원의 지점(세션마다 다를 수 있어 중복 제거
@@ -1413,13 +1412,16 @@ export function renderSchedule3Result() {
     if (doubleAssignedMembers.length > 0) {
       const box = document.createElement("div");
       box.className = "unassigned-box double-assigned-box";
-      box.innerHTML =
-        "<b>2회 배정 회원 (" +
-        doubleAssignedMembers.length +
-        "명)</b> · " +
+      const title = document.createElement("b");
+      title.textContent =
+        "2회 배정 회원 (" + doubleAssignedMembers.length + "명)";
+      box.append(
+        title,
+        " · ",
         doubleAssignedMembers
           .map((d) => d.locLabel + " " + d.member.name)
-          .join(", ");
+          .join(", "),
+      );
       card.appendChild(box);
     }
 
