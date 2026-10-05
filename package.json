@@ -4,14 +4,16 @@
   "main": "script.js",
   "scripts": {
     "prepare": "node scripts/install-git-hooks.js",
-    "test": "npm run test:csp-static && npm run test:unit && npm run test:golden && node tests/smoke.js",
+    "test": "npm run test:csp-static && npm run test:unit && npm run test:golden && npm run test:fuzz && node tests/smoke.js",
     "test:unit": "node tests/unit.js",
     "lint": "eslint .",
     "format": "prettier --write src tests scripts",
     "build": "node scripts/build.js",
     "bump-version": "node scripts/bump-cache-version.js",
     "test:csp-static": "node tests/cspStatic.js",
-    "test:golden": "node tests/golden.js"
+    "test:golden": "node tests/golden.js",
+    "test:fuzz": "node tests/fuzz.js",
+    "fuzz:stress": "node tests/fuzz.js --start 1000 --count 5000 --a-every 50"
   },
   "keywords": [],
   "author": "",

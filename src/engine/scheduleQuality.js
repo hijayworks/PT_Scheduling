@@ -1,4 +1,9 @@
-import { SLOT_MIN, START_MIN, MAX_TRAVELS_PER_DAY } from "../constants.js";
+import {
+  SLOT_MIN,
+  START_MIN,
+  BREAK_MIN,
+  MAX_TRAVELS_PER_DAY,
+} from "../constants.js";
 import { cellKey, durationToSlots } from "../utils.js";
 import { state, runtime } from "../state.js";
 import {
@@ -11,7 +16,6 @@ import { currentExcludedIds } from "../selectionOverride.js";
 import {
   candidateLocationsForRequest,
   requiredGapMin,
-  dailyTravelCount,
   totalTravelCount,
   totalTravelMinutes,
   totalInefficientMoveCount,
@@ -94,10 +98,26 @@ export function scheduleMetrics(result) {
   };
 }
 
-// 하드 제약 위반 목록(문자열)을 돌려준다 — 빈 배열이면 정상. 어떤 엔진·시드·입력이든 생성된
-// 후보는 이걸 통과해야 한다(골든 데이터셋·퍼즈 테스트 공용 판정 기준).
+// 어떤 엔진·시드·입력이든 생성된 후보가 반드시 지켜야 하는 하드 제약(업무 규칙 문장). 골든
+// 데이터셋·퍼즈 테스트가 규칙별로 위반을 집계한다.
+export const HARD_RULES = {
+  notRequested: "회원이 신청한 시간에만 배정한다",
+  excluded: "제외 회원은 배정하지 않는다",
+  location: "허용된 지점에만 배정한다",
+  availability: "근무 가능 시간에만 배정한다",
+  maxSessions: "최대 수업 횟수를 넘지 않는다",
+  sameDay: "같은 회원은 하루 2회 배정되지 않는다",
+  gap: "수업끼리 겹치지 않고, 다른 지점 사이에는 이동시간을 확보한다",
+  dailyTravel: `하루 이동은 ${MAX_TRAVELS_PER_DAY}회를 넘지 않는다`,
+  soloTravel: "세 지점 회원은 이동-회원-이동으로 배정하지 않는다",
+  unassigned: "미배정 목록과 실제 배정 상태가 일치한다",
+};
+
+// 하드 제약 위반 목록 [{rule, message}]을 돌려준다 — 빈 배열이면 정상.
 export function scheduleViolations(result) {
   const out = [];
+  const add = (rule, detail) =>
+    out.push({ rule, message: `${HARD_RULES[rule]} — ${detail}` });
   const requestsById = new Map(state.requests.map((r) => [r.id, r]));
   const excluded = new Set(currentExcludedIds());
   const soloIds = soloTravelMemberIds();
@@ -116,15 +136,15 @@ export function scheduleViolations(result) {
       req.day !== r.day ||
       req.startSlot !== r.startSlot
     ) {
-      out.push(`신청하지 않은 시간에 배정: ${where(r)}`);
+      add("notRequested", where(r));
       return;
     }
-    if (excluded.has(r.memberId)) out.push(`제외 회원 배정: ${where(r)}`);
+    if (excluded.has(r.memberId)) add("excluded", where(r));
     if (!candidateLocationsForRequest(req).includes(r.locationId))
-      out.push(`허용되지 않은 지점: ${where(r)} ${r.locationId}`);
+      add("location", `${where(r)} ${r.locationId}`);
     for (let i = 0; i < durationToSlots(r.duration); i++) {
       if (!runtime.availableCells.has(cellKey(r.day, r.startSlot + i))) {
-        out.push(`근무 불가 시간에 배정: ${where(r)}`);
+        add("availability", where(r));
         break;
       }
     }
@@ -132,13 +152,13 @@ export function scheduleViolations(result) {
 
   sessionsByMember.forEach((n, id) => {
     const max = maxSessionsFor(memberById(id));
-    if (n > max) out.push(`최대 횟수 초과: ${id} ${n}회 > ${max}회`);
+    if (n > max) add("maxSessions", `${id} ${n}회 > ${max}회`);
   });
 
   byDaySorted(result.assigned).forEach((reqs, day) => {
     const seen = new Set();
     reqs.forEach((r) => {
-      if (seen.has(r.memberId)) out.push(`같은 날 2회 배정: ${where(r)}`);
+      if (seen.has(r.memberId)) add("sameDay", where(r));
       seen.add(r.memberId);
     });
     for (let i = 1; i < reqs.length; i++) {
@@ -147,12 +167,20 @@ export function scheduleViolations(result) {
       const gapMin =
         (cur.startSlot - prev.startSlot - durationToSlots(prev.duration)) *
         SLOT_MIN;
-      // 이동시간이 없으면(Infinity) 어떤 간격으로도 연속 배정할 수 없다.
-      if (gapMin < requiredGapMin(prev.locationId, cur.locationId))
-        out.push(`겹침 또는 이동시간 부족: ${where(prev)} → ${where(cur)}`);
+      // 엔진의 requiredGapMin(격자 올림 포함)을 빌려 쓰지 않고 정책 원천(이동시간·쉬는 시간)에서
+      // 직접 계산한다 — 엔진 함수가 틀리면 검사기도 같이 틀려 위반을 못 잡기 때문이다(퍼즈
+      // 변형 시험으로 확인됨). 이동시간이 없으면(Infinity) 어떤 간격으로도 연속 배정할 수 없다.
+      if (
+        gapMin < BREAK_MIN ||
+        gapMin < travelMinutes(prev.locationId, cur.locationId)
+      )
+        add("gap", `${where(prev)} → ${where(cur)}`);
     }
-    if (dailyTravelCount(reqs) > MAX_TRAVELS_PER_DAY)
-      out.push(`하루 이동 ${MAX_TRAVELS_PER_DAY}회 초과: ${day}요일`);
+    let travels = 0;
+    for (let i = 1; i < reqs.length; i++)
+      if (travelMinutes(reqs[i - 1].locationId, reqs[i].locationId) > 0)
+        travels++;
+    if (travels > MAX_TRAVELS_PER_DAY) add("dailyTravel", `${day}요일`);
     for (let i = 1; i + 1 < reqs.length; i++) {
       const r = reqs[i];
       if (
@@ -160,7 +188,7 @@ export function scheduleViolations(result) {
         travelMinutes(reqs[i - 1].locationId, r.locationId) > 0 &&
         travelMinutes(r.locationId, reqs[i + 1].locationId) > 0
       )
-        out.push(`세 지점 회원의 이동-회원-이동 배정: ${where(r)}`);
+        add("soloTravel", where(r));
     }
   });
 
@@ -170,8 +198,9 @@ export function scheduleViolations(result) {
     .sort();
   const reportedUnassigned = result.unassignedMembers.map((m) => m.id).sort();
   if (expectedUnassigned.join() !== reportedUnassigned.join())
-    out.push(
-      `미배정 목록 불일치: 실제 [${expectedUnassigned}] / 보고 [${reportedUnassigned}]`,
+    add(
+      "unassigned",
+      `실제 [${expectedUnassigned}] / 보고 [${reportedUnassigned}]`,
     );
   return out;
 }

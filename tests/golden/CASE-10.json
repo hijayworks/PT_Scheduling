@@ -1,0 +1,479 @@
+{
+  "id": "CASE-10",
+  "description": "회귀(퍼즈 시드 1887 축소): 체인 앞쪽을 채울 때 세 지점 회원이 이동-회원-이동 자리에 끼면 안 됨 — 여의도↔상암 이동시간 0분",
+  "locations": [
+    {
+      "id": "L1",
+      "name": "마포점"
+    },
+    {
+      "id": "L2",
+      "name": "여의도점"
+    },
+    {
+      "id": "L3",
+      "name": "상암점"
+    }
+  ],
+  "travelTimes": {
+    "L1|L2": 40,
+    "L1|L3": 10,
+    "L2|L3": 0
+  },
+  "members": [
+    {
+      "id": "M3",
+      "name": "회원3",
+      "locationIds": ["L1", "L2", "L3"],
+      "category": "등록"
+    },
+    {
+      "id": "M4",
+      "name": "회원4",
+      "locationIds": ["L1"],
+      "category": "등록"
+    },
+    {
+      "id": "M12",
+      "name": "회원12",
+      "locationIds": ["L1"],
+      "category": "상담"
+    }
+  ],
+  "requests": [
+    {
+      "id": "r30",
+      "memberId": "M3",
+      "day": 2,
+      "startSlot": 35,
+      "duration": 60,
+      "excludedLocationIds": ["L3"],
+      "extraLocationIds": ["L3"]
+    },
+    {
+      "id": "r31",
+      "memberId": "M3",
+      "day": 2,
+      "startSlot": 36,
+      "duration": 60,
+      "excludedLocationIds": ["L3"],
+      "extraLocationIds": ["L3"]
+    },
+    {
+      "id": "r32",
+      "memberId": "M3",
+      "day": 2,
+      "startSlot": 37,
+      "duration": 60,
+      "excludedLocationIds": ["L3"],
+      "extraLocationIds": ["L3"]
+    },
+    {
+      "id": "r33",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 55,
+      "duration": 60
+    },
+    {
+      "id": "r34",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 56,
+      "duration": 60
+    },
+    {
+      "id": "r35",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 57,
+      "duration": 60
+    },
+    {
+      "id": "r36",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 58,
+      "duration": 60
+    },
+    {
+      "id": "r37",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 59,
+      "duration": 60
+    },
+    {
+      "id": "r38",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 60,
+      "duration": 60
+    },
+    {
+      "id": "r39",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 61,
+      "duration": 60
+    },
+    {
+      "id": "r40",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 62,
+      "duration": 60
+    },
+    {
+      "id": "r41",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 63,
+      "duration": 60
+    },
+    {
+      "id": "r42",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 64,
+      "duration": 60
+    },
+    {
+      "id": "r43",
+      "memberId": "M3",
+      "day": 4,
+      "startSlot": 65,
+      "duration": 60
+    },
+    {
+      "id": "r44",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 22,
+      "duration": 60
+    },
+    {
+      "id": "r45",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 23,
+      "duration": 60
+    },
+    {
+      "id": "r46",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 24,
+      "duration": 60
+    },
+    {
+      "id": "r47",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 25,
+      "duration": 60
+    },
+    {
+      "id": "r48",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 26,
+      "duration": 60
+    },
+    {
+      "id": "r49",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 27,
+      "duration": 60
+    },
+    {
+      "id": "r50",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 28,
+      "duration": 60
+    },
+    {
+      "id": "r51",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 29,
+      "duration": 60
+    },
+    {
+      "id": "r52",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 30,
+      "duration": 60
+    },
+    {
+      "id": "r53",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 31,
+      "duration": 60
+    },
+    {
+      "id": "r54",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 32,
+      "duration": 60
+    },
+    {
+      "id": "r55",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 33,
+      "duration": 60
+    },
+    {
+      "id": "r56",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 34,
+      "duration": 60
+    },
+    {
+      "id": "r57",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 35,
+      "duration": 60
+    },
+    {
+      "id": "r58",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 36,
+      "duration": 60
+    },
+    {
+      "id": "r59",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 37,
+      "duration": 60
+    },
+    {
+      "id": "r60",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 38,
+      "duration": 60
+    },
+    {
+      "id": "r61",
+      "memberId": "M3",
+      "day": 1,
+      "startSlot": 39,
+      "duration": 60
+    },
+    {
+      "id": "r62",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 13,
+      "duration": 60
+    },
+    {
+      "id": "r63",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 14,
+      "duration": 60
+    },
+    {
+      "id": "r64",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 15,
+      "duration": 60
+    },
+    {
+      "id": "r65",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 16,
+      "duration": 60
+    },
+    {
+      "id": "r66",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 17,
+      "duration": 60
+    },
+    {
+      "id": "r67",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 18,
+      "duration": 60
+    },
+    {
+      "id": "r68",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 19,
+      "duration": 60
+    },
+    {
+      "id": "r69",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 20,
+      "duration": 60
+    },
+    {
+      "id": "r70",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 21,
+      "duration": 60
+    },
+    {
+      "id": "r71",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 22,
+      "duration": 60
+    },
+    {
+      "id": "r72",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 23,
+      "duration": 60
+    },
+    {
+      "id": "r73",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 24,
+      "duration": 60
+    },
+    {
+      "id": "r74",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 25,
+      "duration": 60
+    },
+    {
+      "id": "r75",
+      "memberId": "M4",
+      "day": 2,
+      "startSlot": 26,
+      "duration": 60
+    },
+    {
+      "id": "r76",
+      "memberId": "M4",
+      "day": 1,
+      "startSlot": 47,
+      "duration": 60
+    },
+    {
+      "id": "r77",
+      "memberId": "M4",
+      "day": 1,
+      "startSlot": 48,
+      "duration": 60
+    },
+    {
+      "id": "r78",
+      "memberId": "M4",
+      "day": 1,
+      "startSlot": 49,
+      "duration": 60
+    },
+    {
+      "id": "r79",
+      "memberId": "M4",
+      "day": 1,
+      "startSlot": 50,
+      "duration": 60
+    },
+    {
+      "id": "r80",
+      "memberId": "M4",
+      "day": 1,
+      "startSlot": 51,
+      "duration": 60
+    },
+    {
+      "id": "r177",
+      "memberId": "M12",
+      "day": 2,
+      "startSlot": 59,
+      "duration": 30,
+      "excludedLocationIds": []
+    },
+    {
+      "id": "r178",
+      "memberId": "M12",
+      "day": 2,
+      "startSlot": 60,
+      "duration": 30,
+      "excludedLocationIds": []
+    },
+    {
+      "id": "r179",
+      "memberId": "M12",
+      "day": 1,
+      "startSlot": 34,
+      "duration": 30
+    },
+    {
+      "id": "r180",
+      "memberId": "M12",
+      "day": 1,
+      "startSlot": 35,
+      "duration": 30
+    },
+    {
+      "id": "r181",
+      "memberId": "M12",
+      "day": 1,
+      "startSlot": 36,
+      "duration": 30
+    },
+    {
+      "id": "r182",
+      "memberId": "M12",
+      "day": 1,
+      "startSlot": 37,
+      "duration": 30
+    },
+    {
+      "id": "r183",
+      "memberId": "M12",
+      "day": 1,
+      "startSlot": 38,
+      "duration": 30
+    }
+  ],
+  "availableCells": ["0-13", "0-14", "0-15", "0-16", "0-17", "0-18", "0-19", "0-20", "0-21", "0-22", "0-23", "0-24", "0-25", "0-26", "0-27", "0-28", "0-29", "0-30", "0-31", "0-32", "0-33", "0-34", "0-35", "0-36", "0-37", "0-38", "0-39", "1-12", "1-13", "1-14", "1-15", "1-16", "1-17", "1-18", "1-19", "1-20", "1-21", "1-22", "1-23", "1-24", "1-25", "1-26", "1-27", "1-28", "1-29", "1-30", "1-31", "1-32", "1-33", "1-34", "1-35", "1-36", "1-37", "1-38", "1-39", "1-40", "1-41", "1-42", "1-43", "1-44", "1-45", "1-46", "1-47", "1-48", "1-49", "1-50", "1-51", "1-52", "1-53", "1-54", "1-55", "1-56", "1-57", "1-58", "1-59", "1-60", "1-61", "1-62", "1-63", "1-64", "1-65", "1-66", "1-67", "1-68", "3-12", "3-13", "3-14", "3-15", "3-16", "3-17", "3-18", "3-19", "3-20", "3-21", "3-22", "3-23", "3-24", "3-25", "3-26", "3-27", "3-28", "3-29", "3-30", "3-31", "3-32", "3-33", "3-34", "3-35", "3-36", "3-37", "3-38", "3-39", "3-40", "3-41", "3-42", "3-43", "3-44", "3-45", "3-46", "3-47", "3-48", "3-49", "3-50", "3-51", "3-52", "3-53", "3-54", "3-55", "3-56", "3-57", "3-58", "3-59", "3-60", "3-61", "3-62", "3-63", "3-64", "3-65", "3-66", "3-67", "3-68", "4-12", "4-13", "4-14", "4-15", "4-16", "4-17", "4-18", "4-19", "4-20", "4-21", "4-22", "4-23", "4-24", "4-25", "4-26", "4-27", "4-28", "4-29", "4-30", "4-31", "4-32", "4-33", "4-34", "4-35", "4-36", "4-37", "4-38", "4-39", "4-40", "4-41", "4-42", "4-43", "4-44", "4-45", "4-46", "4-47", "4-48", "4-49", "4-50", "4-51", "4-52", "4-53", "4-54", "4-55", "4-56", "4-57", "4-58", "4-59", "4-60", "4-61", "4-62", "4-63", "4-64", "4-65", "4-66", "4-67", "4-68"],
+  "onceLimitedMemberIds3": [],
+  "excludedMemberIds3": [],
+  "expect": {
+    "attempts": 20,
+    "B": {
+      "maxUnassigned": 1,
+      "minSessions": 3,
+      "maxInefficientMoves": 0,
+      "maxTravelCount": 0,
+      "maxIdleMinutes": 0
+    },
+    "C": {
+      "maxUnassigned": 1,
+      "minSessions": 3,
+      "maxInefficientMoves": 0,
+      "maxTravelCount": 0,
+      "maxIdleMinutes": 0
+    }
+  }
+}

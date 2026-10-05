@@ -334,8 +334,9 @@ export function greedyAssign(eligibleReqs, options, pinned) {
     // 각 (신청, 사용할 지점) 조합을 노드로 보고 끝나는 시각 오름차순으로 처리한다.
     // 노드를 "끝나는 시각 + 지점"으로 색인해두면, 다음 신청이 필요로 하는 "정확히 그 시각에
     // 끝나는 이전 세션"을 매번 전체를 훑지 않고 바로 찾을 수 있다.
-    // endBefore가 있으면({slot, locationId}), 하루 전체가 아니라 그 시각·지점 앞에 정확히
-    // 맞물려 끝나는 체인만 찾는다 — 확정(고정)된 세션 앞의 빈 시간을 채울 때 쓴다.
+    // endBefore가 있으면({slot, locationId, noTravelIn}), 하루 전체가 아니라 그 시각·지점 앞에
+    // 정확히 맞물려 끝나는 체인만 찾는다 — 확정(고정)된 세션이나 기존 체인 앞의 빈 시간을 채울
+    // 때 쓴다. noTravelIn이면 endBefore로 이동해 들어오는 체인은 고르지 않는다(endBeforeOf 참고).
     // onlyLocationId가 있으면("지점 우선 배정" 사전 단계), 그 지점을 등록해둔
     // 회원의 그 지점 후보만으로 체인을 짠다 — 같은 지점끼리는 이동 시간이 0이므로, 이 체인은
     // 곧 "그 요일에 그 지점으로 최대한 많이 배정하는" 결과가 된다.
@@ -733,6 +734,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
         allLocIds.forEach((loc) => {
           const need = requiredGapMin(loc, endBefore.locationId);
           const transitionMin = travelMinutes(loc, endBefore.locationId);
+          if (endBefore.noTravelIn && transitionMin > 0) return;
           for (
             let slackMin = 0;
             slackMin <= allowGapMin;
@@ -918,6 +920,24 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       }
     }
 
+    // 이미 정해진 체인(chain) 앞에 다른 체인을 붙일 때 넘길 endBefore. 숨김 하드 로직("이동-회원-
+    // 이동" 금지, buildBestChain의 동일 로직 참고): chain 첫 세션이 세 지점 회원이고 거기서 이미
+    // 이동으로 떠난다면, 앞에서 이동으로 들어오는 체인을 붙이면 그 회원이 양쪽 이동에 끼게 된다 —
+    // 앞쪽 체인만 보는 buildBestChain은 이 결합 지점을 모르므로 여기서 알려준다(퍼즈 테스트로
+    // 확인된 문제, tests/golden/CASE-09·10).
+    function endBeforeOf(chain) {
+      const first = chain[0];
+      const second = chain[1];
+      return {
+        slot: first.startSlot,
+        locationId: first.locationId,
+        noTravelIn:
+          !!second &&
+          soloTravelIds.has(first.memberId) &&
+          travelMinutes(first.locationId, second.locationId) > 0,
+      };
+    }
+
     // extendExistingChain이 체인 뒤쪽만 확장하는 것과 대칭으로, 체인 맨 앞(가장 이른 확정
     // 세션) 앞의 빈 시간을 채운다. 확정(고정) 세션 앞을 채울 때 쓰던 buildBestChain의
     // endBefore 기능을 그대로 재사용해, 체인 시작점 앞에 정확히 맞물리는 최선의 체인을
@@ -937,12 +957,11 @@ export function greedyAssign(eligibleReqs, options, pinned) {
         [...eligibleMemberIds].filter((id) => !usedMembers.has(id)),
       );
       if (remaining.size === 0) return;
-      const chainStart = chain[0];
       const frontChain = buildBestChain(
         day,
         remaining,
         weightFn,
-        { slot: chainStart.startSlot, locationId: chainStart.locationId },
+        endBeforeOf(chain),
         null,
         coveragePriority,
       );
@@ -1015,11 +1034,12 @@ export function greedyAssign(eligibleReqs, options, pinned) {
         const beforeEligible = new Set(
           [...allMemberIdsForDay(day)].filter((id) => !pinnedMemberIds.has(id)),
         );
-        const firstPin = dayPins[0];
-        buildBestChain(day, beforeEligible, fairnessWeight, {
-          slot: firstPin.startSlot,
-          locationId: firstPin.locationId,
-        }).forEach((s) => commit(day, s));
+        buildBestChain(
+          day,
+          beforeEligible,
+          fairnessWeight,
+          endBeforeOf(dayPins),
+        ).forEach((s) => commit(day, s));
         dayPins.forEach((p) => commit(day, p));
       });
     }
