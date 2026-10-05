@@ -508,7 +508,7 @@ backupImportApplyBtnEl.addEventListener("click", async () => {
   // 손상되지 않는다.
   const currentRaw = localStorage.getItem(STORAGE_KEY);
   try {
-    sessionStorage.setItem(
+    window.sessionStorage.setItem(
       RESTORE_RECOVERY_KEY,
       JSON.stringify({
         createdAt: Date.now(),
@@ -537,7 +537,9 @@ backupImportApplyBtnEl.addEventListener("click", async () => {
 
 
 export function readRestoreRecoverySnapshot(
-  storage = typeof sessionStorage !== "undefined" ? sessionStorage : null,
+  storage = typeof window !== "undefined" && window.sessionStorage
+    ? window.sessionStorage
+    : null,
 ) {
   if (!storage) return null;
   const raw = storage.getItem(RESTORE_RECOVERY_KEY);
@@ -557,7 +559,9 @@ export function readRestoreRecoverySnapshot(
 }
 
 export function restoreRecoverySnapshot(
-  storage = typeof sessionStorage !== "undefined" ? sessionStorage : null,
+  storage = typeof window !== "undefined" && window.sessionStorage
+    ? window.sessionStorage
+    : null,
   targetStorage = typeof localStorage !== "undefined" ? localStorage : null,
 ) {
   if (!storage || !targetStorage) return false;
@@ -609,8 +613,8 @@ function renderRestoreRecoveryBanner() {
   dismissBtn.className = "btn btn-ghost";
   dismissBtn.textContent = "복구 지점 삭제";
   dismissBtn.addEventListener("click", () => {
-    if (typeof sessionStorage !== "undefined")
-      sessionStorage.removeItem(RESTORE_RECOVERY_KEY);
+    if (typeof window !== "undefined" && window.sessionStorage)
+      window.sessionStorage.removeItem(RESTORE_RECOVERY_KEY);
     banner.remove();
   });
 
