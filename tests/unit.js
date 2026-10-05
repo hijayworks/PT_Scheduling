@@ -1130,6 +1130,34 @@ test("체인DP는 세 지점 회원을 이동-회원-이동 자리에 배정하�
   assert(!lib.chainBreaksSoloTravel(chain, lib.soloTravelMemberIds()), chain.map((n) => n.id).join("→"));
 });
 
+/* ---------------- candidateDiversity.js: 후보 다양성 판정 ---------------- */
+const diversity = require("./candidateDiversity.js");
+function divCand(key, sessions, metrics) {
+  const base = { unassigned: 0, sessions: sessions.length, inefficientMoves: 0, travelCount: 0, travelMinutes: 0, idleMinutes: 0 };
+  return {
+    key,
+    result: { assigned: sessions.map(([memberId, day, startSlot, locationId]) => ({ memberId, day, startSlot, locationId })), unassignedMembers: [] },
+    metrics: { ...base, ...metrics },
+  };
+}
+test("후보 다양성: 배정이 같으면 중복, 지표만 같으면 구조만 다름, 장단점이 갈리면 trade-off", () => {
+  const a = divCand("A", [["m1", 0, 0, "L1"], ["m2", 0, 6, "L1"]]);
+  const sameLayout = divCand("A'", [["m2", 0, 6, "L1"], ["m1", 0, 0, "L1"]]);
+  const shifted = divCand("S", [["m1", 0, 1, "L1"], ["m2", 0, 7, "L1"]]);
+  const moreButTravel = divCand("T", [["m1", 0, 0, "L1"], ["m2", 0, 6, "L1"], ["m3", 0, 12, "L2"]], { travelCount: 1 });
+  const worse = divCand("W", [["m1", 1, 0, "L1"], ["m2", 1, 6, "L1"]], { idleMinutes: 30 });
+  assertEqual(diversity.pairRelation(a, sameLayout).relation, "duplicate");
+  const s = diversity.pairRelation(a, shifted);
+  assertEqual([s.relation, s.sessionSimilarity, s.memberDaySimilarity], ["same-quality", 0, 1]);
+  const t = diversity.pairRelation(a, moreButTravel);
+  assertEqual([t.relation, t.deltas], ["trade-off", { sessions: 1, travelCount: 1 }]);
+  assertEqual(diversity.pairRelation(worse, a).winner, "A", "빈 시간만 많은 쪽이 진다");
+  const sum = diversity.diversitySummary([a, sameLayout, shifted, moreButTravel, worse]);
+  assertEqual([sum.shown, sum.exactUnique, sum.qualityTypes], [5, 4, 3]);
+  assertEqual(sum.pareto, ["A", "A'", "S", "T"], "W만 지배당함");
+  assertEqual(sum.paretoQualityTypes, 2, "A·A'·S는 품질이 같아 선택지 하나, T가 둘째");
+});
+
 /* ---------------- goldenFloors.js: 골든 품질 하한 래칫 ---------------- */
 const goldenFloors = require("./goldenFloors.js");
 function floorSet(sessions, travel) {
