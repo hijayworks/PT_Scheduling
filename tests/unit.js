@@ -1053,7 +1053,7 @@ const poolAttempts = Array.from({ length: 7 }, (_, i) => ({ order: [0], seedOffs
 testAsync("다듬기 워커 결과는 끝나는 순서와 무관하게 시도 번호 자리에 들어간다", async () => {
   lib.state.members = [{ id: "U1", name: "u1" }];
   const factory = fakeWorkerFactory((w, msg) =>
-    w.onmessage({ data: { index: msg.index, assigned: [{ id: "s" + msg.seedOffset }], unassignedMemberIds: ["U1"] } }),
+    w.onmessage({ data: { index: msg.index, result: { assigned: [{ id: "s" + msg.seedOffset }], unassignedMemberIds: ["U1"] } } }),
   );
   let done = 0;
   const results = await lib.runPolishAttemptsInWorkers({}, poolAttempts, 10, () => done++, {
@@ -1073,7 +1073,7 @@ testAsync("다듬기 워커가 실패한 시도는 비워 두어 메인 스레�
       failed = msg.index;
       return w.onmessage({ data: { index: msg.index, error: "boom" } });
     }
-    w.onmessage({ data: { index: msg.index, assigned: [], unassignedMemberIds: [] } });
+    w.onmessage({ data: { index: msg.index, result: { assigned: [], unassignedMemberIds: [] } } });
   });
   const warn = console.warn;
   console.warn = () => {};
@@ -1109,39 +1109,44 @@ testAsync("다듬기 워커 실행 중 취소하면 워커를 모두 종료하�
   assert(factory.created.every((w) => w.terminated), "취소 시 워커를 모두 종료해야 함");
 });
 
-// 실제 워커 번들(src/engine/polishWorker.js)을 Node worker_threads에서 돌려, 메인 스레드에서
+// 실제 엔진 워커 번들(src/engine/engineWorker.js)을 Node worker_threads에서 브라우저 Worker와
+// 같은 모양으로 감싼다. fakeClock이면 워커 안 performance.now()를 호출마다 1ms씩 흐르는 가짜
+// 시계로 바꿔 시간 예산을 결정적으로 만든다.
+let engineWorkerBundle = null;
+function createThreadWorker(fakeClock) {
+  const { Worker: ThreadWorker } = require("worker_threads");
+  if (!engineWorkerBundle)
+    engineWorkerBundle = esbuild.buildSync({
+      entryPoints: [path.join(__dirname, "..", "src", "engine", "engineWorker.js")],
+      bundle: true,
+      format: "iife",
+      platform: "neutral",
+      write: false,
+      logLevel: "silent",
+    }).outputFiles[0].text;
+  const prelude =
+    "const { parentPort } = require('worker_threads');" +
+    (fakeClock ? "let fakeNow = 0; performance.now = () => (fakeNow += 1);" : "") +
+    "globalThis.self = { postMessage: (m) => parentPort.postMessage(m) };" +
+    "parentPort.on('message', (data) => self.onmessage({ data }));";
+  const t = new ThreadWorker(prelude + engineWorkerBundle, { eval: true });
+  return {
+    postMessage: (m) => t.postMessage(m),
+    terminate: () => t.terminate(),
+    set onmessage(fn) {
+      t.on("message", (data) => fn({ data }));
+    },
+    set onerror(fn) {
+      t.on("error", (err) => fn({ message: String(err) }));
+    },
+  };
+}
+
+// 실제 워커 번들(src/engine/engineWorker.js)을 Node worker_threads에서 돌려, 메인 스레드에서
 // 같은 시도를 다듬은 결과와 같은지 확인한다 — 파이프라인이 새로 읽게 된 상태를 워커에 넘기는
 // 걸 빠뜨리면 결과가 조용히 달라지므로 그 회귀를 잡는다. 시간 예산을 결정적으로 만들기 위해
 // 양쪽 다 performance.now()를 호출마다 1ms씩 흐르는 가짜 시계로 바꾼다.
 testAsync("워커에서 다듬은 결과는 메인 스레드에서 다듬은 결과와 같다", async () => {
-  const { Worker: ThreadWorker } = require("worker_threads");
-  const workerBundle = esbuild.buildSync({
-    entryPoints: [path.join(__dirname, "..", "src", "engine", "polishWorker.js")],
-    bundle: true,
-    format: "iife",
-    platform: "neutral",
-    write: false,
-    logLevel: "silent",
-  }).outputFiles[0].text;
-  const prelude =
-    "const { parentPort } = require('worker_threads');" +
-    "let fakeNow = 0; performance.now = () => (fakeNow += 1);" +
-    "globalThis.self = { postMessage: (m) => parentPort.postMessage(m) };" +
-    "parentPort.on('message', (data) => self.onmessage({ data }));";
-  function createThreadWorker() {
-    const t = new ThreadWorker(prelude + workerBundle, { eval: true });
-    return {
-      postMessage: (m) => t.postMessage(m),
-      terminate: () => t.terminate(),
-      set onmessage(fn) {
-        t.on("message", (data) => fn({ data }));
-      },
-      set onerror(fn) {
-        t.on("error", (err) => fn({ message: String(err) }));
-      },
-    };
-  }
-
   lib.state.locations = [
     { id: "L1", name: "마포점" },
     { id: "L2", name: "여의도점" },
@@ -1190,7 +1195,7 @@ testAsync("워커에서 다듬은 결과는 메인 스레드에서 다듬은 결
             attempts,
             400,
             null,
-            { createWorker: createThreadWorker, workerCount: 2 },
+            { createWorker: () => createThreadWorker(true), workerCount: 2 },
           );
           for (let i = 0; i < attempts.length; i++) {
             let fakeNow = 0;
@@ -1215,6 +1220,108 @@ testAsync("워커에서 다듬은 결과는 메인 스레드에서 다듬은 결
     localSigsByMode[0].some((s, i) => s !== localSigsByMode[1][i]),
     "테스트 데이터에서 빈 시간 최소화 모드가 결과를 바꾸지 않음 — 데이터를 조정해야 함",
   );
+});
+
+// 워커 응답을 시도 번호에 따라 0~16ms씩 늦게 전달해, 워커 완료 순서가 번호 순서와 달라지게 한다.
+function withScrambledReplies(worker) {
+  let handler = null;
+  worker.onmessage = (event) =>
+    setTimeout(() => handler(event), (event.data.index * 7919) % 17);
+  return {
+    postMessage: (m) => worker.postMessage(m),
+    terminate: () => worker.terminate(),
+    set onmessage(fn) {
+      handler = fn;
+    },
+    set onerror(fn) {
+      worker.onerror = fn;
+    },
+  };
+}
+
+// 그리디 탐색은 시간 예산 없이 시드 난수로만 정해지므로, 워커 수와 무관하게 순차 실행과
+// 결과(최선 후보·동점 풀 전체)가 바이트 단위로 같아야 한다. 워커가 끝나는 순서가 결과 선택에
+// 영향을 주면 이 비교가 깨진다.
+testAsync("그리디 탐색은 워커 수와 무관하게 순차 실행과 결과가 같다", async () => {
+  lib.state.locations = [
+    { id: "L1", name: "마포점" },
+    { id: "L2", name: "여의도점" },
+    { id: "L3", name: "상암점" },
+  ];
+  lib.state.travelTimes = { [lib.pairKey("L1", "L2")]: 20, [lib.pairKey("L1", "L3")]: 30, [lib.pairKey("L2", "L3")]: 40 };
+  lib.state.members = [
+    { id: "G0", name: "g0", locationIds: ["L1"], category: "등록" },
+    { id: "G1", name: "g1", locationIds: ["L1", "L2"], category: "등록" },
+    { id: "G2", name: "g2", locationIds: ["L2"], category: "상담" },
+    { id: "G3", name: "g3", locationIds: ["L2"], category: "등록" },
+    { id: "G4", name: "g4", locationIds: ["L1"], category: "등록" },
+  ];
+  lib.state.excludedMemberIds3 = ["G3"];
+  lib.state.onceLimitedMemberIds3 = ["G1"];
+  lib.state.requests = [];
+  lib.runtime.availableCells = new Set();
+  [0, 1].forEach((day) => {
+    for (let s = 0; s < 20; s++) lib.runtime.availableCells.add(day + "-" + s);
+    lib.state.members.slice(0, 4).forEach((m, k) => {
+      for (let s = 3 * ((k + day) % 3); s < 3 * ((k + day) % 3) + 3; s++)
+        lib.state.requests.push({ id: "q" + k + "_" + day + "_" + s, memberId: m.id, day, startSlot: s, duration: m.category === "상담" ? 30 : 60 });
+    });
+  });
+  // G1만 신청한 요일 — 1회 제한(G1)이 있으면 G1은 한 번만, 없으면 두 번 배정될 수 있다.
+  for (let s = 0; s < 20; s++) lib.runtime.availableCells.add("2-" + s);
+  for (let s = 0; s < 3; s++)
+    lib.state.requests.push({ id: "only1_" + s, memberId: "G1", day: 2, startSlot: s, duration: 60 });
+  // 근무 셀 밖 신청만 낸 회원 — 항상 미배정이고, 워커가 근무 셀을 못 받으면 결과가 달라진다.
+  lib.state.requests.push({ id: "out", memberId: "G4", day: 1, startSlot: 40, duration: 60 });
+  const snapshot = (r) =>
+    JSON.stringify({ built: r.built, pools: r.pools });
+  const realRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  try {
+    const sequential = snapshot(await lib.generateCandidatesAsync(() => {}, { workerCount: 0, attempts: 120 }));
+    const eligible = lib.state.requests.filter(lib.isEligibleRequest);
+    const eligibleIds = new Set(eligible.map((r) => r.id));
+    const allMemberIds = new Set(
+      lib.state.requests.filter((r) => !lib.state.excludedMemberIds3.includes(r.memberId)).map((r) => r.memberId),
+    );
+    const sequentialPool = JSON.stringify(
+      await lib.buildGreedySearchPool(eligible, eligibleIds, allMemberIds, () => {}, { workerCount: 0, attempts: 120 }),
+    );
+    // 이 데이터에서 1회 제한이 결과를 실제로 바꿔야, 워커가 1회 제한 목록을 빠뜨렸을 때 위
+    // 비교가 깨진다.
+    lib.state.onceLimitedMemberIds3 = [];
+    const withoutOnceLimit = snapshot(await lib.generateCandidatesAsync(() => {}, { workerCount: 0, attempts: 120 }));
+    lib.state.onceLimitedMemberIds3 = ["G1"];
+    assert(withoutOnceLimit !== sequential, "테스트 데이터에서 1회 제한이 결과를 바꾸지 않음 — 데이터를 조정해야 함");
+    let anyUnassigned = false;
+    for (const workerCount of [1, 2, 3]) {
+      const parallel = await lib.generateCandidatesAsync(() => {}, {
+        workerCount,
+        attempts: 120,
+        // 시도 번호마다 응답을 다르게 지연시켜 완료 순서를 일부러 섞는다.
+        createWorker: () => withScrambledReplies(createThreadWorker(false)),
+      });
+      assertEqual(snapshot(parallel), sequential, "워커 " + workerCount + "개");
+      // 최종 선택만이 아니라 시도 결과 배열 전체가 순차 실행과 같은 자리·순서여야 한다.
+      const parallelPool = await lib.buildGreedySearchPool(eligible, eligibleIds, allMemberIds, () => {}, {
+        workerCount,
+        attempts: 120,
+        createWorker: () => withScrambledReplies(createThreadWorker(false)),
+      });
+      assertEqual(JSON.stringify(parallelPool), sequentialPool, "워커 " + workerCount + "개 시도 배열");
+      parallel.pools.flat().forEach((c) =>
+        c.unassignedMembers.forEach((m) => {
+          anyUnassigned = true;
+          assert(lib.state.members.includes(m), "미배정 회원은 메인 스레드의 회원 객체여야 함");
+        }),
+      );
+    }
+    assert(anyUnassigned, "테스트 데이터에 미배정 회원이 있어야 회원 객체 복원을 확인할 수 있음");
+  } finally {
+    globalThis.requestAnimationFrame = realRaf;
+    lib.state.excludedMemberIds3 = [];
+    lib.state.onceLimitedMemberIds3 = [];
+  }
 });
 
 (async () => {

@@ -78,11 +78,13 @@ async function main() {
     page.on("pageerror", (err) => failures.push("페이지 런타임 에러: " + err.message));
     page.on("console", (msg) => {
       if (msg.type() === "error") failures.push("콘솔 에러: " + msg.text());
-      // 다듬기 워커가 실패하면 메인 스레드로 조용히 대체되므로(결과는 맞지만 느려짐) 경고도 잡는다.
-      if (msg.type() === "warning" && msg.text().includes("다듬기 워커"))
-        failures.push("다듬기 워커 대체 발생: " + msg.text());
+      // 엔진 워커가 실패하면 메인 스레드로 조용히 대체되므로(결과는 맞지만 느려짐) 경고도 잡는다
+      // (src/engine/workerPool.js의 ENGINE_WORKER_WARNING 표식).
+      if (msg.type() === "warning" && msg.text().includes("[엔진 워커]"))
+        failures.push("엔진 워커 대체 발생: " + msg.text());
     });
-    // 후보A 다듬기가 실제로 Web Worker 경로를 탔는지 확인하기 위해 워커가 보낸 결과 메시지 수를 센다.
+    // 그리디 탐색(후보B·C)·후보A 다듬기가 실제로 Web Worker 경로를 탔는지 확인하기 위해 워커가
+    // 보낸 결과 메시지 수를 센다.
     await page.addInitScript(() => {
       window.__PT_WORKER_MESSAGES__ = 0;
       const NativeWorker = window.Worker;
@@ -117,6 +119,11 @@ async function main() {
       state && Array.isArray(state.candidates) && state.candidates.length > 0,
       "후보B·C 생성 결과가 비어있음 (그리디 엔진 회귀 의심)"
     );
+    const workerMessagesAfterBC = await page.evaluate(() => window.__PT_WORKER_MESSAGES__);
+    assert(
+      workerMessagesAfterBC > 0,
+      "후보B·C 그리디 탐색이 Web Worker를 쓰지 않음 (워커 생성·CSP·번들 회귀 의심)"
+    );
 
     if (SKIP_A) {
       console.log("SMOKE_SKIP_A=1 — 후보A(체인DP) 검증은 건너뜀");
@@ -139,7 +146,7 @@ async function main() {
       );
       const workerMessages = await page.evaluate(() => window.__PT_WORKER_MESSAGES__);
       assert(
-        workerMessages > 0,
+        workerMessages > workerMessagesAfterBC,
         "후보A 다듬기가 Web Worker를 쓰지 않음 (워커 생성·CSP·번들 회귀 의심)"
       );
     }
