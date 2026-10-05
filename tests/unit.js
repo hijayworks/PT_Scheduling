@@ -182,6 +182,81 @@ test("backup schema: 손상된 근무 셀/이동시간을 거부", () => {
   assert(threw, "음수 이동시간을 거부해야 함");
 });
 
+test("backup schema: 미래 schemaVersion은 거부하고 구버전/미지정은 허용", () => {
+  const current = validBackupFixture();
+  current.schemaVersion = lib.CURRENT_SCHEMA_VERSION;
+  assertEqual(lib.validateBackupState(current), current);
+
+  const legacy = validBackupFixture();
+  delete legacy.schemaVersion;
+  assertEqual(lib.validateBackupState(legacy), legacy);
+
+  const future = validBackupFixture();
+  future.schemaVersion = lib.CURRENT_SCHEMA_VERSION + 1;
+  let threw = false;
+  try {
+    lib.validateBackupState(future);
+  } catch {
+    threw = true;
+  }
+  assert(threw, "미래 schemaVersion은 현재 코드에서 복원하면 안 됨");
+});
+
+test("portable backup: 파생 후보와 페이지 상태를 제외하고 schemaVersion을 기록", () => {
+  const data = validBackupFixture();
+  data.schemaVersion = lib.CURRENT_SCHEMA_VERSION;
+  data.candidates = [{ assigned: [{ id: "derived" }] }];
+  data.schedule3Result = {
+    candidateAList: [{ assigned: [{ id: "derivedA" }] }, null, null],
+  };
+  data.currentPage = "schedule3";
+  const portable = lib.createPortableBackupState(data);
+  assertEqual(portable.schemaVersion, lib.CURRENT_SCHEMA_VERSION);
+  assert(portable.candidates === undefined, "후보B/C는 portable backup에서 제외해야 함");
+  assert(
+    portable.schedule3Result === undefined,
+    "후보A는 portable backup에서 제외해야 함",
+  );
+  assert(portable.currentPage === undefined, "현재 페이지는 백업 대상이 아님");
+  assertEqual(portable.members[0].id, "M1");
+});
+
+test("backup restore: 구형 백업에 후보가 있어도 복원 시 모두 초기화", () => {
+  const data = validBackupFixture();
+  data.candidates = [{ assigned: [{ id: "oldB" }] }];
+  data.schedule3Result = {
+    candidateAList: [{ assigned: [{ id: "oldA" }] }, null, null],
+  };
+  data.currentPage = "schedule3";
+  const restored = lib.prepareBackupStateForRestore(data);
+  assertEqual(restored.candidates, []);
+  assertEqual(restored.schedule3Result.candidateAList, [null, null, null]);
+  assert(restored.currentPage === undefined);
+});
+
+test("backup envelope: version과 KDF 파라미터를 코드 자체에서 읽을 수 있음", () => {
+  const envelope = {
+    backupVersion: lib.BACKUP_VERSION,
+    kdf: {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      iterations: lib.BACKUP_PBKDF2_ITERATIONS,
+      salt: "AA==",
+    },
+    cipher: {
+      name: "AES-GCM",
+      keyLength: 256,
+      iv: "AA==",
+    },
+    ciphertext: "AA==",
+  };
+  const encoded = Buffer.from(JSON.stringify(envelope), "utf8").toString("base64");
+  const parsed = lib.parseBackupEnvelope(lib.BACKUP_PREFIX + encoded);
+  assertEqual(parsed.backupVersion, 2);
+  assertEqual(parsed.kdf.iterations, 600000);
+  assertEqual(lib.parseBackupEnvelope("legacy-base64-code"), null);
+});
+
 /* ---------------- utils.js ---------------- */
 test("minutesLabel: 절대 분을 HH:MM으로 변환", () => {
   assertEqual(lib.minutesLabel(0), "00:00");
