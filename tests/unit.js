@@ -1130,6 +1130,59 @@ test("체인DP는 세 지점 회원을 이동-회원-이동 자리에 배정하�
   assert(!lib.chainBreaksSoloTravel(chain, lib.soloTravelMemberIds()), chain.map((n) => n.id).join("→"));
 });
 
+/* ---------------- schedule3.js: 수동 이동·맞바꾸기의 하드 제약 ---------------- */
+// 수동 편집은 옮기는 회원 본인만이 아니라, 수업이 빠진 요일과 들어간 요일의 최종 체인 전체가
+// 자동 생성과 같은 하드 제약을 지켜야 한다.
+function manualFixture() {
+  qualityFixture();
+  lib.state.excludedMemberIds3 = [];
+  // 상암·여의도만 다니는(세 지점 회원 아님) 60분 회원 D.
+  lib.state.members.push({ id: "D", name: "d", locationIds: ["L2", "L3"], category: "등록" });
+  [0, 1].forEach((day) => {
+    for (let s = 0; s <= 30; s++) lib.state.requests.push({ id: "D" + day + "_" + s, memberId: "D", day, startSlot: s, duration: 60 });
+  });
+}
+test("수동 이동: 들어간 요일의 이웃 세 지점 회원이 이동-회원-이동 자리에 놓이면 막는다", () => {
+  manualFixture();
+  // 화: S(상암 13:30) → 이동 → B(마포 15:00). A(마포)를 화 12:00에 넣으면 S가 이동으로 도착해 이동으로 떠난다.
+  const a = at("A", 0, 0, "L1");
+  const container = { assigned: [a, at("S", 1, 9, "L3"), at("B", 1, 18, "L1")], confirmedIds: [] };
+  const r = lib.validateMove(container, a, 1, 0);
+  assert(!r.ok, "이웃 S가 이동-회원-이동");
+});
+test("수동 이동: 수업이 빠진 요일에 이동-회원-이동 자리가 생기면 막는다", () => {
+  manualFixture();
+  // 월: A(마포) → C(상암, 상담 30분) → S(상암) → B(마포). C가 빠지면 S가 이동으로 도착해 이동으로 떠난다.
+  const c = at("C", 0, 9, "L3");
+  const container = { assigned: [at("A", 0, 0, "L1"), c, at("S", 0, 12, "L3"), at("B", 0, 21, "L1")], confirmedIds: [] };
+  assert(!lib.validateMove(container, c, 1, 0).ok, "출발 요일 S가 이동-회원-이동");
+});
+test("수동 이동: 수업이 빠지며 이동시간이 없는 서로 다른 지점이 이어지면 막는다", () => {
+  manualFixture(); // 여의도↔상암 이동시간 없음(연결 불가)
+  const a = at("A", 0, 6, "L1");
+  const container = { assigned: [at("D", 0, 0, "L2"), a, at("C", 0, 15, "L3")], confirmedIds: [] };
+  assert(!lib.validateMove(container, a, 1, 0).ok, "D(여의도) → C(상암) 직접 연결");
+});
+test("수동 맞바꾸기: 같은 요일 두 이동을 모두 반영한 최종 체인으로 하루 이동 상한을 검사한다", () => {
+  manualFixture();
+  lib.state.travelTimes[lib.pairKey("L2", "L3")] = 30;
+  // 월: D(상암) → B(여의도) → A(마포) → S(마포) = 이동 2회. D와 A를 맞바꾸면 마포→여의도→상암→마포 = 3회.
+  // 각 이동을 상대 없이 따로 보면 둘 다 이동 2회라 통과한다.
+  const d = at("D", 0, 0, "L3");
+  const a = at("A", 0, 18, "L1");
+  const container = { assigned: [d, at("B", 0, 9, "L2"), a, at("S", 0, 27, "L1")], confirmedIds: [] };
+  assert(!lib.prepareSwap(container, d, a).ok, "맞바꾼 결과 이동 3회");
+});
+test("수동 이동·맞바꾸기: 하드 제약을 지키는 결과는 허용한다", () => {
+  manualFixture();
+  const a = at("A", 0, 0, "L1");
+  const b = at("B", 0, 6, "L1");
+  const container = { assigned: [a, b, at("S", 1, 0, "L1")], confirmedIds: [] };
+  const moved = lib.validateMove(container, a, 1, 9);
+  assertEqual([moved.ok, moved.locationId], [true, "L1"]);
+  assert(lib.prepareSwap(container, a, b).ok, "같은 지점 앞뒤 맞바꾸기");
+});
+
 /* ---------------- goldenFloors.js: 골든 품질 하한 래칫 ---------------- */
 const goldenFloors = require("./goldenFloors.js");
 function floorSet(sessions, travel) {

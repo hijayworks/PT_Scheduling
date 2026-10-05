@@ -59,7 +59,7 @@ export {
   runtime,
   GenerationCancelledError,
 } from "../../src/state.js";
-export { candidatePreservesConfirmed } from "../../src/schedule3.js";
+export { candidatePreservesConfirmed, validateMove, prepareSwap } from "../../src/schedule3.js";
 
 export {
   BACKUP_VERSION,

@@ -21,6 +21,7 @@ import {
   knownLocationIdSet,
   maxSessionsFor,
   soloTravelMemberIds,
+  chainBreaksSoloTravel,
   travelMinutes,
   inefficientRoundTripLocationInfo,
   isInefficientRoundTrip,
@@ -116,6 +117,25 @@ export function dailyTravelCount(chain) {
       count++;
   }
   return count;
+}
+
+// 하루 체인 하드 제약의 단일 정의: 시간순 [{memberId, locationId, startSlot, end}]가 이웃 수업
+// 간 이동 간격(이동시간이 없는 지점 쌍은 연결 불가), 하루 이동 상한, 세 지점 회원 규칙을 지키는지.
+// 자동 생성 다듬기(chainDpPolish의 dayChainAllowed)와 수동 이동·맞바꾸기(schedule3)가 같은 함수로
+// 최종 체인을 검사한다. 위반이 없으면 null, 있으면 처음 걸린 규칙 이름("gap"/"dailyTravel"/"soloTravel").
+export function dayChainViolation(chain, soloIds) {
+  for (let i = 1; i < chain.length; i++) {
+    const prev = chain[i - 1],
+      cur = chain[i];
+    if (
+      (cur.startSlot - prev.end) * SLOT_MIN <
+      requiredGapMin(prev.locationId, cur.locationId)
+    )
+      return "gap";
+  }
+  if (dailyTravelCount(chain) > MAX_TRAVELS_PER_DAY) return "dailyTravel";
+  if (chainBreaksSoloTravel(chain, soloIds)) return "soloTravel";
+  return null;
 }
 
 // 그 요일의 체인에서 "비효율 이동"(마포점↔여의도점이 아닌 A→B→A 왕복, 즉 상암점이 낀 왕복)
