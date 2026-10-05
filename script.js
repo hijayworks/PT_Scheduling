@@ -286,7 +286,8 @@
     currentPage: "settings",
     // 백업 복원 직후 reload()할 때 beforeunload/visibilitychange 핸들러가 옛 메모리 상태로
     // saveState()를 한 번 더 실행해 방금 덮어쓴 localStorage를 되돌리지 않도록 막는 플래그.
-    suppressAutosave: false
+    suppressAutosave: false,
+    storageError: null
   };
   var GenerationCancelledError = class extends Error {
   };
@@ -323,15 +324,33 @@
     schedule: "schedule3",
     schedule2: "schedule3"
   };
+  function emitStorageStatus(ok, error = null) {
+    runtime.storageError = ok ? null : error;
+    if (typeof window !== "undefined" && typeof window.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      window.dispatchEvent(
+        new CustomEvent("pt-storage-status", {
+          detail: { ok, error: error ? String(error.message || error) : null }
+        })
+      );
+    }
+  }
   function saveState() {
-    if (runtime.suppressAutosave) return;
+    if (runtime.suppressAutosave) return true;
     state.schemaVersion = CURRENT_SCHEMA_VERSION;
     state.availableCells = Array.from(runtime.availableCells);
     state.candidates = runtime.candidates;
     state.schedule3Result = runtime.schedule3Result;
     state.currentPage = runtime.currentPage;
     state.startMinBase = START_MIN;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      emitStorageStatus(true);
+      return true;
+    } catch (error) {
+      console.warn("failed to persist state", error);
+      emitStorageStatus(false, error);
+      return false;
+    }
   }
   var LEGACY_START_MIN = 13 * 60;
   function clearParsedScheduleCandidates(parsed) {
@@ -7553,6 +7572,11 @@
   var BACKUP_PBKDF2_ITERATIONS = 6e5;
   var BACKUP_VERSION = 2;
   var BACKUP_PREFIX = "PTB2.";
+  var BACKUP_PASSWORD_MIN_LENGTH = 12;
+  var RESTORE_RECOVERY_KEY = "pt_schedule_restore_recovery_v1";
+  function isValidBackupPassword(password) {
+    return typeof password === "string" && password.length >= BACKUP_PASSWORD_MIN_LENGTH;
+  }
   async function deriveBackupKey(pin, salt, usage, iterations = BACKUP_PBKDF2_ITERATIONS) {
     const keyMaterial = await crypto.subtle.importKey(
       "raw",
@@ -7822,28 +7846,37 @@
     "backupExportCopyBtn"
   );
   backupExportBtnEl.addEventListener("click", async () => {
-    const pin = window.prompt(
-      "백업 코드를 암호화할 PIN을 입력하세요. (복원할 때 동일한 PIN이 필요합니다)"
+    const password = window.prompt(
+      "백업 비밀번호를 입력하세요. 복원할 때 동일한 비밀번호가 필요합니다.\n12자 이상의 긴 비밀번호를 권장합니다."
     );
-    if (!pin) return;
-    const pinConfirm = window.prompt("PIN을 한 번 더 입력해주세요.");
-    if (pinConfirm !== pin) {
+    if (!password) return;
+    if (!isValidBackupPassword(password)) {
+      alert("새 백업 비밀번호는 12자 이상으로 입력해주세요.");
+      return;
+    }
+    const passwordConfirm = window.prompt("백업 비밀번호를 한 번 더 입력해주세요.");
+    if (passwordConfirm !== password) {
       alert(
-        "입력한 PIN이 서로 달라 백업 코드를 만들지 못했습니다. 다시 시도해주세요."
+        "입력한 백업 비밀번호가 서로 달라 백업 코드를 만들지 못했습니다. 다시 시도해주세요."
       );
       return;
     }
-    saveState();
+    if (!saveState()) {
+      alert(
+        "최신 데이터를 브라우저에 저장하지 못해 백업 코드를 만들지 않았습니다. 저장 오류를 먼저 해결해주세요."
+      );
+      return;
+    }
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
       const portable = createPortableBackupState(saved);
       const backupCode = await encryptBackupText(
         JSON.stringify(portable),
-        pin
+        password
       );
       backupExportTextareaEl.value = backupCode;
       backupExportResultEl.style.display = "";
-      showToast("백업 코드를 만들었습니다. PIN도 함께 기억해주세요.", "success");
+      showToast("백업 코드를 만들었습니다. 백업 비밀번호도 함께 기억해주세요.", "success");
     } catch (e) {
       console.warn("backup export failed", e);
       alert("백업 코드를 만들지 못했습니다.");
@@ -7898,14 +7931,14 @@
   });
   backupImportApplyBtnEl.addEventListener("click", async () => {
     const code = backupImportTextareaEl.value.trim();
-    const pin = backupImportPinInputEl.value;
-    if (!code || !pin) {
-      backupImportHintEl.textContent = "백업 코드와 PIN을 모두 입력해주세요.";
+    const password = backupImportPinInputEl.value;
+    if (!code || !password) {
+      backupImportHintEl.textContent = "백업 코드와 백업 비밀번호를 모두 입력해주세요.";
       return;
     }
     let parsedBackup;
     try {
-      const plainText = await decryptBackupText(code, pin);
+      const plainText = await decryptBackupText(code, password);
       parsedBackup = prepareBackupStateForRestore(
         parseAndValidateBackupText(plainText)
       );
@@ -7916,6 +7949,20 @@
     }
     if (!confirm("복원하면 이 기기에 현재 저장된 데이터를 덮어씁니다. 계속할까요?"))
       return;
+    const currentRaw = localStorage.getItem(STORAGE_KEY);
+    try {
+      sessionStorage.setItem(
+        RESTORE_RECOVERY_KEY,
+        JSON.stringify({
+          createdAt: Date.now(),
+          state: currentRaw
+        })
+      );
+    } catch (e) {
+      console.warn("restore recovery snapshot failed", e);
+      backupImportHintEl.textContent = "복원 전 안전 복구 데이터를 저장하지 못해 복원을 진행하지 않았습니다.";
+      return;
+    }
     runtime.suppressAutosave = true;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedBackup));
@@ -7927,8 +7974,82 @@
     }
     location.reload();
   });
+  function readRestoreRecoverySnapshot(storage = typeof sessionStorage !== "undefined" ? sessionStorage : null) {
+    if (!storage) return null;
+    const raw = storage.getItem(RESTORE_RECOVERY_KEY);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object" || parsed.state !== null && typeof parsed.state !== "string")
+        return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+  function restoreRecoverySnapshot(
+    storage = typeof sessionStorage !== "undefined" ? sessionStorage : null,
+    targetStorage = typeof localStorage !== "undefined" ? localStorage : null
+  ) {
+    if (!storage || !targetStorage) return false;
+    const snapshot = readRestoreRecoverySnapshot(storage);
+    if (!snapshot) return false;
+    if (snapshot.state === null) targetStorage.removeItem(STORAGE_KEY);
+    else targetStorage.setItem(STORAGE_KEY, snapshot.state);
+    storage.removeItem(RESTORE_RECOVERY_KEY);
+    return true;
+  }
+  function renderRestoreRecoveryBanner() {
+    const host = document.querySelector(".settings-section--backup");
+    if (!host) return;
+    const snapshot = readRestoreRecoverySnapshot();
+    if (!snapshot) return;
+    const banner = document.createElement("div");
+    banner.className = "restore-recovery-banner";
+    const text2 = document.createElement("p");
+    text2.textContent = "백업을 복원했습니다. 문제가 있다면 이 탭을 닫기 전에 복원 전 데이터로 되돌릴 수 있습니다.";
+    banner.appendChild(text2);
+    const actions = document.createElement("div");
+    actions.className = "restore-recovery-actions";
+    const undoBtn = document.createElement("button");
+    undoBtn.type = "button";
+    undoBtn.className = "btn btn-ghost";
+    undoBtn.textContent = "복원 전 데이터로 되돌리기";
+    undoBtn.addEventListener("click", () => {
+      if (!confirm("복원 전 데이터로 되돌릴까요? 현재 복원된 데이터는 덮어써집니다."))
+        return;
+      try {
+        runtime.suppressAutosave = true;
+        if (!restoreRecoverySnapshot()) throw new Error("snapshot missing");
+        location.reload();
+      } catch (e) {
+        runtime.suppressAutosave = false;
+        console.warn("restore recovery failed", e);
+        showToast("복원 전 데이터로 되돌리지 못했습니다.", "error");
+      }
+    });
+    const dismissBtn = document.createElement("button");
+    dismissBtn.type = "button";
+    dismissBtn.className = "btn btn-ghost";
+    dismissBtn.textContent = "복구 지점 삭제";
+    dismissBtn.addEventListener("click", () => {
+      if (typeof sessionStorage !== "undefined")
+        sessionStorage.removeItem(RESTORE_RECOVERY_KEY);
+      banner.remove();
+    });
+    actions.append(undoBtn, dismissBtn);
+    banner.appendChild(actions);
+    host.appendChild(banner);
+  }
+  renderRestoreRecoveryBanner();
 
   // src/main.js
+  var storageErrorBannerEl = document.getElementById("storageErrorBanner");
+  function renderStorageStatus() {
+    if (!storageErrorBannerEl) return;
+    storageErrorBannerEl.hidden = !runtime.storageError;
+  }
+  window.addEventListener("pt-storage-status", renderStorageStatus);
   function init() {
     loadState();
     renderLocationList();
@@ -7939,6 +8060,7 @@
     renderRequestList();
     renderSchedule3Result();
     goToPage(runtime.currentPage);
+    renderStorageStatus();
   }
   init();
 })();
