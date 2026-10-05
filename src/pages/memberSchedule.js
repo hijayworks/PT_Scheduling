@@ -22,7 +22,6 @@ import {
   memberById,
   locationById,
   memberColor,
-  locationColor,
   sessionDurationFor,
 } from "../domain.js";
 import { renderGrid } from "../grid.js";
@@ -1483,7 +1482,6 @@ export function renderMemberTable() {
     tr.appendChild(actionCell);
 
     memberTableBodyEl.appendChild(tr);
-    growMemo();
   });
 }
 
