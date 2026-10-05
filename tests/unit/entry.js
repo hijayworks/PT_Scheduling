@@ -41,11 +41,15 @@ export {
 export {
   findEarlierRequestForLocation,
   moveNodeToRequest,
+  runSchedule2Pipeline,
 } from "../../src/engine/chainDpPolish.js";
+export { runPolishAttemptsInWorkers } from "../../src/engine/polishWorkerPool.js";
+export { withSelectionOverride } from "../../src/selectionOverride.js";
 export {
   migrateStartMinShift,
   clearRuntimeScheduleCandidates,
   runtime,
+  GenerationCancelledError,
 } from "../../src/state.js";
 export { candidatePreservesConfirmed } from "../../src/schedule3.js";
 

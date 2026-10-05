@@ -1595,7 +1595,8 @@ export function shuffledDayOrder(randomFn) {
 // 브라우저가 아예 실행하지 않으므로, 그때는 setTimeout만으로 양보해 생성이 멈추지 않고
 // (다소 느려지더라도) 계속 진행되게 한다.
 export function yieldToUI() {
-  if (document.hidden) {
+  // 다듬기 Web Worker 안에는 document(그릴 화면)가 없다 — 이벤트 루프에만 한 번 양보한다.
+  if (typeof document === "undefined" || document.hidden) {
     return new Promise((resolve) => setTimeout(resolve, 0));
   }
   return new Promise((resolve) =>

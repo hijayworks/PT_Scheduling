@@ -64,6 +64,11 @@ function test(name, fn) {
     console.error("  " + (err && err.stack ? err.stack : err));
   }
 }
+// 비동기 테스트는 등록만 해두고, 동기 테스트가 모두 끝난 뒤 맨 아래에서 순서대로 실행한다.
+const asyncTests = [];
+function testAsync(name, fn) {
+  asyncTests.push({ name, fn });
+}
 function assertEqual(actual, expected, msg) {
   const a = JSON.stringify(actual);
   const e = JSON.stringify(expected);
@@ -1019,5 +1024,210 @@ test("후보A 재생성: 확정 request가 빠진 새 후보는 보존 조건을
   );
 });
 
-console.log(pass + "개 통과, " + fail + "개 실패 (단위 테스트)");
-if (fail > 0) process.exit(1);
+/* ---------------- polishWorkerPool.js: 후보A 다듬기 Web Worker 병렬화 ---------------- */
+// 브라우저 Worker와 같은 모양(postMessage/onmessage/onerror/terminate)의 가짜 워커.
+// reply(worker, msg)가 "run" 메시지마다 응답을 정한다.
+function fakeWorkerFactory(reply) {
+  const created = [];
+  return {
+    created,
+    create() {
+      const w = {
+        terminated: false,
+        onmessage: null,
+        onerror: null,
+        postMessage(msg) {
+          if (msg.type === "run") setTimeout(() => !w.terminated && reply(w, msg), 1 + (msg.index % 3));
+        },
+        terminate() {
+          w.terminated = true;
+        },
+      };
+      created.push(w);
+      return w;
+    },
+  };
+}
+const poolAttempts = Array.from({ length: 7 }, (_, i) => ({ order: [0], seedOffset: i }));
+
+testAsync("다듬기 워커 결과는 끝나는 순서와 무관하게 시도 번호 자리에 들어간다", async () => {
+  lib.state.members = [{ id: "U1", name: "u1" }];
+  const factory = fakeWorkerFactory((w, msg) =>
+    w.onmessage({ data: { index: msg.index, assigned: [{ id: "s" + msg.seedOffset }], unassignedMemberIds: ["U1"] } }),
+  );
+  let done = 0;
+  const results = await lib.runPolishAttemptsInWorkers({}, poolAttempts, 10, () => done++, {
+    createWorker: factory.create,
+    workerCount: 3,
+  });
+  assertEqual(results.map((r) => r.assigned[0].id), poolAttempts.map((a) => "s" + a.seedOffset));
+  assertEqual(done, poolAttempts.length);
+  assert(results[0].unassignedMembers[0] === lib.state.members[0], "미배정 회원은 메인 스레드의 회원 객체여야 함");
+  assert(factory.created.every((w) => w.terminated), "끝나면 워커를 모두 종료해야 함");
+});
+
+testAsync("다듬기 워커가 실패한 시도는 비워 두어 메인 스레드가 다시 계산하게 한다", async () => {
+  let failed = null;
+  const factory = fakeWorkerFactory((w, msg) => {
+    if (failed === null) {
+      failed = msg.index;
+      return w.onmessage({ data: { index: msg.index, error: "boom" } });
+    }
+    w.onmessage({ data: { index: msg.index, assigned: [], unassignedMemberIds: [] } });
+  });
+  const warn = console.warn;
+  console.warn = () => {};
+  let results;
+  try {
+    results = await lib.runPolishAttemptsInWorkers({}, poolAttempts, 10, null, {
+      createWorker: factory.create,
+      workerCount: 2,
+    });
+  } finally {
+    console.warn = warn;
+  }
+  results.forEach((r, i) =>
+    assert(i === failed ? r === undefined : r !== undefined, "시도 " + i + " 결과 자리 오류"),
+  );
+});
+
+testAsync("다듬기 워커 실행 중 취소하면 워커를 모두 종료하고 취소 에러를 던진다", async () => {
+  const factory = fakeWorkerFactory(() => {}); // 응답하지 않는 워커
+  setTimeout(() => (lib.runtime.generationCancelRequested = true), 20);
+  let threw = null;
+  try {
+    await lib.runPolishAttemptsInWorkers({}, poolAttempts, 10, null, {
+      createWorker: factory.create,
+      workerCount: 2,
+    });
+  } catch (err) {
+    threw = err;
+  } finally {
+    lib.runtime.generationCancelRequested = false;
+  }
+  assert(threw instanceof lib.GenerationCancelledError, "취소 에러를 던져야 함: " + threw);
+  assert(factory.created.every((w) => w.terminated), "취소 시 워커를 모두 종료해야 함");
+});
+
+// 실제 워커 번들(src/engine/polishWorker.js)을 Node worker_threads에서 돌려, 메인 스레드에서
+// 같은 시도를 다듬은 결과와 같은지 확인한다 — 파이프라인이 새로 읽게 된 상태를 워커에 넘기는
+// 걸 빠뜨리면 결과가 조용히 달라지므로 그 회귀를 잡는다. 시간 예산을 결정적으로 만들기 위해
+// 양쪽 다 performance.now()를 호출마다 1ms씩 흐르는 가짜 시계로 바꾼다.
+testAsync("워커에서 다듬은 결과는 메인 스레드에서 다듬은 결과와 같다", async () => {
+  const { Worker: ThreadWorker } = require("worker_threads");
+  const workerBundle = esbuild.buildSync({
+    entryPoints: [path.join(__dirname, "..", "src", "engine", "polishWorker.js")],
+    bundle: true,
+    format: "iife",
+    platform: "neutral",
+    write: false,
+    logLevel: "silent",
+  }).outputFiles[0].text;
+  const prelude =
+    "const { parentPort } = require('worker_threads');" +
+    "let fakeNow = 0; performance.now = () => (fakeNow += 1);" +
+    "globalThis.self = { postMessage: (m) => parentPort.postMessage(m) };" +
+    "parentPort.on('message', (data) => self.onmessage({ data }));";
+  function createThreadWorker() {
+    const t = new ThreadWorker(prelude + workerBundle, { eval: true });
+    return {
+      postMessage: (m) => t.postMessage(m),
+      terminate: () => t.terminate(),
+      set onmessage(fn) {
+        t.on("message", (data) => fn({ data }));
+      },
+      set onerror(fn) {
+        t.on("error", (err) => fn({ message: String(err) }));
+      },
+    };
+  }
+
+  lib.state.locations = [
+    { id: "L1", name: "마포점" },
+    { id: "L2", name: "여의도점" },
+    { id: "L3", name: "상암점" },
+  ];
+  lib.state.travelTimes = { [lib.pairKey("L1", "L2")]: 20, [lib.pairKey("L1", "L3")]: 30, [lib.pairKey("L2", "L3")]: 40 };
+  const rand = lib.mulberry32(6);
+  lib.state.members = [];
+  lib.state.requests = [];
+  for (let i = 0; i < 10; i++) {
+    const locs = ["L1", "L2", "L3"].filter(() => rand() < 0.5);
+    if (!locs.length) locs.push("L1");
+    const cat = rand() < 0.7 ? "등록" : "상담";
+    lib.state.members.push({ id: "M" + i, name: "m" + i, locationIds: locs, category: cat });
+    for (const day of [0, 1, 2, 3].filter(() => rand() < 0.6)) {
+      const start = 20 + Math.floor(rand() * 20);
+      for (let s = start; s < start + 6; s++)
+        lib.state.requests.push({ id: "R" + i + "_" + day + "_" + s, memberId: "M" + i, day, startSlot: s, duration: cat === "상담" ? 30 : 60 });
+    }
+  }
+  const eligibleReqs = lib.state.requests.filter((r) => r.memberId !== "M0");
+  const reqsByDay = new Map([0, 1, 2, 3].map((d) => [d, eligibleReqs.filter((r) => r.day === d)]));
+  const daysWithReqs = [0, 1, 2, 3].filter((d) => reqsByDay.get(d).length);
+  const attempts = [
+    { order: daysWithReqs, seedOffset: 1 },
+    { order: daysWithReqs.slice().reverse(), seedOffset: 2 },
+    { order: daysWithReqs, seedOffset: 97711 },
+  ];
+  const sig = (r) => JSON.stringify([
+    r.assigned.map((a) => [a.id, a.memberId, a.day, a.startSlot, a.locationId]),
+    r.unassignedMembers.map((m) => m.id),
+  ]);
+  const realNow = performance.now;
+  const realRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const localSigsByMode = [];
+  try {
+    for (const idleFirst of [false, true]) {
+      const localSigs = [];
+      localSigsByMode.push(localSigs);
+      lib.setIdleFirst(idleFirst);
+      try {
+        await lib.withSelectionOverride(["M0"], ["M2"], async () => {
+          const fromWorkers = await lib.runPolishAttemptsInWorkers(
+            { eligibleReqs, reqsByDay, daysWithReqs },
+            attempts,
+            400,
+            null,
+            { createWorker: createThreadWorker, workerCount: 2 },
+          );
+          for (let i = 0; i < attempts.length; i++) {
+            let fakeNow = 0;
+            performance.now = () => (fakeNow += 1);
+            const local = await lib.runSchedule2Pipeline(eligibleReqs, reqsByDay, daysWithReqs, attempts[i].order, true, true, 400, attempts[i].seedOffset);
+            performance.now = realNow;
+            localSigs.push(sig(local));
+            assert(fromWorkers[i], "워커 결과가 비어 있음(시도 " + i + ")");
+            assertEqual(sig(fromWorkers[i]), sig(local), "idleFirst=" + idleFirst + " 시도 " + i);
+          }
+        });
+      } finally {
+        lib.setIdleFirst(false);
+      }
+    }
+  } finally {
+    performance.now = realNow;
+    globalThis.requestAnimationFrame = realRaf;
+  }
+  // 이 데이터가 빈 시간 최소화 모드 전달 누락을 구분할 수 있어야 위 비교가 의미 있다.
+  assert(
+    localSigsByMode[0].some((s, i) => s !== localSigsByMode[1][i]),
+    "테스트 데이터에서 빈 시간 최소화 모드가 결과를 바꾸지 않음 — 데이터를 조정해야 함",
+  );
+});
+
+(async () => {
+  for (const { name, fn } of asyncTests) {
+    try {
+      await fn();
+      pass++;
+    } catch (err) {
+      fail++;
+      console.error("FAIL: " + name);
+      console.error("  " + (err && err.stack ? err.stack : err));
+    }
+  }
+  console.log(pass + "개 통과, " + fail + "개 실패 (단위 테스트)");
+  if (fail > 0) process.exit(1);
+})();

@@ -8,6 +8,7 @@ import {
 } from "./greedy.js";
 import { isEligibleRequest2, runChainDP, setIdleFirst } from "./chainDpCore.js";
 import { runSchedule2Pipeline } from "./chainDpPolish.js";
+import { runPolishAttemptsInWorkers } from "./polishWorkerPool.js";
 import { mulberry32, shuffled } from "./rng.js";
 import {
   isSchedule2ResultBetter,
@@ -353,11 +354,26 @@ export async function runSchedule2RestartGroup(
     MIN_POLISH_BUDGET_MS,
     Math.floor(PER_GROUP_TOTAL_POLISH_BUDGET_MS / attempts.length),
   );
+  // 시도들은 서로 독립이라 가능하면 Web Worker 여러 개로 동시에 다듬는다(polishWorkerPool.js
+  // 참고) — 워커를 못 쓰거나 실패한 시도만 아래에서 메인 스레드가 예전처럼 하나씩 다듬는다.
+  // 어느 쪽이든 결과는 시도 번호 순서대로 비교하므로 최선·동점 선택은 순차 실행과 같다.
+  let completedAttempts = 0;
+  const fromWorkers = await runPolishAttemptsInWorkers(
+    { eligibleReqs, reqsByDay, daysWithReqs },
+    attempts,
+    perAttemptBudget,
+    () => {
+      completedAttempts++;
+      if (onProgress)
+        onProgress(0.55 + (completedAttempts / attempts.length) * 0.45);
+    },
+  );
   let bestPolished = null;
   const allPolished = [];
   for (let i = 0; i < attempts.length; i++) {
-    const attempt = dropSessionsForBalance(
-      await runSchedule2Pipeline(
+    let raw = fromWorkers[i];
+    if (!raw) {
+      raw = await runSchedule2Pipeline(
         eligibleReqs,
         reqsByDay,
         daysWithReqs,
@@ -366,16 +382,18 @@ export async function runSchedule2RestartGroup(
         true,
         perAttemptBudget,
         attempts[i].seedOffset,
-      ),
-    );
+      );
+      completedAttempts++;
+      if (onProgress) {
+        onProgress(0.55 + (completedAttempts / attempts.length) * 0.45);
+        await yieldToUI();
+        checkGenerationCancelled();
+      }
+    }
+    const attempt = dropSessionsForBalance(raw);
     allPolished.push(attempt);
     if (!bestPolished || isSchedule2ResultBetter(attempt, bestPolished))
       bestPolished = attempt;
-    if (onProgress) {
-      onProgress(0.55 + ((i + 1) / attempts.length) * 0.45);
-      await yieldToUI();
-      checkGenerationCancelled();
-    }
   }
   // 배치 페이저용: bestPolished와 완전히 동점(미배정 → 수업 수 → 이동 횟수 → 이동 시간 →
   // 빈 시간 전부 동일)인 다른 시도를 서명 중복 제거해 최대 MAX_POOL_VARIANTS개까지 모은다.
