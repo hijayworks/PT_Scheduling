@@ -6856,9 +6856,9 @@
       if (result.unassignedMembers.length > 0) {
         const box = document.createElement("div");
         box.className = "unassigned-box unassigned-box-danger";
-        const title = document.createElement("b");
-        title.textContent = "미배정 회원 (" + result.unassignedMembers.length + "명)";
-        box.append(title, " · ", result.unassignedMembers.map((m) => m.name).join(", "));
+        const title2 = document.createElement("b");
+        title2.textContent = "미배정 회원 (" + result.unassignedMembers.length + "명)";
+        box.append(title2, " · ", result.unassignedMembers.map((m) => m.name).join(", "));
         card.appendChild(box);
       }
       const sessionsByMember = /* @__PURE__ */ new Map();
@@ -6889,10 +6889,10 @@
       if (doubleAssignedMembers.length > 0) {
         const box = document.createElement("div");
         box.className = "unassigned-box double-assigned-box";
-        const title = document.createElement("b");
-        title.textContent = "2회 배정 회원 (" + doubleAssignedMembers.length + "명)";
+        const title2 = document.createElement("b");
+        title2.textContent = "2회 배정 회원 (" + doubleAssignedMembers.length + "명)";
         box.append(
-          title,
+          title2,
           " · ",
           doubleAssignedMembers.map((d) => d.locLabel + " " + d.member.name).join(", ")
         );
@@ -7666,7 +7666,10 @@
         throw new Error("invalid request at index " + i);
       if (requestIds.has(req.id)) throw new Error("duplicate request id");
       requestIds.add(req.id);
-      assertOptionalStringArray(req.extraLocationIds, "request.extraLocationIds");
+      assertOptionalStringArray(
+        req.extraLocationIds,
+        "request.extraLocationIds"
+      );
       assertOptionalStringArray(
         req.excludedLocationIds,
         "request.excludedLocationIds"
