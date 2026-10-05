@@ -1544,6 +1544,18 @@ export function renderSchedule3Result() {
 // 보고 싶을 때 B·C의 느린 탐색까지 함께 기다리지 않아도 된다. 다만 두 버튼이 동시에 도는
 // 것까지는 허용하지 않는다(withSelectionOverride가 재진입을 지원하지 않으므로) —
 // runtime.generationInProgress 가드를 그대로 공유해 한쪽이 도는 동안 다른 쪽은 토스트로 안내한다.
+// 후보A 재생성 시 기존 카드에서 확정한 request가 새 후보에도 모두 남아있는지 확인한다.
+// solver에 pinned 입력을 관통시키기 전까지는 채택 경계에서 확정 세션 보존을 강제한다.
+export function candidatePreservesConfirmed(prev, candidate) {
+  const confirmedIds =
+    prev && Array.isArray(prev.confirmedIds) ? prev.confirmedIds : [];
+  if (confirmedIds.length === 0) return true;
+  const assignedIds = new Set(
+    ((candidate && candidate.assigned) || []).map((a) => a.id),
+  );
+  return confirmedIds.every((id) => assignedIds.has(id));
+}
+
 export async function runGenerate3({
   genA,
   genBC,
@@ -1617,9 +1629,26 @@ export async function runGenerate3({
     // 이 문제로 확인됨). 새 결과가 기존보다 못하면 기존 후보·풀을 그대로 지킨다(pool: null
     // 은 "풀을 건드리지 않는다"는 신호).
     function pickCandidateASlot(prev, freshResult, freshPool) {
+      // 확정된 세션을 하나라도 잃는 새 결과는 점수와 관계없이 채택하지 않는다.
+      if (prev && !candidatePreservesConfirmed(prev, freshResult)) {
+        return { candidate: prev, pool: null };
+      }
+
+      const confirmedIds =
+        prev && Array.isArray(prev.confirmedIds) ? prev.confirmedIds : [];
+      if (confirmedIds.length > 0)
+        freshResult.confirmedIds = confirmedIds.slice();
+
+      const compatiblePool = (freshPool || []).filter((c) =>
+        candidatePreservesConfirmed(prev, c),
+      );
+      compatiblePool.forEach((c) => {
+        if (confirmedIds.length > 0) c.confirmedIds = confirmedIds.slice();
+      });
+
       const newIsBetter = !prev || isSchedule2ResultBetter(freshResult, prev);
       if (newIsBetter) {
-        const pool = freshPool || [];
+        const pool = compatiblePool;
         if (!pool.includes(freshResult)) {
           if (pool.length >= MAX_POOL_VARIANTS)
             pool.length = MAX_POOL_VARIANTS - 1;
@@ -1630,7 +1659,7 @@ export async function runGenerate3({
       const newIsWorse = prev && isSchedule2ResultBetter(prev, freshResult);
       if (!newIsWorse) {
         const prevSig = schedule2Signature(prev);
-        const pool = (freshPool || []).map((c) =>
+        const pool = compatiblePool.map((c) =>
           schedule2Signature(c) === prevSig ? prev : c,
         );
         // freshPool이 이번 탐색에서 찾은 "다른" 동점 배치들이라 prev와 서명이 겹치는 자리가
