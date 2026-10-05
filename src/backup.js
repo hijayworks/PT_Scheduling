@@ -203,6 +203,13 @@ function assertOptionalStringArray(value, label) {
 // 참조 관계인지 확인한다. 명백히 손상된 백업은 localStorage에 쓰기 전에 여기서 거부한다.
 export function validateBackupState(data) {
   if (!isPlainObject(data)) throw new Error("backup root must be an object");
+  if (
+    data.schemaVersion !== undefined &&
+    (!Number.isInteger(data.schemaVersion) ||
+      data.schemaVersion < 0 ||
+      data.schemaVersion > CURRENT_SCHEMA_VERSION)
+  )
+    throw new Error("unsupported schema version");
 
   ["locations", "members", "requests", "availableCells", "candidates"].forEach(
     (key) => assertArrayField(data, key),
