@@ -1100,10 +1100,10 @@
       return jsA < jsB;
     }
     function chainContainsMember(endIndex, memberId) {
-      let cur = endIndex;
-      while (cur !== -1 && cur !== void 0) {
-        if (nodes[cur].memberId === memberId) return true;
-        cur = prev[cur];
+      let cur2 = endIndex;
+      while (cur2 !== -1 && cur2 !== void 0) {
+        if (nodes[cur2].memberId === memberId) return true;
+        cur2 = prev[cur2];
       }
       return false;
     }
