@@ -19,6 +19,16 @@ import "./engine/chainDp.js";
 import { renderSchedule3Result, goToPage } from "./schedule3.js";
 import "./backup.js";
 
+/* ---------------- Storage status ---------------- */
+const storageErrorBannerEl = document.getElementById("storageErrorBanner");
+
+function renderStorageStatus() {
+  if (!storageErrorBannerEl) return;
+  storageErrorBannerEl.hidden = !runtime.storageError;
+}
+
+window.addEventListener("pt-storage-status", renderStorageStatus);
+
 /* ---------------- Init ---------------- */
 function init() {
   loadState();
@@ -30,6 +40,7 @@ function init() {
   renderRequestList();
   renderSchedule3Result();
   goToPage(runtime.currentPage);
+  renderStorageStatus();
 }
 
 init();
