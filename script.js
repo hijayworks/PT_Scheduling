@@ -5268,7 +5268,7 @@
       actionCell.appendChild(delBtn);
       tr.appendChild(actionCell);
       memberTableBodyEl.appendChild(tr);
-      });
+    });
   }
   memberForm.addEventListener("submit", (e) => {
     e.preventDefault();
