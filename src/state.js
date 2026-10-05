@@ -118,10 +118,10 @@ function emitStorageStatus(ok, error = null) {
   if (
     typeof window !== "undefined" &&
     typeof window.dispatchEvent === "function" &&
-    typeof CustomEvent === "function"
+    typeof window.CustomEvent === "function"
   ) {
     window.dispatchEvent(
-      new CustomEvent("pt-storage-status", {
+      new window.CustomEvent("pt-storage-status", {
         detail: { ok, error: error ? String(error.message || error) : null },
       }),
     );
