@@ -7804,6 +7804,8 @@
     const restored = {
       ...validated,
       schemaVersion: validated.schemaVersion === void 0 ? 0 : validated.schemaVersion,
+      // 후보A/B/C와 페이지 위치는 원본 데이터에서 다시 만들 수 있는 파생/세션 상태다.
+      // 오래된 후보가 새 코드에서 stale하게 살아나는 일을 막기 위해 복원 시 항상 버린다.
       candidates: [],
       schedule3Result: { candidateAList: [null, null, null] }
     };
