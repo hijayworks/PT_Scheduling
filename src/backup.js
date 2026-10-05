@@ -16,6 +16,12 @@ export const LEGACY_BACKUP_PBKDF2_ITERATIONS = 100000;
 export const BACKUP_PBKDF2_ITERATIONS = 600000;
 export const BACKUP_VERSION = 2;
 export const BACKUP_PREFIX = "PTB2.";
+export const BACKUP_PASSWORD_MIN_LENGTH = 12;
+export const RESTORE_RECOVERY_KEY = "pt_schedule_restore_recovery_v1";
+
+export function isValidBackupPassword(password) {
+  return typeof password === "string" && password.length >= BACKUP_PASSWORD_MIN_LENGTH;
+}
 
 export async function deriveBackupKey(
   pin,
@@ -386,28 +392,37 @@ export const backupExportCopyBtnEl = document.getElementById(
 );
 
 backupExportBtnEl.addEventListener("click", async () => {
-  const pin = window.prompt(
-    "백업 코드를 암호화할 PIN을 입력하세요. (복원할 때 동일한 PIN이 필요합니다)",
+  const password = window.prompt(
+    "백업 비밀번호를 입력하세요. 복원할 때 동일한 비밀번호가 필요합니다.\n12자 이상의 긴 비밀번호를 권장합니다.",
   );
-  if (!pin) return;
-  const pinConfirm = window.prompt("PIN을 한 번 더 입력해주세요.");
-  if (pinConfirm !== pin) {
+  if (!password) return;
+  if (!isValidBackupPassword(password)) {
+    alert("새 백업 비밀번호는 12자 이상으로 입력해주세요.");
+    return;
+  }
+  const passwordConfirm = window.prompt("백업 비밀번호를 한 번 더 입력해주세요.");
+  if (passwordConfirm !== password) {
     alert(
-      "입력한 PIN이 서로 달라 백업 코드를 만들지 못했습니다. 다시 시도해주세요.",
+      "입력한 백업 비밀번호가 서로 달라 백업 코드를 만들지 못했습니다. 다시 시도해주세요.",
     );
     return;
   }
-  saveState(); // 화면에 아직 반영 중인 최신 상태까지 포함되도록 내보내기 직전에 저장
+  if (!saveState()) {
+    alert(
+      "최신 데이터를 브라우저에 저장하지 못해 백업 코드를 만들지 않았습니다. 저장 오류를 먼저 해결해주세요.",
+    );
+    return;
+  }
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
     const portable = createPortableBackupState(saved);
     const backupCode = await encryptBackupText(
       JSON.stringify(portable),
-      pin,
+      password,
     );
     backupExportTextareaEl.value = backupCode;
     backupExportResultEl.style.display = "";
-    showToast("백업 코드를 만들었습니다. PIN도 함께 기억해주세요.", "success");
+    showToast("백업 코드를 만들었습니다. 백업 비밀번호도 함께 기억해주세요.", "success");
   } catch (e) {
     console.warn("backup export failed", e);
     alert("백업 코드를 만들지 못했습니다.");
@@ -466,14 +481,15 @@ backupImportOverlayEl.addEventListener("click", (e) => {
 
 backupImportApplyBtnEl.addEventListener("click", async () => {
   const code = backupImportTextareaEl.value.trim();
-  const pin = backupImportPinInputEl.value;
-  if (!code || !pin) {
-    backupImportHintEl.textContent = "백업 코드와 PIN을 모두 입력해주세요.";
+  const password = backupImportPinInputEl.value;
+  if (!code || !password) {
+    backupImportHintEl.textContent =
+      "백업 코드와 백업 비밀번호를 모두 입력해주세요.";
     return;
   }
   let parsedBackup;
   try {
-    const plainText = await decryptBackupText(code, pin);
+    const plainText = await decryptBackupText(code, password);
     parsedBackup = prepareBackupStateForRestore(
       parseAndValidateBackupText(plainText),
     );
@@ -490,6 +506,22 @@ backupImportApplyBtnEl.addEventListener("click", async () => {
   // 복호화·schema 검증·사용자 확인이 모두 끝난 뒤에야 현재 데이터를 덮어쓴다.
   // 이 시점 이전에는 localStorage를 전혀 건드리지 않으므로 잘못된 백업으로 현재 데이터가
   // 손상되지 않는다.
+  const currentRaw = localStorage.getItem(STORAGE_KEY);
+  try {
+    sessionStorage.setItem(
+      RESTORE_RECOVERY_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        state: currentRaw,
+      }),
+    );
+  } catch (e) {
+    console.warn("restore recovery snapshot failed", e);
+    backupImportHintEl.textContent =
+      "복원 전 안전 복구 데이터를 저장하지 못해 복원을 진행하지 않았습니다.";
+    return;
+  }
+
   runtime.suppressAutosave = true;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(parsedBackup));
@@ -502,3 +534,84 @@ backupImportApplyBtnEl.addEventListener("click", async () => {
   }
   location.reload();
 });
+
+
+export function readRestoreRecoverySnapshot(storage = sessionStorage) {
+  const raw = storage.getItem(RESTORE_RECOVERY_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    if (
+      !parsed ||
+      typeof parsed !== "object" ||
+      (parsed.state !== null && typeof parsed.state !== "string")
+    )
+      return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function restoreRecoverySnapshot(
+  storage = sessionStorage,
+  targetStorage = localStorage,
+) {
+  const snapshot = readRestoreRecoverySnapshot(storage);
+  if (!snapshot) return false;
+  if (snapshot.state === null) targetStorage.removeItem(STORAGE_KEY);
+  else targetStorage.setItem(STORAGE_KEY, snapshot.state);
+  storage.removeItem(RESTORE_RECOVERY_KEY);
+  return true;
+}
+
+function renderRestoreRecoveryBanner() {
+  const host = document.querySelector(".settings-section--backup");
+  if (!host) return;
+  const snapshot = readRestoreRecoverySnapshot();
+  if (!snapshot) return;
+
+  const banner = document.createElement("div");
+  banner.className = "restore-recovery-banner";
+
+  const text = document.createElement("p");
+  text.textContent =
+    "백업을 복원했습니다. 문제가 있다면 이 탭을 닫기 전에 복원 전 데이터로 되돌릴 수 있습니다.";
+  banner.appendChild(text);
+
+  const actions = document.createElement("div");
+  actions.className = "restore-recovery-actions";
+
+  const undoBtn = document.createElement("button");
+  undoBtn.type = "button";
+  undoBtn.className = "btn btn-ghost";
+  undoBtn.textContent = "복원 전 데이터로 되돌리기";
+  undoBtn.addEventListener("click", () => {
+    if (!confirm("복원 전 데이터로 되돌릴까요? 현재 복원된 데이터는 덮어써집니다."))
+      return;
+    try {
+      runtime.suppressAutosave = true;
+      if (!restoreRecoverySnapshot()) throw new Error("snapshot missing");
+      location.reload();
+    } catch (e) {
+      runtime.suppressAutosave = false;
+      console.warn("restore recovery failed", e);
+      showToast("복원 전 데이터로 되돌리지 못했습니다.", "error");
+    }
+  });
+
+  const dismissBtn = document.createElement("button");
+  dismissBtn.type = "button";
+  dismissBtn.className = "btn btn-ghost";
+  dismissBtn.textContent = "복구 지점 삭제";
+  dismissBtn.addEventListener("click", () => {
+    sessionStorage.removeItem(RESTORE_RECOVERY_KEY);
+    banner.remove();
+  });
+
+  actions.append(undoBtn, dismissBtn);
+  banner.appendChild(actions);
+  host.appendChild(banner);
+}
+
+renderRestoreRecoveryBanner();
