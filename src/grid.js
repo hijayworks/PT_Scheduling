@@ -290,6 +290,11 @@ export function renderGrid(container, availableSet, options) {
     block.style.gridColumn = String(b.day + 2);
     block.style.gridRow =
       clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
+    // 같은 칸에서 시간이 겹치는 블록(지점이 다른 가능 시간대)은 칸을 나눠 나란히 놓는다.
+    if (b.laneCount > 1) {
+      block.style.width = 100 / b.laneCount + "%";
+      block.style.marginLeft = (100 * b.lane) / b.laneCount + "%";
+    }
     block.title =
       b.label +
       (b.loc ? " (" + b.loc + ")" : "") +

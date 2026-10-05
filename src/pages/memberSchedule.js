@@ -268,6 +268,18 @@ export function tokenizeHourDigits(digits) {
   return rec(digits);
 }
 
+// "4:10"(붙여넣기의 "4시10분")은 그 한 시각으로, 나머지 숫자열은 tokenizeHourDigits로 읽는다.
+export function parseHourMarks(s) {
+  if (!s.includes(":")) return tokenizeHourDigits(s);
+  const m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return null;
+  const hour = parseInt(m[1], 10);
+  const minute = parseInt(m[2], 10);
+  if (hour < 1 || hour > 12 || minute >= 60 || minute % SLOT_MIN !== 0)
+    return null;
+  return [{ hour, minute }];
+}
+
 // "시(1~12, 오후 기준)"를 그리드 startSlot으로 바꾼다. 근무 가능 시간이 12:00~24:00
 // 기준이라 12시는 정오, 1~11시는 모두 오후(13:00~23:00)로 취급한다.
 export function hourMarkToStartSlot(mark) {
@@ -339,6 +351,16 @@ export function expandHourRange(leftMark, rightMark) {
 //    (쉼표 없이 "410"을 쓰면 기존처럼 4시·10시).
 export function parseTimeToken(token, single = false) {
   const originalToken = token;
+  // "2-5"처럼 물결 대신 하이픈을 써도 "2~5"와 같게 본다.
+  token = token.replace(/-/g, "~");
+  // "4시10분"은 4시10분 한 시각이다 — "4:10"으로 바꿔 "4시10분~6시"·"4시10분~"처럼 범위에서도
+  // 한 시각으로 읽는다(시·분 사이 띄어쓰기는 parseBulkImportLine에서 붙인다).
+  token = token.replace(
+    /(\d{1,2})시(\d{1,2})분/g,
+    (_, hour, minute) => hour + ":" + minute.padStart(2, "0"),
+  );
+  // "2시"·"2시~5시"·"4시부터"처럼 숫자 뒤에 붙은 "시"는 떼고 숫자만으로 읽는다.
+  token = token.replace(/(\d)시/g, "$1");
   if (single && /^\d{3,4}$/.test(token)) {
     const hour = parseInt(token.slice(0, -2), 10);
     const minute = parseInt(token.slice(-2), 10);
@@ -370,12 +392,12 @@ export function parseTimeToken(token, single = false) {
   }
   // "5까지"는 "~5"(마감 이전부터 5시까지), "4부터"·"5이후"는 "4~"·"5~"(그 시각부터 마감까지)와
   // 같은 뜻이라 동일한 물결 표기로 바꿔서 아래 로직을 그대로 재사용한다.
-  const suffixMatch = token.match(/^(\d+)(까지|부터|이후)$/);
+  const suffixMatch = token.match(/^([\d:]+)(까지|부터|이후)$/);
   if (suffixMatch) {
     const digits = suffixMatch[1];
     token = suffixMatch[2] === "까지" ? "~" + digits : digits + "~";
   }
-  const cleanMatch = token.match(/^[\d~]+/);
+  const cleanMatch = token.match(/^[\d~:]+/);
   let warning = null;
   if (!cleanMatch)
     return { error: '알 수 없는 시간 표기: "' + originalToken + '"' };
@@ -394,8 +416,8 @@ export function parseTimeToken(token, single = false) {
   if (tildeCount === 1) {
     const [leftStr, rightStr] = clean.split("~");
     if (leftStr !== "" && rightStr !== "") {
-      const leftMarks = tokenizeHourDigits(leftStr);
-      const rightMarks = tokenizeHourDigits(rightStr);
+      const leftMarks = parseHourMarks(leftStr);
+      const rightMarks = parseHourMarks(rightStr);
       if (
         !leftMarks ||
         leftMarks.length !== 1 ||
@@ -419,7 +441,7 @@ export function parseTimeToken(token, single = false) {
       // "6630~"처럼 물결 앞에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 마지막 시각(6시30분)을
       // "그 시각부터 마감까지" 열린 시작점으로 삼고, 그 앞의 시각들(6시)은 각각 개별 희망
       // 시작 시각으로 남긴다.
-      const marks = tokenizeHourDigits(leftStr);
+      const marks = parseHourMarks(leftStr);
       if (!marks || marks.length === 0)
         return {
           error: '구간 표기 해석 실패: "' + originalToken + '"',
@@ -435,7 +457,7 @@ export function parseTimeToken(token, single = false) {
     // "~458"처럼 물결 뒤에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 첫 시각(4시)을
     // "마감 이전부터 그 시각까지" 열린 끝점으로 삼고, 그 뒤의 시각들(5시, 8시)은 각각
     // 개별 희망 시작 시각으로 남긴다.
-    const marks = tokenizeHourDigits(rightStr);
+    const marks = parseHourMarks(rightStr);
     if (!marks || marks.length === 0)
       return { error: '구간 표기 해석 실패: "' + originalToken + '"', warning };
     return withLateMark({
@@ -445,7 +467,7 @@ export function parseTimeToken(token, single = false) {
       warning,
     });
   }
-  const marks = tokenizeHourDigits(clean);
+  const marks = parseHourMarks(clean);
   if (!marks)
     return { error: '시간 해석 실패: "' + originalToken + '"', warning };
   return withLateMark({ type: "point", marks, warning });
@@ -453,7 +475,13 @@ export function parseTimeToken(token, single = false) {
 
 // 한 줄("이름  요일 시간...")을 해석한다.
 export function parseBulkImportLine(line) {
-  const tokens = line.trim().split(/\s+/).filter(Boolean);
+  // "4시 10분/4시20분": "/"는 쉼표처럼 시각을 나누고, 띄어 쓴 "시 분"은 한 토큰으로 붙인다.
+  const tokens = line
+    .replace(/\//g, ",")
+    .replace(/(\d)\s*시\s*(\d{1,2})\s*분/g, "$1시$2분")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
   if (tokens.length === 0) return null;
   const name = tokens[0];
   const result = {
@@ -474,8 +502,13 @@ export function parseBulkImportLine(line) {
   }
 
   let currentDays = null;
+  // "(마포)월5678 화89 (여의도)월89"처럼 괄호로 지점을 적으면, 다음 지점 표기 전까지의 시간은
+  // 그 지점에서만 가능한 것으로 등록한다. 지점 표기가 없으면 회원의 기본 지점 전체(null).
+  let currentLocationId = null;
+  let currentLocationUnknown = false;
 
   function applyTimeToken(tok, single) {
+    if (currentLocationUnknown) return;
     if (!currentDays) {
       result.errors.push(
         '요일 지정 전에 나온 시간 표기라 건너뜁니다: "' + tok + '"',
@@ -489,9 +522,11 @@ export function parseBulkImportLine(line) {
       return;
     }
     currentDays.forEach((day) => {
-      let dayEntry = result.days.find((d) => d.day === day);
+      let dayEntry = result.days.find(
+        (d) => d.day === day && d.locationId === currentLocationId,
+      );
       if (!dayEntry) {
-        dayEntry = { day, specs: [] };
+        dayEntry = { day, locationId: currentLocationId, specs: [] };
         result.days.push(dayEntry);
       }
       dayEntry.specs.push(parsed);
@@ -501,6 +536,19 @@ export function parseBulkImportLine(line) {
   // "목2,410,420"처럼 쉼표로 나뉜 조각은 각각 하나의 시각(2시, 4시10분, 4시20분)으로 본다.
   // "화7수목금78910"처럼 띄어쓰기 없이 요일이 다시 나오면 그 자리에서 새 요일 묶음으로 끊는다.
   tokens.slice(1).forEach((spaceTok) => {
+    const locMatch = spaceTok.match(/^[(（]([^)）]+)[)）]/);
+    if (locMatch) {
+      const loc = findLocationByLooseName(locMatch[1].trim());
+      currentLocationId = loc ? loc.id : null;
+      currentLocationUnknown = !loc;
+      if (!loc)
+        result.errors.push(
+          '등록되지 않은 지점이라 그 지점의 시간은 건너뜁니다: "' +
+            locMatch[1] +
+            '"',
+        );
+      spaceTok = spaceTok.slice(locMatch[0].length);
+    }
     const pieces = spaceTok.split(",").filter(Boolean);
     pieces.forEach((piece) => {
       piece
@@ -519,6 +567,15 @@ export function parseBulkImportLine(line) {
   });
   result.days.sort((a, b) => a.day - b.day);
   return result;
+}
+
+// "마포"로 적어도 "마포점"을 찾도록, 정확히 같은 이름이 없으면 끝의 "점"을 떼고 비교한다.
+export function findLocationByLooseName(name) {
+  const bare = (n) => n.replace(/점$/, "");
+  return (
+    state.locations.find((l) => l.name === name) ||
+    state.locations.find((l) => bare(l.name) === bare(name))
+  );
 }
 
 export function parseBulkImportText(text) {
@@ -654,10 +711,16 @@ export function renderBulkImportPreview() {
   }
   bulkImportRows = lines.map((parsed) => {
     const matches = findMembersByName(parsed.name);
+    // 신규 회원은 줄에 적힌 첫 지점을 기본 지점으로 제안한다.
+    const firstLoc = parsed.days.find((d) => d.locationId);
     return {
       parsed,
       choice: matches.length >= 1 ? matches[0].id : "__new__",
-      newLocationId: state.locations[0] ? state.locations[0].id : "",
+      newLocationId: firstLoc
+        ? firstLoc.locationId
+        : state.locations[0]
+          ? state.locations[0].id
+          : "",
       newCategory: "등록",
     };
   });
@@ -749,11 +812,15 @@ export function renderBulkImportPreview() {
       parsed.days.forEach((dayEntry) => {
         const chip = document.createElement("span");
         chip.className = "bulk-preview-day-chip";
-        chip.innerHTML =
-          "<b>" +
-          DAYS[dayEntry.day] +
-          "</b> " +
-          describeDaySpecs(dayEntry.specs);
+        const loc = locationById(dayEntry.locationId);
+        const dayEl = document.createElement("b");
+        dayEl.textContent = DAYS[dayEntry.day];
+        chip.append(
+          dayEl,
+          " " +
+            (loc ? "(" + loc.name + ") " : "") +
+            describeDaySpecs(dayEntry.specs),
+        );
         scheduleEl.appendChild(chip);
       });
     } else if (parsed.clearAll) {
@@ -824,7 +891,7 @@ bulkImportApplyBtn.addEventListener("click", () => {
 
   // 같은 회원을 가리키는 여러 줄(이름을 여러 줄로 나눠 붙여넣은 경우 등)이 서로의 스케줄을
   // 덮어쓰지 않도록, 적용 대상 회원별로 파싱된 스케줄을 먼저 합친 뒤 회원당 한 번만 교체한다.
-  const entriesByMemberKey = new Map(); // memberId -> { member, isNew, days: Map<day, specs[]> }
+  const entriesByMemberKey = new Map(); // memberId -> { member, isNew, days: Map<"day|locId", {day, locationId, specs[]}> }
   bulkImportRows.forEach((row) => {
     if (row.choice === "__skip__") return;
     let member,
@@ -860,8 +927,14 @@ bulkImportApplyBtn.addEventListener("click", () => {
     const entry = entriesByMemberKey.get(member.id);
     if (row.parsed.clearAll) entry.explicitClear = true;
     row.parsed.days.forEach((dayEntry) => {
-      if (!entry.days.has(dayEntry.day)) entry.days.set(dayEntry.day, []);
-      entry.days.get(dayEntry.day).push(...dayEntry.specs);
+      const key = dayEntry.day + "|" + (dayEntry.locationId || "");
+      if (!entry.days.has(key))
+        entry.days.set(key, {
+          day: dayEntry.day,
+          locationId: dayEntry.locationId,
+          specs: [],
+        });
+      entry.days.get(key).specs.push(...dayEntry.specs);
     });
   });
 
@@ -881,36 +954,37 @@ bulkImportApplyBtn.addEventListener("click", () => {
     state.requests = state.requests.filter((r) => r.memberId !== member.id);
     let addedForMember = 0;
     // 연속된 매시 마크(예: 3,4,5시)는 그 사이 전부를 하나의 이어진 희망 구간으로 등록한다.
-    function applyMarks(day, marks) {
+    let day, locId;
+    function addRange(startSlot, endSlot) {
+      addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
+    }
+    function applyMarks(marks) {
       groupConsecutiveMarks(marks).forEach((group) => {
-        const startSlot = hourMarkToStartSlot(group[0]);
-        const endSlot = hourMarkToStartSlot(group[group.length - 1]);
-        addedForMember += addDesiredRange(member, day, startSlot, endSlot);
+        addRange(
+          hourMarkToStartSlot(group[0]),
+          hourMarkToStartSlot(group[group.length - 1]),
+        );
       });
     }
-    entry.days.forEach((specs, day) => {
-      specs.forEach((spec) => {
-        if (spec.type === "point") {
-          applyMarks(day, spec.marks);
-        } else if (spec.type === "openStart") {
-          applyMarks(day, spec.extraPoints || []);
-          addedForMember += addDesiredRange(
-            member,
-            day,
-            hourMarkToStartSlot(spec.mark),
-            SLOT_COUNT,
-          );
-        } else if (spec.type === "openEnd") {
-          addedForMember += addDesiredRange(
-            member,
-            day,
-            0,
-            hourMarkToStartSlot(spec.mark),
-          );
-          applyMarks(day, spec.extraPoints || []);
-        }
+    // 지점 표기 없는 시간을 먼저 넣는다 — addDesiredRange는 이미 있는 신청에 지점을 더하기만
+    // 하므로, "(여의도)월89" 줄 뒤에 "월5678" 줄이 오면 월 8시가 여의도 전용으로 남는다.
+    [...entry.days.values()]
+      .sort((a, b) => !!a.locationId - !!b.locationId)
+      .forEach((dayEntry) => {
+        day = dayEntry.day;
+        locId = dayEntry.locationId;
+        dayEntry.specs.forEach((spec) => {
+          if (spec.type === "point") {
+            applyMarks(spec.marks);
+          } else if (spec.type === "openStart") {
+            applyMarks(spec.extraPoints || []);
+            addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
+          } else if (spec.type === "openEnd") {
+            addRange(0, hourMarkToStartSlot(spec.mark));
+            applyMarks(spec.extraPoints || []);
+          }
+        });
       });
-    });
     appliedCount++;
     if (entry.days.size === 0) {
       if (!entry.isNew) clearedNames.push(member.name);
@@ -1751,27 +1825,51 @@ memberBulkImportApplyBtn.addEventListener("click", () => {
 // 수업을 시작할 수 있는 시각"이다 (그 시각에 시작해도 되고, 그 시각이 곧 수업이 끝나는
 // 경계는 아니다). 이미 등록된 시작 시각은 건너뛴다. 겹치는 후보끼리는 서로 배타적인
 // "대안"이므로 겹침 자체는 허용한다.
-export function addDesiredRange(member, day, startSlot, endSlot) {
+// locationId를 주면 그 시간대는 그 지점에서만 가능한 것으로 등록한다(회원의 다른 기본 지점은
+// excludedLocationIds로 빼고, 기본 지점이 아니면 extraLocationIds로 더한다). 같은 시각에 이미
+// 등록된 신청이 있으면 새로 만들지 않고 그 신청에 이 지점을 허용 지점으로 더한다 — 예:
+// "(마포)월5678 (여의도)월89"의 월 8시는 마포·여의도 둘 다 가능한 신청 하나가 된다.
+export function addDesiredRange(member, day, startSlot, endSlot, locationId) {
   if (member.locationIds.length === 0) return 0;
   const duration = sessionDurationFor(member);
   const neededSlots = durationToSlots(duration);
-  const existingStarts = new Set(
+  const existingByStart = new Map(
     state.requests
       .filter((r) => r.memberId === member.id && r.day === day)
-      .map((r) => r.startSlot),
+      .map((r) => [r.startSlot, r]),
   );
+  const isBase = locationId && member.locationIds.includes(locationId);
   // 하루가 끝나기 전에 수업이 끝날 수 있는 시각까지만 시작을 허용한다.
   const maxStart = Math.min(endSlot, SLOT_COUNT - neededSlots);
   let added = 0;
   for (let s = startSlot; s <= maxStart; s++) {
-    if (existingStarts.has(s)) continue;
-    state.requests.push({
+    const existing = existingByStart.get(s);
+    if (existing) {
+      if (!locationId) continue;
+      if (existing.excludedLocationIds)
+        existing.excludedLocationIds = existing.excludedLocationIds.filter(
+          (id) => id !== locationId,
+        );
+      if (!isBase && !(existing.extraLocationIds || []).includes(locationId))
+        existing.extraLocationIds = (existing.extraLocationIds || []).concat(
+          locationId,
+        );
+      continue;
+    }
+    const req = {
       id: uid("r"),
       memberId: member.id,
       day,
       startSlot: s,
       duration,
-    });
+    };
+    if (locationId) {
+      req.excludedLocationIds = member.locationIds.filter(
+        (id) => id !== locationId,
+      );
+      if (!isBase) req.extraLocationIds = [locationId];
+    }
+    state.requests.push(req);
     added++;
   }
   return added;
@@ -1786,7 +1884,17 @@ export function removeRequests(reqIds) {
 }
 
 // 표시용으로만 겹치거나 맞닿은 후보들을 하나의 시간대 구간으로 묶는다 (저장 데이터는 그대로 개별 후보).
-export function mergeRequestRuns(reqs) {
+// 허용 지점이 다른 후보(예: 붙여넣기의 "(마포)월5678 (여의도)월89")끼리는 따로 묶고, 그렇게
+// 시간이 겹치게 된 블록들은 lane/laneCount로 나란히 그리도록 표시한다.
+export function requestAllowedLocationIds(member, r) {
+  const base = member.locationIds || [];
+  const excluded = r.excludedLocationIds || [];
+  return base
+    .filter((id) => !excluded.includes(id))
+    .concat((r.extraLocationIds || []).filter((id) => !base.includes(id)));
+}
+
+export function mergeRequestRuns(member, reqs) {
   const byDay = new Map();
   reqs.forEach((r) => {
     if (!byDay.has(r.day)) byDay.set(r.day, []);
@@ -1795,31 +1903,107 @@ export function mergeRequestRuns(reqs) {
   const runs = [];
   byDay.forEach((list, day) => {
     list.sort((a, b) => a.startSlot - b.startSlot);
-    let current = null;
+    const currentByKey = new Map();
+    let dayRuns = [];
     list.forEach((r) => {
       const rEnd = r.startSlot + durationToSlots(r.duration);
+      const allowed = requestAllowedLocationIds(member, r).sort();
+      const key = allowed.join(",");
+      const current = currentByKey.get(key);
       if (current && r.startSlot <= current.endSlot) {
         current.endSlot = Math.max(current.endSlot, rEnd);
-        current.reqs.push(r);
+        current.ownReqs.push(r);
       } else {
-        current = { day, startSlot: r.startSlot, endSlot: rEnd, reqs: [r] };
-        runs.push(current);
+        const run = { day, endSlot: rEnd, allowed, ownReqs: [r] };
+        currentByKey.set(key, run);
+        dayRuns.push(run);
       }
     });
+    // 두 지점 이상에 공통인 시각(위 예의 월 8시)은 따로 떼지 않고, 맞닿은 더 좁은 지점
+    // 블록(마포·여의도) 각각에 함께 넣어 블록이 그 지점의 시간대를 끝까지 덮게 한다.
+    // 맞닿은 좁은 블록들이 공통 시각의 지점을 다 덮지 못하면(예: 지점 표기 없는 "월5678"
+    // 옆의 "(여의도)월89" — 마포 블록이 없다) 떼지 않고 그대로 둔다 — 안 그러면 그 지점이
+    // 화면에서 사라진다. 넓은 블록부터 보아, 이미 넘겨받은 공통 시각도 함께 더 좁은 블록에 넘긴다.
+    const firstStart = (run) => run.ownReqs[0].startSlot;
+    const lastStart = (run) => run.ownReqs[run.ownReqs.length - 1].startSlot;
+    dayRuns.forEach((run) => (run.sharedReqs = []));
+    const folded = new Set();
+    [...dayRuns]
+      .sort((a, b) => b.allowed.length - a.allowed.length)
+      .forEach((wide) => {
+        const narrows = dayRuns.filter(
+          (n) =>
+            n.allowed.length < wide.allowed.length &&
+            n.allowed.every((id) => wide.allowed.includes(id)) &&
+            firstStart(wide) <= lastStart(n) + 1 &&
+            lastStart(wide) >= firstStart(n) - 1,
+        );
+        const covered = new Set(narrows.flatMap((n) => n.allowed));
+        if (!wide.allowed.every((id) => covered.has(id))) return;
+        narrows.forEach((n) =>
+          n.sharedReqs.push(...wide.ownReqs, ...wide.sharedReqs),
+        );
+        folded.add(wide);
+      });
+    dayRuns = dayRuns.filter((run) => !folded.has(run));
+    dayRuns.forEach((run) => {
+      run.reqs = run.ownReqs
+        .concat(run.sharedReqs)
+        .sort((a, b) => a.startSlot - b.startSlot);
+      run.startSlot = run.reqs[0].startSlot;
+      run.endSlot = Math.max(
+        ...run.reqs.map((r) => r.startSlot + durationToSlots(r.duration)),
+      );
+    });
+    dayRuns.sort((a, b) => a.startSlot - b.startSlot);
+    let cluster = [];
+    let clusterEnd = -1;
+    let laneEnds = [];
+    const flush = () =>
+      cluster.forEach((run) => (run.laneCount = laneEnds.length));
+    dayRuns.forEach((run) => {
+      if (run.startSlot >= clusterEnd) {
+        flush();
+        cluster = [];
+        laneEnds = [];
+      }
+      let lane = laneEnds.findIndex((end) => end <= run.startSlot);
+      if (lane < 0) lane = laneEnds.length;
+      laneEnds[lane] = run.endSlot;
+      run.lane = lane;
+      cluster.push(run);
+      clusterEnd = Math.max(clusterEnd, run.endSlot);
+    });
+    flush();
+    runs.push(...dayRuns);
   });
   runs.sort((a, b) => a.day - b.day || a.startSlot - b.startSlot);
   return runs;
 }
 
+// 블록 삭제: 블록 고유의 신청은 지우고, 다른 지점 블록과 함께 쓰는 신청(sharedReqs)은
+// 지우지 않고 이 블록의 지점만 허용 지점에서 뺀다 — 다른 지점 블록은 그대로 남는다.
+export function removeRequestRun(member, run) {
+  run.sharedReqs.forEach((r) => {
+    run.allowed.forEach((id) => {
+      if (member.locationIds.includes(id))
+        r.excludedLocationIds = (r.excludedLocationIds || []).concat(id);
+      else
+        r.extraLocationIds = (r.extraLocationIds || []).filter((x) => x !== id);
+    });
+  });
+  removeRequests(run.ownReqs.map((r) => r.id));
+}
+
 // 그리드에 표시되는 시간 블록(run) 하나에 딸린 "추가 지점"들 — 회원의 기본 지점과 별개로,
-// 이 시간대에만 배정 가능하게 허용해둔 지점이다. 블록을 이루는 개별 신청(run.reqs)들에
+// 이 시간대에만 배정 가능하게 허용해둔 지점이다. 블록 고유의 신청(run.ownReqs)들에
 // 똑같이 저장되므로 첫 번째 신청 것만 읽으면 된다.
 export function requestRunExtraLocationIds(run) {
-  return (run.reqs[0] && run.reqs[0].extraLocationIds) || [];
+  return run.ownReqs[0].extraLocationIds || [];
 }
 
 export function setRunExtraLocationIds(run, ids) {
-  run.reqs.forEach((r) => {
+  run.ownReqs.forEach((r) => {
     r.extraLocationIds = ids.slice();
   });
 }
@@ -1848,11 +2032,11 @@ export function removeExtraLocationFromRun(run, locId) {
 // 회원의 기본 지점 중, 이 시간대(run)에서만 배정 후보에서 뺀 지점들. 회원의 지점 등록
 // 자체는 그대로 두고(다른 시간대에는 영향 없음) 이 신청들만 후보에서 제외한다.
 export function requestRunExcludedLocationIds(run) {
-  return (run.reqs[0] && run.reqs[0].excludedLocationIds) || [];
+  return run.ownReqs[0].excludedLocationIds || [];
 }
 
 export function setRunExcludedLocationIds(run, ids) {
-  run.reqs.forEach((r) => {
+  run.ownReqs.forEach((r) => {
     r.excludedLocationIds = ids.slice();
   });
 }
@@ -1940,7 +2124,7 @@ export function buildRequestRunMenu(member, run) {
   items.push({
     label: "가능 시간 삭제",
     danger: true,
-    onClick: () => removeRequests(run.reqs.map((r) => r.id)),
+    onClick: () => removeRequestRun(member, run),
   });
   return items;
 }
@@ -2086,7 +2270,7 @@ export function renderRequestList() {
     ((activeMember.category || "상담") === "상담" ? " (상담)" : "");
   // 겹치거나 맞닿은 후보들은 그리드에 하나의 블록으로 합쳐서 그린다.
   // (개별 후보를 각각 그리면 촘촘하게 겹쳐서 알아볼 수 없게 된다.)
-  const runs = mergeRequestRuns(myReqs);
+  const runs = mergeRequestRuns(activeMember, myReqs);
 
   // 그리드에는 실제로 확보되는 시간을 하나의 블록으로 보여준다(쉬는 시간이 있던 시절의 흔적으로,
   // BREAK_MIN이 0이면 종료 시각을 늘리지 않는다 — 지금은 그렇다).
@@ -2136,7 +2320,9 @@ export function renderRequestList() {
           "~" +
           minutesLabel(START_MIN + displayEndSlot * SLOT_MIN),
         color,
-        onDelete: () => removeRequests(run.reqs.map((r) => r.id)),
+        lane: run.lane,
+        laneCount: run.laneCount,
+        onDelete: () => removeRequestRun(activeMember, run),
         contextMenuItems: () => buildRequestRunMenu(activeMember, run),
       };
     }),

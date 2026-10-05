@@ -1195,7 +1195,7 @@ export function defaultSort(eligible, jitter) {
 export const STRATEGIES = [
   {
     title: "후보A - 인원 최대",
-    desc: "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
+    desc: "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",
     // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
     // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
     // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
@@ -1438,8 +1438,8 @@ export function buildCandidateFromStrategy(
 // 수업 건수가 더 많은 조합을 골라버려(예: 미배정 2명) 후보 설명이 내세우는 상한이 지켜지지
 // 않는다(실제로 이 문제가 있었다). 상한을 지키는 조합이 아예 없을 때만(둘 다 위반) 그 아래
 // 기준으로 비교한다.
-// 후보 생성 우선순위: 미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저 →
-// 빈 시간 최소. 기본("count") 튜플은 [capOk, count, ineff, sessions, travel, idle] — 인원이
+// 후보 생성 우선순위: 미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 환산 점수.
+// 기본("count") 튜플은 [capOk, count, ineff, balanced, sessions, travel, idle] — 인원이
 // 비효율 이동보다 먼저다. "sessions"(후보C)는 미배정 상한(capOk) 안에서 [capOk, ineff,
 // sessions, count, travel, idle]로 비교한다.
 export function candidateSearchScore(cand, primary, maxUnassigned) {
@@ -1454,9 +1454,12 @@ export function candidateSearchScore(cand, primary, maxUnassigned) {
       : 1;
   const idle = schedule2TotalIdleMinutes(cand.assigned);
   // ineff/travel/idle은 적을수록 좋으므로 부호를 뒤집어 "클수록 좋음"으로 통일한다.
+  // 기본("count")은 수업 수·이동·빈 시간을 SESSION_VALUE_MINUTES 환산 점수 하나로 합쳐 비교한다.
+  const balanced =
+    sessions * SESSION_VALUE_MINUTES - travel * TRAVEL_VALUE_MINUTES - idle;
   return primary === "sessions"
     ? [capOk, -ineff, sessions, count, -travel, -idle]
-    : [capOk, count, -ineff, sessions, -travel, -idle];
+    : [capOk, count, -ineff, balanced, sessions, -travel, -idle];
 }
 export function isCandidateWorse(a, b) {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
@@ -1617,6 +1620,10 @@ export const MAX_POOL_VARIANTS = 9;
 // 수 있는 빈 시간 증가"의 상한(분). 이보다 더 큰 빈 시간을 대가로 이동을 줄이는 배치는
 // 채택하지 않는다 — 이동 1번의 가치를 최대 이 값만큼으로만 쳐준다는 뜻.
 export const TRAVEL_VALUE_MINUTES = 60;
+// 수업 1건의 가치(빈 시간 분 환산). 미배정·비효율 이동이 같으면 수업 수·이동 횟수·빈 시간을
+// "수업 1건 = 이동 1번 = 빈 시간 60분"으로 합친 점수로 비교한다 — 수업 1건을 더 넣자고 이동을
+// 2번 늘리는 배치(예: 수업 29건+이동 7번)보다 수업 28건+이동 5번을 고르게 하려는 것.
+export const SESSION_VALUE_MINUTES = TRAVEL_VALUE_MINUTES;
 // strategyIndex별 동점 배치 풀(후보B/C). runtime.candidates[strategyIndex]는 항상 이 풀의 한 항목과
 // 같은 객체 참조를 가리킨다 — 페이저가 pool.indexOf(현재 후보)로 현재 위치를 찾기 때문이다.
 // candidateHistory와 마찬가지로 저장하지 않는 세션 한정 기록(새로고침하면 초기화).

@@ -716,6 +716,10 @@
       }
       block.style.gridColumn = String(b.day + 2);
       block.style.gridRow = clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
+      if (b.laneCount > 1) {
+        block.style.width = 100 / b.laneCount + "%";
+        block.style.marginLeft = 100 * b.lane / b.laneCount + "%";
+      }
       block.title = b.label + (b.loc ? " (" + b.loc + ")" : "") + (b.sublabel ? " · " + b.sublabel : "");
       const nameEl = document.createElement("span");
       nameEl.className = "name";
@@ -1191,26 +1195,42 @@
     }
     const ineffA = totalInefficientMoveCount(a.assigned), ineffB = totalInefficientMoveCount(b.assigned);
     if (ineffA !== ineffB) return ineffA < ineffB;
-    if (a.assigned.length !== b.assigned.length)
-      return a.assigned.length > b.assigned.length;
     const travelCountA = totalTravelCount(a.assigned), travelCountB = totalTravelCount(b.assigned);
     const idleA = schedule2TotalIdleMinutes(a.assigned), idleB = schedule2TotalIdleMinutes(b.assigned);
-    if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
-    if (travelCountA !== travelCountB) {
-      const netA = travelCountA * TRAVEL_VALUE_MINUTES + idleA;
-      const netB = travelCountB * TRAVEL_VALUE_MINUTES + idleB;
-      if (netA !== netB) return netA < netB;
-    }
+    const travelWeight = isIdleFirst() ? 0 : TRAVEL_VALUE_MINUTES;
+    const netA = travelCountA * travelWeight + idleA - a.assigned.length * SESSION_VALUE_MINUTES;
+    const netB = travelCountB * travelWeight + idleB - b.assigned.length * SESSION_VALUE_MINUTES;
+    if (netA !== netB) return netA < netB;
+    if (a.assigned.length !== b.assigned.length)
+      return a.assigned.length > b.assigned.length;
+    if (travelCountA !== travelCountB) return travelCountA < travelCountB;
     const travelMinA = totalTravelMinutes(a.assigned), travelMinB = totalTravelMinutes(b.assigned);
     if (travelMinA !== travelMinB) return travelMinA < travelMinB;
     return idleA < idleB;
   }
+  function dropSessionsForBalance(result) {
+    let cur = result;
+    for (; ; ) {
+      const sessionsByMember = /* @__PURE__ */ new Map();
+      cur.assigned.forEach(
+        (r) => sessionsByMember.set(
+          r.memberId,
+          (sessionsByMember.get(r.memberId) || 0) + 1
+        )
+      );
+      let best = cur;
+      cur.assigned.forEach((r) => {
+        if (sessionsByMember.get(r.memberId) < 2) return;
+        const cand = { ...cur, assigned: cur.assigned.filter((x) => x !== r) };
+        if (isSchedule2ResultBetter(cand, best)) best = cand;
+      });
+      if (best === cur) return cur;
+      cur = best;
+    }
+  }
   function floorIsBetter(a, b) {
     if (!b) return true;
-    if (a.unassignedMembers.length !== b.unassignedMembers.length) {
-      return a.unassignedMembers.length < b.unassignedMembers.length;
-    }
-    return a.assigned.length > b.assigned.length;
+    return a.unassignedMembers.length < b.unassignedMembers.length;
   }
   function schedule2Signature(result) {
     return result.assigned.map(
@@ -1930,7 +1950,7 @@
   var STRATEGIES = [
     {
       title: "후보A - 인원 최대",
-      desc: "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
+      desc: "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",
       // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
       // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
       // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
@@ -2086,7 +2106,8 @@
     const ineff = totalInefficientMoveCount(cand.assigned);
     const capOk = typeof maxUnassigned === "number" && cand.unassignedMembers.length > maxUnassigned ? 0 : 1;
     const idle = schedule2TotalIdleMinutes(cand.assigned);
-    return primary === "sessions" ? [capOk, -ineff, sessions, count, -travel, -idle] : [capOk, count, -ineff, sessions, -travel, -idle];
+    const balanced = sessions * SESSION_VALUE_MINUTES - travel * TRAVEL_VALUE_MINUTES - idle;
+    return primary === "sessions" ? [capOk, -ineff, sessions, count, -travel, -idle] : [capOk, count, -ineff, balanced, sessions, -travel, -idle];
   }
   function isCandidateWorse(a, b) {
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
@@ -2178,6 +2199,7 @@
   var candidateUndoStack = {};
   var MAX_POOL_VARIANTS = 9;
   var TRAVEL_VALUE_MINUTES = 60;
+  var SESSION_VALUE_MINUTES = TRAVEL_VALUE_MINUTES;
   var candidatePools = {};
   var candidateAPools = {};
   function resetCandidateSession() {
@@ -3698,7 +3720,7 @@
 
   // src/engine/chainDp.js
   var SCHEDULE2_CARD_COUNT = 3;
-  var IDLE_FIRST_CARD_INDEX = 2;
+  var IDLE_FIRST_CARD_INDEX = 0;
   var TEST_BUDGET_SCALE = typeof window !== "undefined" && window.__PT_TEST_BUDGET_SCALE__ > 0 && window.__PT_TEST_BUDGET_SCALE__ <= 1 && window.__PT_TEST_BUDGET_SCALE__ || 1;
   function scaledBudgetMs(fullMs, minMs) {
     return Math.max(minMs, Math.round(fullMs * TEST_BUDGET_SCALE));
@@ -3864,15 +3886,17 @@
     let bestPolished = null;
     const allPolished = [];
     for (let i = 0; i < attempts.length; i++) {
-      const attempt = await runSchedule2Pipeline(
-        eligibleReqs,
-        reqsByDay,
-        daysWithReqs,
-        attempts[i].order,
-        true,
-        true,
-        perAttemptBudget,
-        attempts[i].seedOffset
+      const attempt = dropSessionsForBalance(
+        await runSchedule2Pipeline(
+          eligibleReqs,
+          reqsByDay,
+          daysWithReqs,
+          attempts[i].order,
+          true,
+          true,
+          perAttemptBudget,
+          attempts[i].seedOffset
+        )
       );
       allPolished.push(attempt);
       if (!bestPolished || isSchedule2ResultBetter(attempt, bestPolished))
@@ -4181,6 +4205,16 @@
     }
     return rec(digits);
   }
+  function parseHourMarks(s) {
+    if (!s.includes(":")) return tokenizeHourDigits(s);
+    const m = s.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const hour = parseInt(m[1], 10);
+    const minute = parseInt(m[2], 10);
+    if (hour < 1 || hour > 12 || minute >= 60 || minute % SLOT_MIN !== 0)
+      return null;
+    return [{ hour, minute }];
+  }
   function hourMarkToStartSlot(mark) {
     const hour24 = mark.hour % 12 + 12;
     const minutes = hour24 * 60 + mark.minute;
@@ -4230,6 +4264,12 @@
   }
   function parseTimeToken(token, single = false) {
     const originalToken = token;
+    token = token.replace(/-/g, "~");
+    token = token.replace(
+      /(\d{1,2})시(\d{1,2})분/g,
+      (_, hour, minute) => hour + ":" + minute.padStart(2, "0")
+    );
+    token = token.replace(/(\d)시/g, "$1");
     if (single && /^\d{3,4}$/.test(token)) {
       const hour = parseInt(token.slice(0, -2), 10);
       const minute = parseInt(token.slice(-2), 10);
@@ -4256,12 +4296,12 @@
       if (hasLateMark) return { type: "point", marks: [LATE_MARK] };
       return { error: '알 수 없는 시간 표기: "' + originalToken + '"' };
     }
-    const suffixMatch = token.match(/^(\d+)(까지|부터|이후)$/);
+    const suffixMatch = token.match(/^([\d:]+)(까지|부터|이후)$/);
     if (suffixMatch) {
       const digits = suffixMatch[1];
       token = suffixMatch[2] === "까지" ? "~" + digits : digits + "~";
     }
-    const cleanMatch = token.match(/^[\d~]+/);
+    const cleanMatch = token.match(/^[\d~:]+/);
     let warning = null;
     if (!cleanMatch)
       return { error: '알 수 없는 시간 표기: "' + originalToken + '"' };
@@ -4275,8 +4315,8 @@
     if (tildeCount === 1) {
       const [leftStr, rightStr] = clean.split("~");
       if (leftStr !== "" && rightStr !== "") {
-        const leftMarks = tokenizeHourDigits(leftStr);
-        const rightMarks = tokenizeHourDigits(rightStr);
+        const leftMarks = parseHourMarks(leftStr);
+        const rightMarks = parseHourMarks(rightStr);
         if (!leftMarks || leftMarks.length !== 1 || !rightMarks || rightMarks.length !== 1) {
           return {
             error: '구간 표기 해석 실패: "' + originalToken + '"',
@@ -4292,7 +4332,7 @@
         return withLateMark({ type: "point", marks: marks3, warning });
       }
       if (rightStr === "") {
-        const marks3 = tokenizeHourDigits(leftStr);
+        const marks3 = parseHourMarks(leftStr);
         if (!marks3 || marks3.length === 0)
           return {
             error: '구간 표기 해석 실패: "' + originalToken + '"',
@@ -4305,7 +4345,7 @@
           warning
         });
       }
-      const marks2 = tokenizeHourDigits(rightStr);
+      const marks2 = parseHourMarks(rightStr);
       if (!marks2 || marks2.length === 0)
         return { error: '구간 표기 해석 실패: "' + originalToken + '"', warning };
       return withLateMark({
@@ -4315,13 +4355,13 @@
         warning
       });
     }
-    const marks = tokenizeHourDigits(clean);
+    const marks = parseHourMarks(clean);
     if (!marks)
       return { error: '시간 해석 실패: "' + originalToken + '"', warning };
     return withLateMark({ type: "point", marks, warning });
   }
   function parseBulkImportLine(line) {
-    const tokens = line.trim().split(/\s+/).filter(Boolean);
+    const tokens = line.replace(/\//g, ",").replace(/(\d)\s*시\s*(\d{1,2})\s*분/g, "$1시$2분").trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) return null;
     const name = tokens[0];
     const result = {
@@ -4337,7 +4377,10 @@
       return result;
     }
     let currentDays = null;
+    let currentLocationId = null;
+    let currentLocationUnknown = false;
     function applyTimeToken(tok, single) {
+      if (currentLocationUnknown) return;
       if (!currentDays) {
         result.errors.push(
           '요일 지정 전에 나온 시간 표기라 건너뜁니다: "' + tok + '"'
@@ -4351,15 +4394,28 @@
         return;
       }
       currentDays.forEach((day) => {
-        let dayEntry = result.days.find((d) => d.day === day);
+        let dayEntry = result.days.find(
+          (d) => d.day === day && d.locationId === currentLocationId
+        );
         if (!dayEntry) {
-          dayEntry = { day, specs: [] };
+          dayEntry = { day, locationId: currentLocationId, specs: [] };
           result.days.push(dayEntry);
         }
         dayEntry.specs.push(parsed);
       });
     }
     tokens.slice(1).forEach((spaceTok) => {
+      const locMatch = spaceTok.match(/^[(（]([^)）]+)[)）]/);
+      if (locMatch) {
+        const loc = findLocationByLooseName(locMatch[1].trim());
+        currentLocationId = loc ? loc.id : null;
+        currentLocationUnknown = !loc;
+        if (!loc)
+          result.errors.push(
+            '등록되지 않은 지점이라 그 지점의 시간은 건너뜁니다: "' + locMatch[1] + '"'
+          );
+        spaceTok = spaceTok.slice(locMatch[0].length);
+      }
       const pieces = spaceTok.split(",").filter(Boolean);
       pieces.forEach((piece) => {
         piece.match(/[월화수목금토]+[^월화수목금토]*|[^월화수목금토]+/g).forEach((seg) => {
@@ -4376,6 +4432,10 @@
     });
     result.days.sort((a, b) => a.day - b.day);
     return result;
+  }
+  function findLocationByLooseName(name) {
+    const bare = (n) => n.replace(/점$/, "");
+    return state.locations.find((l) => l.name === name) || state.locations.find((l) => bare(l.name) === bare(name));
   }
   function parseBulkImportText(text) {
     return text.split("\n").map(parseBulkImportLine).filter(Boolean);
@@ -4493,10 +4553,11 @@
     }
     bulkImportRows = lines.map((parsed) => {
       const matches = findMembersByName(parsed.name);
+      const firstLoc = parsed.days.find((d) => d.locationId);
       return {
         parsed,
         choice: matches.length >= 1 ? matches[0].id : "__new__",
-        newLocationId: state.locations[0] ? state.locations[0].id : "",
+        newLocationId: firstLoc ? firstLoc.locationId : state.locations[0] ? state.locations[0].id : "",
         newCategory: "등록"
       };
     });
@@ -4571,7 +4632,13 @@
         parsed.days.forEach((dayEntry) => {
           const chip = document.createElement("span");
           chip.className = "bulk-preview-day-chip";
-          chip.innerHTML = "<b>" + DAYS[dayEntry.day] + "</b> " + describeDaySpecs(dayEntry.specs);
+          const loc = locationById(dayEntry.locationId);
+          const dayEl = document.createElement("b");
+          dayEl.textContent = DAYS[dayEntry.day];
+          chip.append(
+            dayEl,
+            " " + (loc ? "(" + loc.name + ") " : "") + describeDaySpecs(dayEntry.specs)
+          );
           scheduleEl.appendChild(chip);
         });
       } else if (parsed.clearAll) {
@@ -4656,8 +4723,14 @@
       const entry = entriesByMemberKey.get(member.id);
       if (row.parsed.clearAll) entry.explicitClear = true;
       row.parsed.days.forEach((dayEntry) => {
-        if (!entry.days.has(dayEntry.day)) entry.days.set(dayEntry.day, []);
-        entry.days.get(dayEntry.day).push(...dayEntry.specs);
+        const key = dayEntry.day + "|" + (dayEntry.locationId || "");
+        if (!entry.days.has(key))
+          entry.days.set(key, {
+            day: dayEntry.day,
+            locationId: dayEntry.locationId,
+            specs: []
+          });
+        entry.days.get(key).specs.push(...dayEntry.specs);
       });
     });
     let appliedCount = 0;
@@ -4672,33 +4745,30 @@
       }
       state.requests = state.requests.filter((r) => r.memberId !== member.id);
       let addedForMember = 0;
-      function applyMarks(day, marks) {
+      let day, locId;
+      function addRange(startSlot, endSlot) {
+        addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
+      }
+      function applyMarks(marks) {
         groupConsecutiveMarks(marks).forEach((group) => {
-          const startSlot = hourMarkToStartSlot(group[0]);
-          const endSlot = hourMarkToStartSlot(group[group.length - 1]);
-          addedForMember += addDesiredRange(member, day, startSlot, endSlot);
+          addRange(
+            hourMarkToStartSlot(group[0]),
+            hourMarkToStartSlot(group[group.length - 1])
+          );
         });
       }
-      entry.days.forEach((specs, day) => {
-        specs.forEach((spec) => {
+      [...entry.days.values()].sort((a, b) => !!a.locationId - !!b.locationId).forEach((dayEntry) => {
+        day = dayEntry.day;
+        locId = dayEntry.locationId;
+        dayEntry.specs.forEach((spec) => {
           if (spec.type === "point") {
-            applyMarks(day, spec.marks);
+            applyMarks(spec.marks);
           } else if (spec.type === "openStart") {
-            applyMarks(day, spec.extraPoints || []);
-            addedForMember += addDesiredRange(
-              member,
-              day,
-              hourMarkToStartSlot(spec.mark),
-              SLOT_COUNT
-            );
+            applyMarks(spec.extraPoints || []);
+            addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
           } else if (spec.type === "openEnd") {
-            addedForMember += addDesiredRange(
-              member,
-              day,
-              0,
-              hourMarkToStartSlot(spec.mark)
-            );
-            applyMarks(day, spec.extraPoints || []);
+            addRange(0, hourMarkToStartSlot(spec.mark));
+            applyMarks(spec.extraPoints || []);
           }
         });
       });
@@ -5391,24 +5461,44 @@
     closeMemberBulkImportModal();
     showToast(toAdd.length + "명의 회원이 등록되었습니다", "success");
   });
-  function addDesiredRange(member, day, startSlot, endSlot) {
+  function addDesiredRange(member, day, startSlot, endSlot, locationId) {
     if (member.locationIds.length === 0) return 0;
     const duration = sessionDurationFor(member);
     const neededSlots = durationToSlots(duration);
-    const existingStarts = new Set(
-      state.requests.filter((r) => r.memberId === member.id && r.day === day).map((r) => r.startSlot)
+    const existingByStart = new Map(
+      state.requests.filter((r) => r.memberId === member.id && r.day === day).map((r) => [r.startSlot, r])
     );
+    const isBase = locationId && member.locationIds.includes(locationId);
     const maxStart = Math.min(endSlot, SLOT_COUNT - neededSlots);
     let added = 0;
     for (let s = startSlot; s <= maxStart; s++) {
-      if (existingStarts.has(s)) continue;
-      state.requests.push({
+      const existing = existingByStart.get(s);
+      if (existing) {
+        if (!locationId) continue;
+        if (existing.excludedLocationIds)
+          existing.excludedLocationIds = existing.excludedLocationIds.filter(
+            (id) => id !== locationId
+          );
+        if (!isBase && !(existing.extraLocationIds || []).includes(locationId))
+          existing.extraLocationIds = (existing.extraLocationIds || []).concat(
+            locationId
+          );
+        continue;
+      }
+      const req = {
         id: uid("r"),
         memberId: member.id,
         day,
         startSlot: s,
         duration
-      });
+      };
+      if (locationId) {
+        req.excludedLocationIds = member.locationIds.filter(
+          (id) => id !== locationId
+        );
+        if (!isBase) req.extraLocationIds = [locationId];
+      }
+      state.requests.push(req);
       added++;
     }
     return added;
@@ -5420,7 +5510,12 @@
     renderRequestList();
     saveState();
   }
-  function mergeRequestRuns(reqs) {
+  function requestAllowedLocationIds(member, r) {
+    const base = member.locationIds || [];
+    const excluded = r.excludedLocationIds || [];
+    return base.filter((id) => !excluded.includes(id)).concat((r.extraLocationIds || []).filter((id) => !base.includes(id)));
+  }
+  function mergeRequestRuns(member, reqs) {
     const byDay = /* @__PURE__ */ new Map();
     reqs.forEach((r) => {
       if (!byDay.has(r.day)) byDay.set(r.day, []);
@@ -5429,26 +5524,85 @@
     const runs = [];
     byDay.forEach((list, day) => {
       list.sort((a, b) => a.startSlot - b.startSlot);
-      let current = null;
+      const currentByKey = /* @__PURE__ */ new Map();
+      let dayRuns = [];
       list.forEach((r) => {
         const rEnd = r.startSlot + durationToSlots(r.duration);
+        const allowed = requestAllowedLocationIds(member, r).sort();
+        const key = allowed.join(",");
+        const current = currentByKey.get(key);
         if (current && r.startSlot <= current.endSlot) {
           current.endSlot = Math.max(current.endSlot, rEnd);
-          current.reqs.push(r);
+          current.ownReqs.push(r);
         } else {
-          current = { day, startSlot: r.startSlot, endSlot: rEnd, reqs: [r] };
-          runs.push(current);
+          const run = { day, endSlot: rEnd, allowed, ownReqs: [r] };
+          currentByKey.set(key, run);
+          dayRuns.push(run);
         }
       });
+      const firstStart = (run) => run.ownReqs[0].startSlot;
+      const lastStart = (run) => run.ownReqs[run.ownReqs.length - 1].startSlot;
+      dayRuns.forEach((run) => run.sharedReqs = []);
+      const folded = /* @__PURE__ */ new Set();
+      [...dayRuns].sort((a, b) => b.allowed.length - a.allowed.length).forEach((wide) => {
+        const narrows = dayRuns.filter(
+          (n) => n.allowed.length < wide.allowed.length && n.allowed.every((id) => wide.allowed.includes(id)) && firstStart(wide) <= lastStart(n) + 1 && lastStart(wide) >= firstStart(n) - 1
+        );
+        const covered = new Set(narrows.flatMap((n) => n.allowed));
+        if (!wide.allowed.every((id) => covered.has(id))) return;
+        narrows.forEach(
+          (n) => n.sharedReqs.push(...wide.ownReqs, ...wide.sharedReqs)
+        );
+        folded.add(wide);
+      });
+      dayRuns = dayRuns.filter((run) => !folded.has(run));
+      dayRuns.forEach((run) => {
+        run.reqs = run.ownReqs.concat(run.sharedReqs).sort((a, b) => a.startSlot - b.startSlot);
+        run.startSlot = run.reqs[0].startSlot;
+        run.endSlot = Math.max(
+          ...run.reqs.map((r) => r.startSlot + durationToSlots(r.duration))
+        );
+      });
+      dayRuns.sort((a, b) => a.startSlot - b.startSlot);
+      let cluster = [];
+      let clusterEnd = -1;
+      let laneEnds = [];
+      const flush = () => cluster.forEach((run) => run.laneCount = laneEnds.length);
+      dayRuns.forEach((run) => {
+        if (run.startSlot >= clusterEnd) {
+          flush();
+          cluster = [];
+          laneEnds = [];
+        }
+        let lane = laneEnds.findIndex((end) => end <= run.startSlot);
+        if (lane < 0) lane = laneEnds.length;
+        laneEnds[lane] = run.endSlot;
+        run.lane = lane;
+        cluster.push(run);
+        clusterEnd = Math.max(clusterEnd, run.endSlot);
+      });
+      flush();
+      runs.push(...dayRuns);
     });
     runs.sort((a, b) => a.day - b.day || a.startSlot - b.startSlot);
     return runs;
   }
+  function removeRequestRun(member, run) {
+    run.sharedReqs.forEach((r) => {
+      run.allowed.forEach((id) => {
+        if (member.locationIds.includes(id))
+          r.excludedLocationIds = (r.excludedLocationIds || []).concat(id);
+        else
+          r.extraLocationIds = (r.extraLocationIds || []).filter((x) => x !== id);
+      });
+    });
+    removeRequests(run.ownReqs.map((r) => r.id));
+  }
   function requestRunExtraLocationIds(run) {
-    return run.reqs[0] && run.reqs[0].extraLocationIds || [];
+    return run.ownReqs[0].extraLocationIds || [];
   }
   function setRunExtraLocationIds(run, ids) {
-    run.reqs.forEach((r) => {
+    run.ownReqs.forEach((r) => {
       r.extraLocationIds = ids.slice();
     });
   }
@@ -5472,10 +5626,10 @@
     showToast("지점이 제거되었습니다", "info");
   }
   function requestRunExcludedLocationIds(run) {
-    return run.reqs[0] && run.reqs[0].excludedLocationIds || [];
+    return run.ownReqs[0].excludedLocationIds || [];
   }
   function setRunExcludedLocationIds(run, ids) {
-    run.reqs.forEach((r) => {
+    run.ownReqs.forEach((r) => {
       r.excludedLocationIds = ids.slice();
     });
   }
@@ -5550,7 +5704,7 @@
     items.push({
       label: "가능 시간 삭제",
       danger: true,
-      onClick: () => removeRequests(run.reqs.map((r) => r.id))
+      onClick: () => removeRequestRun(member, run)
     });
     return items;
   }
@@ -5649,7 +5803,7 @@
     const myReqs = state.requests.filter((r) => r.memberId === activeMember.id);
     const color = memberColor(activeMember.id);
     const memberLabel = activeMember.name + ((activeMember.category || "상담") === "상담" ? " (상담)" : "");
-    const runs = mergeRequestRuns(myReqs);
+    const runs = mergeRequestRuns(activeMember, myReqs);
     const breakSlots = durationToSlots(BREAK_MIN);
     const scheduleGridRange = businessHoursGridRange();
     let rangeStartSlot = scheduleGridRange.rangeStartSlot;
@@ -5675,7 +5829,9 @@
           loc: memberLocNames && extraNames.length > 0 ? memberLocNames + " +" + extraNames.join(",") : memberLocNames || extraNames.join(","),
           sublabel: slotLabel(run.startSlot) + "~" + minutesLabel(START_MIN + displayEndSlot * SLOT_MIN),
           color,
-          onDelete: () => removeRequests(run.reqs.map((r) => r.id)),
+          lane: run.lane,
+          laneCount: run.laneCount,
+          onDelete: () => removeRequestRun(activeMember, run),
           contextMenuItems: () => buildRequestRunMenu(activeMember, run)
         };
       }),
@@ -6726,7 +6882,7 @@
     for (let i = 0; i < SCHEDULE2_CARD_COUNT; i++) {
       const idleFirstCard = i === IDLE_FIRST_CARD_INDEX;
       const aTitle = "후보A-" + (i + 1) + (idleFirstCard ? " - 인원 최대 (빈 시간 최소화)" : " - 인원 최대 (빈 시간 허용)");
-      const aDesc = idleFirstCard ? "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 빈 시간 최소 → 이동 횟수 최저 순으로 배정합니다." : "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.";
+      const aDesc = idleFirstCard ? "미배정 없음 → 비효율 이동 없음 → 수업 수·빈 시간 균형(수업 1건 = 빈 시간 60분) → 이동 횟수 최저 순으로 배정합니다." : "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.";
       const a = runtime.schedule3Result.candidateAList[i];
       if (a) {
         buildCard(
@@ -6756,7 +6912,7 @@
     if (b) {
       buildCard(
         "후보B - 인원 최대 (빈 시간 최소화)",
-        "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
+        "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",
         b,
         candidateToBlocks(b, renderSchedule3Result),
         candidateToTravelBlocks(b).concat(schedule2ToIdleBlocks(b.assigned)),
@@ -6771,7 +6927,7 @@
     } else {
       buildPlaceholderCard(
         "후보B - 인원 최대 (빈 시간 최소화)",
-        "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
+        "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",
         colRight
       );
     }

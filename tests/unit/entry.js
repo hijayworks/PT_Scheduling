@@ -15,6 +15,7 @@ export {
   shuffled,
   isSchedule2ResultBetter,
   floorIsBetter,
+  dropSessionsForBalance,
   schedule2Signature,
   runChainDP,
 } from "../../src/engine/chainDp.js";
@@ -27,3 +28,10 @@ export {
   candidateSearchScore,
   isCandidateWorse,
 } from "../../src/engine/greedy.js";
+export {
+  parseBulkImportLine,
+  hourMarkToStartSlot,
+  addDesiredRange,
+  mergeRequestRuns,
+  removeRequestRun,
+} from "../../src/pages/memberSchedule.js";

@@ -12,6 +12,7 @@ import { mulberry32, shuffled } from "./rng.js";
 import {
   isSchedule2ResultBetter,
   floorIsBetter,
+  dropSessionsForBalance,
   schedule2Signature,
   schedule2ToIdleBlocks,
   schedule2TotalIdleMinutes,
@@ -35,6 +36,7 @@ export {
   runChainDP,
   isSchedule2ResultBetter,
   floorIsBetter,
+  dropSessionsForBalance,
   schedule2Signature,
   schedule2ToIdleBlocks,
   schedule2TotalIdleMinutes,
@@ -354,15 +356,17 @@ export async function runSchedule2RestartGroup(
   let bestPolished = null;
   const allPolished = [];
   for (let i = 0; i < attempts.length; i++) {
-    const attempt = await runSchedule2Pipeline(
-      eligibleReqs,
-      reqsByDay,
-      daysWithReqs,
-      attempts[i].order,
-      true,
-      true,
-      perAttemptBudget,
-      attempts[i].seedOffset,
+    const attempt = dropSessionsForBalance(
+      await runSchedule2Pipeline(
+        eligibleReqs,
+        reqsByDay,
+        daysWithReqs,
+        attempts[i].order,
+        true,
+        true,
+        perAttemptBudget,
+        attempts[i].seedOffset,
+      ),
     );
     allPolished.push(attempt);
     if (!bestPolished || isSchedule2ResultBetter(attempt, bestPolished))

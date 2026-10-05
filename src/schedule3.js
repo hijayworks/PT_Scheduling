@@ -1463,8 +1463,8 @@ export function renderSchedule3Result() {
         ? " - 인원 최대 (빈 시간 최소화)"
         : " - 인원 최대 (빈 시간 허용)");
     const aDesc = idleFirstCard
-      ? "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 빈 시간 최소 → 이동 횟수 최저 순으로 배정합니다."
-      : "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.";
+      ? "미배정 없음 → 비효율 이동 없음 → 수업 수·빈 시간 균형(수업 1건 = 빈 시간 60분) → 이동 횟수 최저 순으로 배정합니다."
+      : "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.";
     const a = runtime.schedule3Result.candidateAList[i];
     if (a) {
       buildCard(
@@ -1495,7 +1495,7 @@ export function renderSchedule3Result() {
   if (b) {
     buildCard(
       "후보B - 인원 최대 (빈 시간 최소화)",
-      "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
+      "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",
       b,
       candidateToBlocks(b, renderSchedule3Result),
       candidateToTravelBlocks(b).concat(schedule2ToIdleBlocks(b.assigned)),
@@ -1510,7 +1510,7 @@ export function renderSchedule3Result() {
   } else {
     buildPlaceholderCard(
       "후보B - 인원 최대 (빈 시간 최소화)",
-      "미배정 없음 → 비효율 이동 없음 → 수업 횟수 최대 → 이동 횟수 최저·빈 시간 최소 순으로 배정합니다.",
+      "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",
       colRight,
     );
   }

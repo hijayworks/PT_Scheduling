@@ -5,6 +5,7 @@ import {
   totalTravelMinutes,
   totalInefficientMoveCount,
   TRAVEL_VALUE_MINUTES,
+  SESSION_VALUE_MINUTES,
 } from "./greedy.js";
 import { requiredGapMin2, isIdleFirst } from "./chainDpCore.js";
 
@@ -12,7 +13,9 @@ import { requiredGapMin2, isIdleFirst } from "./chainDpCore.js";
 // 재시작 오케스트레이션)가 요일 순서 후보·다듬은 결과를 고를 때 이 모듈에 의존한다.
 
 // result가 better보다 더 나은 결과인지 비교한다: 미배정 회원 수(적을수록) → 비효율 이동
-// 횟수(적을수록) → 수업 수(많을수록) → 이동 횟수·빈 시간 → 총 이동 시간(적을수록) 순.
+// 횟수(적을수록) → 수업 수·이동 횟수·빈 시간 환산 점수 → 수업 수 → 이동 횟수 → 총 이동
+// 시간 → 빈 시간 순. 환산 점수는 수업 1건 = SESSION_VALUE_MINUTES분, 이동 1번 =
+// TRAVEL_VALUE_MINUTES분 — 수업 1건을 더 넣는 대가로 이동이 2번 늘면 더 나쁜 것으로 친다.
 export function isSchedule2ResultBetter(a, b) {
   if (a.unassignedMembers.length !== b.unassignedMembers.length) {
     return a.unassignedMembers.length < b.unassignedMembers.length;
@@ -20,38 +23,62 @@ export function isSchedule2ResultBetter(a, b) {
   const ineffA = totalInefficientMoveCount(a.assigned),
     ineffB = totalInefficientMoveCount(b.assigned);
   if (ineffA !== ineffB) return ineffA < ineffB;
-  if (a.assigned.length !== b.assigned.length)
-    return a.assigned.length > b.assigned.length;
   const travelCountA = totalTravelCount(a.assigned),
     travelCountB = totalTravelCount(b.assigned);
   const idleA = schedule2TotalIdleMinutes(a.assigned),
     idleB = schedule2TotalIdleMinutes(b.assigned);
-  // 빈 시간 최소화 카드: 이동 횟수와 환산하지 않고 빈 시간을 먼저 본다.
-  if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
-  if (travelCountA !== travelCountB) {
-    // 이동 횟수가 다르면 무조건 이동이 적은 쪽을 이기게 하지 않고, 이동 1번의 가치를
-    // 빈 시간 TRAVEL_VALUE_MINUTES분으로 쳐서 하나의 점수로 합쳐 비교한다 — 이동을
-    // 줄이는 대가로 늘어난 빈 시간이 그보다 크면 오히려 더 나쁜 것으로 친다.
-    const netA = travelCountA * TRAVEL_VALUE_MINUTES + idleA;
-    const netB = travelCountB * TRAVEL_VALUE_MINUTES + idleB;
-    if (netA !== netB) return netA < netB;
-  }
+  // 빈 시간 최소화 카드: 이동 횟수는 점수에 넣지 않고 수업 수와 빈 시간만 환산해 비교한다.
+  const travelWeight = isIdleFirst() ? 0 : TRAVEL_VALUE_MINUTES;
+  const netA =
+    travelCountA * travelWeight +
+    idleA -
+    a.assigned.length * SESSION_VALUE_MINUTES;
+  const netB =
+    travelCountB * travelWeight +
+    idleB -
+    b.assigned.length * SESSION_VALUE_MINUTES;
+  if (netA !== netB) return netA < netB;
+  if (a.assigned.length !== b.assigned.length)
+    return a.assigned.length > b.assigned.length;
+  if (travelCountA !== travelCountB) return travelCountA < travelCountB;
   const travelMinA = totalTravelMinutes(a.assigned),
     travelMinB = totalTravelMinutes(b.assigned);
   if (travelMinA !== travelMinB) return travelMinA < travelMinB;
   return idleA < idleB;
 }
 
-// isSchedule2ResultBetter 중 앞 두 기준(미배정 수 → 수업 수)만으로 a가 b보다 나은지 본다.
-// 후보A-1/A-2/A-3(runSchedule2RestartGroup)가 "카드 간 목표 공유"에 쓴다 — 이동 횟수 등
-// 나머지 지표는 카드마다 골격 자체가 달라 서로 비교할 대상이 아니기 때문에 뺀다. b가 없으면
-// (아직 어떤 카드도 끝나지 않았으면) 항상 true.
+// 수업 1건을 빼보고 isSchedule2ResultBetter 기준으로 나아지면 실제로 뺀다(더 나아지지 않을
+// 때까지 반복). 예: 상암점 단독 수업 1건 때문에 이동이 2번 생겼다면 그 1건을 빼는 편이 낫다.
+// 그 회원의 유일한 수업은 빼지 않는다 — 미배정이 늘어나기 때문이다.
+// ponytail: 빼기만 하고 나머지 수업은 재배치하지 않는다. 뺀 자리를 활용한 재배치까지 보려면
+// 다듬기 예산 일부를 떼어 "빼고 다시 다듬기"를 추가한다.
+export function dropSessionsForBalance(result) {
+  let cur = result;
+  for (;;) {
+    const sessionsByMember = new Map();
+    cur.assigned.forEach((r) =>
+      sessionsByMember.set(
+        r.memberId,
+        (sessionsByMember.get(r.memberId) || 0) + 1,
+      ),
+    );
+    let best = cur;
+    cur.assigned.forEach((r) => {
+      if (sessionsByMember.get(r.memberId) < 2) return;
+      const cand = { ...cur, assigned: cur.assigned.filter((x) => x !== r) };
+      if (isSchedule2ResultBetter(cand, best)) best = cand;
+    });
+    if (best === cur) return cur;
+    cur = best;
+  }
+}
+
+// 미배정 수만으로 a가 b보다 나은지 본다. 후보A 카드들(runSchedule2RestartGroup)이 "카드 간
+// 목표 공유"에 쓴다 — 수업 수는 이동·빈 시간과 환산해 비교하므로(isSchedule2ResultBetter)
+// 수업 수만 따로 하한으로 강제하지 않는다. b가 없으면(아직 어떤 카드도 끝나지 않았으면) 항상 true.
 export function floorIsBetter(a, b) {
   if (!b) return true;
-  if (a.unassignedMembers.length !== b.unassignedMembers.length) {
-    return a.unassignedMembers.length < b.unassignedMembers.length;
-  }
-  return a.assigned.length > b.assigned.length;
+  return a.unassignedMembers.length < b.unassignedMembers.length;
 }
 
 // 다듬기(5~9단계, 특히 담금질 기법)는 "미배정 수·수업 수는 그대로 둔 채 이동·빈 시간만

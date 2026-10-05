@@ -12,11 +12,20 @@ const path = require("path");
 const Module = require("module");
 const esbuild = require("esbuild");
 
-globalThis.document = globalThis.document || {
-  addEventListener() {},
-  hidden: false,
-};
+// pages/memberSchedule.js처럼 임포트 시점에 DOM 요소를 찾고 이벤트를 거는 모듈도 불러올 수
+// 있도록, 정의하지 않은 속성은 무엇이든 "아무것도 안 하는 함수 겸 객체"를 돌려주게 한다.
+function domStub(base = {}) {
+  return new Proxy(Object.assign(function () {}, base), {
+    get: (t, k) =>
+      k in base ? base[k] : k === Symbol.toPrimitive ? () => "" : domStub(),
+    apply: () => domStub(),
+    construct: () => domStub(),
+    set: () => true,
+  });
+}
+globalThis.document = globalThis.document || domStub({ hidden: false });
 globalThis.window = globalThis.window || globalThis;
+globalThis.addEventListener = globalThis.addEventListener || (() => {});
 // navigator·performance는 Node 22부터 이미 전역으로 존재해(단, wakeLock 등은 없음) 여기서
 // 굳이 덮어쓰지 않는다 — 다시 대입하면 getter 전용이라 TypeError가 난다. 테스트 대상
 // 함수들은 애초에 navigator를 쓰지 않는다.
@@ -389,6 +398,159 @@ test("candidateSearchScore: 인원이 비효율 이동보다, 비효율 이동�
   const moreSessionsIneff = score([s("A", 0, "M"), s("B", 10, "S"), s("A", 20, "M")]);
   const fewerSessionsClean = score([s("A", 0, "M"), s("B", 10, "S")]);
   assert(lib.isCandidateWorse(moreSessionsIneff, fewerSessionsClean), "인원이 같으면 비효율 이동 없는 쪽이 수업 수보다 우선");
+});
+
+/* ---------------- 수업 1건 = 이동 1번 환산 비교 ---------------- */
+test("수업 1건 늘리려고 이동 2번 늘리면 더 나쁨, 이동 1번이면 수업 많은 쪽", () => {
+  lib.state.locations = ineffLocations();
+  lib.state.travelTimes = { [lib.pairKey("M", "Y")]: 20 };
+  const s = (memberId, startSlot, locationId) => ({
+    memberId,
+    day: 0,
+    startSlot,
+    locationId,
+    duration: 50,
+  });
+  const twoNoTravel = [s("A", 0, "M"), s("B", 5, "M")]; // 수업 2·이동 0
+  const threeTwoTravel = [s("A", 0, "M"), s("B", 7, "Y"), s("A", 14, "M")]; // 수업 3·이동 2
+  const threeOneTravel = [s("A", 0, "M"), s("B", 5, "M"), s("A", 12, "Y")]; // 수업 3·이동 1
+  const r = (assigned) => scheduleResult(assigned, 0);
+  assert(
+    lib.isSchedule2ResultBetter(r(twoNoTravel), r(threeTwoTravel)),
+    "수업 1건 < 이동 2번",
+  );
+  assert(
+    lib.isSchedule2ResultBetter(r(threeOneTravel), r(twoNoTravel)),
+    "점수 동점이면 수업 많은 쪽",
+  );
+  const score = (assigned) =>
+    lib.candidateSearchScore(
+      { assigned, unassignedMembers: [] },
+      "count",
+      null,
+    );
+  assert(
+    lib.isCandidateWorse(score(threeTwoTravel), score(twoNoTravel)),
+    "그리디 후보도 같은 기준",
+  );
+  assert(lib.isCandidateWorse(score(twoNoTravel), score(threeOneTravel)));
+});
+
+test("dropSessionsForBalance: 이동+빈 시간만 만드는 끝 수업은 빼고, 유일한 수업·손해인 수업은 안 뺀다", () => {
+  lib.state.locations = ineffLocations();
+  lib.state.travelTimes = { [lib.pairKey("M", "Y")]: 20 };
+  const s = (memberId, startSlot, locationId) => ({ memberId, day: 0, startSlot, locationId, duration: 50 });
+  // A의 두 번째 수업(Y)이 이동 1번 + 빈 시간 30분을 만든다 → 빼는 게 낫다.
+  const lastA = s("A", 15, "Y");
+  const dropped = lib.dropSessionsForBalance(scheduleResult([s("A", 0, "M"), s("B", 5, "M"), lastA], 0));
+  assertEqual(dropped.assigned.length, 2);
+  assert(!dropped.assigned.includes(lastA));
+  // 같은 배치라도 B의 유일한 수업이면 빼지 않는다.
+  const onlyB = scheduleResult([s("A", 0, "M"), s("B", 15, "Y")], 0);
+  assertEqual(lib.dropSessionsForBalance(onlyB).assigned.length, 2);
+  // 빈 시간 없이 이동 1번만 만드는 수업은 수업 1건 = 이동 1번이라 동점 → 빼지 않는다.
+  const tie = scheduleResult([s("A", 0, "M"), s("B", 5, "M"), s("A", 12, "Y")], 0);
+  assertEqual(lib.dropSessionsForBalance(tie).assigned.length, 3);
+});
+
+/* ---------------- 붙여넣기 일괄 등록 파싱 ---------------- */
+function bulkLocations() {
+  return [
+    { id: "M", name: "마포점" },
+    { id: "Y", name: "여의도점" },
+    { id: "S", name: "상암점" },
+  ];
+}
+// 파싱 결과를 "요일|지점|시작시각들"로 요약한다(시각은 그리드 기준 HH:MM).
+function bulkSummary(line) {
+  const parsed = lib.parseBulkImportLine(line);
+  assertEqual(parsed.errors, [], line);
+  return parsed.days.map(
+    (d) =>
+      d.day +
+      "|" +
+      (d.locationId || "") +
+      "|" +
+      d.specs
+        .flatMap((s) => s.marks)
+        .map((m) => lib.slotLabel(lib.hourMarkToStartSlot(m)))
+        .join(","),
+  );
+}
+test("일괄 등록: 시·분 표기와 / 구분", () => {
+  lib.state.locations = bulkLocations();
+  assertEqual(bulkSummary("홍길동  월 4시 10분/4시20분"), ["0||16:10,16:20"]);
+  assertEqual(bulkSummary("홍길동 화 12시30분"), ["1||12:30"]);
+  assertEqual(bulkSummary("홍길동 목 2시, 3시 금 4시,5시"), ["3||14:00,15:00", "4||16:00,17:00"]);
+  // 기존 뜻은 그대로: 쉼표 없는 "410"은 4시·10시, 하이픈은 물결과 같다.
+  assertEqual(bulkSummary("홍길동 월410"), ["0||16:00,22:00"]);
+  assertEqual(bulkSummary("홍길동 월2-4"), ["0||14:00,15:00,16:00"]);
+  assert(lib.parseBulkImportLine("홍길동 월 4시 5분").errors.length > 0, "10분 단위가 아니면 오류");
+});
+test("일괄 등록: 분이 붙은 범위 표기", () => {
+  lib.state.locations = bulkLocations();
+  const specs = (line) => {
+    const parsed = lib.parseBulkImportLine(line);
+    assertEqual(parsed.errors, [], line);
+    return parsed.days[0].specs.map((s) =>
+      s.type === "point"
+        ? s.marks.map((m) => lib.slotLabel(lib.hourMarkToStartSlot(m))).join(",")
+        : s.type + " " + lib.slotLabel(lib.hourMarkToStartSlot(s.mark)),
+    );
+  };
+  assertEqual(specs("홍길동 월 4시10분~6시"), ["16:10,17:00,18:00"]);
+  assertEqual(specs("홍길동 월 4시 10분-6시 30분"), ["16:10,17:00,18:30"]);
+  assertEqual(specs("홍길동 월 4시~6시30분"), ["16:00,17:00,18:30"]);
+  assertEqual(specs("홍길동 월 4시10분~"), ["openStart 16:10"]);
+  assertEqual(specs("홍길동 월 ~6시30분"), ["openEnd 18:30"]);
+  assertEqual(specs("홍길동 월 4시10분부터"), ["openStart 16:10"]);
+  assertEqual(specs("홍길동 월 6시30분까지"), ["openEnd 18:30"]);
+  assert(lib.parseBulkImportLine("홍길동 월 4시5분~6시").errors.length > 0, "10분 단위가 아니면 오류");
+});
+test("일괄 등록: (지점) 표기", () => {
+  lib.state.locations = bulkLocations();
+  assertEqual(bulkSummary("홍길동 (마포)월89 (여의도)월9"), ["0|M|20:00,21:00", "0|Y|21:00"]);
+  const unknown = lib.parseBulkImportLine("홍길동 (강남)월8 화9");
+  assertEqual(unknown.days, []);
+  assert(unknown.errors.length === 1, "등록되지 않은 지점은 오류로 알리고 그 시간은 건너뜀");
+});
+
+/* ---------------- 지점별 가능 시간 블록 합치기 ---------------- */
+// addDesiredRange로 월요일 신청을 만들고, mergeRequestRuns가 만든 블록을 "지점들 시작~끝"으로 요약한다.
+function requestBlocks(baseLocs, ranges) {
+  lib.state.locations = bulkLocations();
+  lib.state.requests = [];
+  const member = { id: "m1", name: "홍", locationIds: baseLocs, category: "등록" };
+  lib.state.members = [member];
+  const slot = (hour) => lib.hourMarkToStartSlot({ hour, minute: 0 });
+  ranges.forEach(([from, to, loc]) => lib.addDesiredRange(member, 0, slot(from), slot(to), loc));
+  const runs = lib.mergeRequestRuns(member, lib.state.requests);
+  const summary = runs.map(
+    (r) => r.allowed.join("") + " " + lib.slotLabel(r.startSlot) + "~" + lib.slotLabel(r.endSlot),
+  );
+  return { member, runs, summary };
+}
+test("mergeRequestRuns: 공통 시각은 맞닿은 지점 블록이 함께 덮는다", () => {
+  assertEqual(requestBlocks(["M", "Y"], [[5, 8, "M"], [8, 9, "Y"]]).summary, ["M 17:00~21:00", "Y 20:00~22:00"]);
+  // 기본 지점이 아닌 지점도 같다.
+  assertEqual(requestBlocks(["M"], [[5, 8, "M"], [8, 9, "Y"]]).summary, ["M 17:00~21:00", "Y 20:00~22:00"]);
+});
+test("mergeRequestRuns: 어떤 지점도 화면에서 사라지지 않는다", () => {
+  const shown = (summary) => new Set(summary.flatMap((s) => Array.from(s.split(" ")[0])));
+  // 지점 표기 없는 시간 옆의 여의도 전용 시간 — 마포가 남아야 한다.
+  const plain = requestBlocks(["M", "Y"], [[5, 8, null], [8, 9, "Y"]]).summary;
+  assertEqual(plain, ["MY 17:00~21:00", "Y 20:10~22:00"]);
+  // 마포 시간 안에 여의도 시간이 들어 있는 경우 — 여의도가 남아야 한다.
+  assert(shown(requestBlocks(["M", "Y"], [[5, 8, "M"], [6, 7, "Y"]]).summary).has("Y"));
+  // 지점 3개 — 여의도가 남아야 한다.
+  const three = shown(requestBlocks(["M", "Y", "S"], [[5, 8, "M"], [8, 9, "Y"], [8, 10, "S"]]).summary);
+  assertEqual([...three].sort(), ["M", "S", "Y"]);
+});
+test("removeRequestRun: 지점 블록을 지우면 공통 시각은 다른 지점 블록에 남는다", () => {
+  const { member, runs } = requestBlocks(["M", "Y"], [[5, 8, "M"], [8, 9, "Y"]]);
+  lib.removeRequestRun(member, runs.find((r) => r.allowed.join("") === "M"));
+  const after = lib.mergeRequestRuns(member, lib.state.requests);
+  assertEqual(after.map((r) => r.allowed.join("") + " " + lib.slotLabel(r.startSlot)), ["Y 20:00"]);
 });
 
 console.log(pass + "개 통과, " + fail + "개 실패 (단위 테스트)");
