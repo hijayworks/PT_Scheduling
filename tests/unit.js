@@ -1158,6 +1158,68 @@ test("후보 다양성: 배정이 같으면 중복, 지표만 같으면 구조�
   assertEqual(sum.paretoQualityTypes, 2, "A·A'·S는 품질이 같아 선택지 하나, T가 둘째");
 });
 
+/* ---------------- candidateSelection.js: 후보 풀에서 사용자 카드 선정 ---------------- */
+// qualityFixture: 마포(L1)·여의도(L2)·상암(L3), 마포↔여의도·마포↔상암 30분. C는 상암 상담 30분.
+function selEntry(key, sessions, unassigned = []) {
+  const result = { assigned: sessions.map((s) => at(...s)), unassignedMembers: unassigned };
+  return { key, result, metrics: lib.scheduleMetrics(result) };
+}
+// 월: A·B(마포), 화: S(마포) → 이동 → C(상암). 미배정 0, 수업 4, 이동 1, 빈 시간 0.
+const SEL_BASE = [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]];
+test("후보 선정: 같은 배치는 하나로 합치고, 시작 시각만 다른 같은 품질 배치는 variant로 남기지 않는다", () => {
+  qualityFixture();
+  const base = selEntry("base", SEL_BASE);
+  const dup = selEntry("dup", SEL_BASE);
+  const shifted = selEntry("shifted", [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 1, 1, "L1"], ["C", 1, 10, "L3"]]);
+  const daysSwapped = selEntry("swapped", [["A", 1, 0, "L1"], ["B", 1, 6, "L1"], ["S", 0, 0, "L1"], ["C", 0, 9, "L3"]]);
+  const sel = lib.selectCandidates([base, dup, shifted, daysSwapped]);
+  assertEqual(sel.cards.map((c) => [c.label, c.variants.map((v) => v.key)]), [["추천", ["base", "swapped"]]]);
+  const st = sel.stats;
+  assertEqual([st.exactDuplicates, st.qualityGroups, st.similarRemoved], [1, 1, 1]);
+});
+test("후보 선정: 같은 품질 배치는 회원·요일 배정이 달라도 카드 하나에 최대 3개 variant만 둔다", () => {
+  qualityFixture();
+  const layouts = [
+    SEL_BASE,
+    [["S", 0, 0, "L1"], ["C", 0, 9, "L3"], ["A", 1, 0, "L1"], ["B", 1, 6, "L1"]],
+    [["A", 0, 0, "L1"], ["S", 0, 6, "L1"], ["B", 1, 0, "L1"], ["C", 1, 9, "L3"]],
+    [["B", 0, 0, "L1"], ["S", 0, 6, "L1"], ["A", 1, 0, "L1"], ["C", 1, 9, "L3"]],
+  ];
+  const sel = lib.selectCandidates(layouts.map((l, i) => selEntry("v" + i, l)));
+  assertEqual(sel.cards.length, 1);
+  assertEqual(sel.cards[0].variants.length, lib.MAX_CARD_VARIANTS);
+  assertEqual(sel.stats.variantLimitRemoved, 1);
+});
+test("후보 선정: 모든 축에서 같거나 못한 후보는 지우고, 추천안보다 나은 축이 있을 때만 역할을 붙인다", () => {
+  qualityFixture();
+  const base = selEntry("base", SEL_BASE);
+  const worse = selEntry("worse", [["A", 0, 0, "L1"], ["B", 0, 9, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]]);
+  const more = selEntry("more", SEL_BASE.concat([["A", 1, 15, "L1"]]));
+  const lessTravel = selEntry("less", [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 0, 12, "L1"]], [{ id: "C" }]);
+  const sel = lib.selectCandidates([worse, more, base, lessTravel]);
+  assertEqual(
+    sel.cards.map((c) => [c.label, c.variants[0].key, lib.formatTradeoff(c.deltas)]),
+    [
+      ["추천", "base", ""],
+      ["수업 우선", "more", "수업 +1 / 비효율 이동 +1 / 이동 +1 / 이동 시간 +30분"],
+      ["이동 최소", "less", "미배정 +1명 / 수업 -1 / 이동 -1 / 이동 시간 -30분"],
+    ],
+    "공강 최소는 추천안보다 빈 시간이 적은 후보가 없어 만들지 않는다",
+  );
+  assertEqual([sel.stats.dominatedGroups, sel.stats.dominatedLayouts, sel.hidden.length], [1, 1, 0]);
+});
+test("후보 선정: 어느 역할에도 맞지 않는 Pareto 후보는 버리지 않고 unlabeled로 따로 보고한다", () => {
+  qualityFixture();
+  // 추천: 마포→상암→마포 왕복(비효율 1), 이동 2. 대안: 미배정 1이지만 비효율 이동 없음(마포↔여의도 왕복).
+  const rec = selEntry("rec", [["A", 0, 0, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"], ["B", 1, 15, "L1"]]);
+  const noIneff = selEntry("alt", [["A", 0, 0, "L1"], ["B", 0, 9, "L2"], ["S", 0, 18, "L1"]], [{ id: "C" }]);
+  const sel = lib.selectCandidates([rec, noIneff]);
+  assertEqual(sel.cards.map((c) => c.label), ["추천"]);
+  assertEqual(sel.hidden.map((h) => [h.reason, h.variants[0].key, lib.formatTradeoff(h.deltas)]), [
+    ["unlabeled", "alt", "미배정 +1명 / 수업 -1 / 비효율 이동 -1"],
+  ]);
+});
+
 /* ---------------- goldenFloors.js: 골든 품질 하한 래칫 ---------------- */
 const goldenFloors = require("./goldenFloors.js");
 function floorSet(sessions, travel) {

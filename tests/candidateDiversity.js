@@ -6,17 +6,16 @@
 //   same-quality  배정은 다르지만 주요 품질 지표가 전부 같다(구조만 다른 배치)
 //   dominated     한쪽이 모든 주요 지표에서 같거나 낫고 하나 이상에서 낫다
 //   trade-off     서로 나은 지표가 따로 있다
+//
+// 지배 판정 축·배치 서명은 앱의 후보 선정 정책(src/engine/candidateSelection.js)을 그대로 쓴다.
+// 이 모듈을 부르기 전에 lib을 불러야 한다(caseRunner가 예산 전역을 정한 뒤 불러온다).
 "use strict";
 
-// 주요 품질 지표와 좋은 방향(+1 클수록 좋음, -1 작을수록 좋음).
-const QUALITY_KEYS = [
-  ["unassigned", -1, "미배정"],
-  ["sessions", 1, "수업"],
-  ["inefficientMoves", -1, "비효율"],
-  ["travelCount", -1, "이동"],
-  ["travelMinutes", -1, "이동분"],
-  ["idleMinutes", -1, "빈시간"],
-];
+const {
+  QUALITY_AXES,
+  layoutSignature: signature,
+  qualityKey: qualityType,
+} = require("./loadLib.js");
 
 const sessionKey = (r) =>
   `${r.memberId}|${r.day}|${r.startSlot}|${r.locationId}`;
@@ -32,15 +31,11 @@ function jaccard(a, b) {
   return inter / (A.size + B.size - inter);
 }
 
-const signature = (result) => result.assigned.map(sessionKey).sort().join(",");
-const qualityType = (metrics) =>
-  QUALITY_KEYS.map(([k]) => metrics[k]).join("|");
-
 // b가 a보다 나은 지표·나쁜 지표의 이름.
 function metricDiff(ma, mb) {
   const better = [],
     worse = [];
-  QUALITY_KEYS.forEach(([k, dir]) => {
+  QUALITY_AXES.forEach(([k, dir]) => {
     const d = (mb[k] - ma[k]) * dir;
     if (d > 0) better.push(k);
     else if (d < 0) worse.push(k);
@@ -71,7 +66,7 @@ function pairRelation(a, b) {
     ),
     // b - a (지표 원래 단위)
     deltas: Object.fromEntries(
-      QUALITY_KEYS.filter(([k]) => a.metrics[k] !== b.metrics[k]).map(([k]) => [
+      QUALITY_AXES.filter(([k]) => a.metrics[k] !== b.metrics[k]).map(([k]) => [
         k,
         b.metrics[k] - a.metrics[k],
       ]),
@@ -107,7 +102,6 @@ function diversitySummary(cands) {
 }
 
 module.exports = {
-  QUALITY_KEYS,
   signature,
   pairRelation,
   diversitySummary,
