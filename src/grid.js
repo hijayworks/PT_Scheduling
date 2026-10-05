@@ -1,4 +1,13 @@
-import { DAYS, SLOT_COUNT, SLOT_MIN, START_MIN } from "./constants.js";
+import {
+  DAYS,
+  SLOT_COUNT,
+  SLOT_MIN,
+  START_MIN,
+  BLOCK_COLOR,
+  MEMBER_COLORS,
+  MEMBER_COLOR_SHADE_STEPS,
+  shadeColor,
+} from "./constants.js";
 import { cellKey, durationToSlots, slotLabel } from "./utils.js";
 
 export let draggingMoveHandler = null;
@@ -133,6 +142,43 @@ export function attachTouchDrag(el, container, meta) {
   });
 }
 
+function clearPlacementClasses(el) {
+  Array.from(el.classList).forEach((name) => {
+    if (
+      name.startsWith("grid-col-") ||
+      name.startsWith("grid-row-start-") ||
+      name.startsWith("grid-row-span-") ||
+      name.startsWith("lane-")
+    )
+      el.classList.remove(name);
+  });
+}
+
+function setGridPlacement(el, column, rowStart, rowSpan = 1) {
+  clearPlacementClasses(el);
+  el.classList.add(
+    "grid-col-" + column,
+    "grid-row-start-" + rowStart,
+    "grid-row-span-" + rowSpan,
+  );
+}
+
+function blockColorClass(color) {
+  if (color === BLOCK_COLOR) return "member-color-fallback";
+  let index = 0;
+  for (let tier = 0; tier < MEMBER_COLOR_SHADE_STEPS.length; tier++) {
+    for (let hue = 0; hue < MEMBER_COLORS.length; hue++) {
+      if (
+        shadeColor(MEMBER_COLORS[hue], MEMBER_COLOR_SHADE_STEPS[tier]) ===
+        color
+      )
+        return "member-color-" + index;
+      index++;
+    }
+  }
+  return "member-color-fallback";
+}
+
 /* ---------------- Grid rendering ---------------- */
 // options: { blocks: [{day, startSlot, duration, label, loc, sublabel, color, excluded, onDelete, onMove}],
 //   travelBlocks: [{day, startSlot, duration, label, type: "travel" | "break"}] }
@@ -147,14 +193,15 @@ export function renderGrid(container, availableSet, options) {
       ? options.rangeEndSlot
       : SLOT_COUNT;
   container.innerHTML = "";
-  container.style.gridTemplateRows =
-    "30px repeat(" + (rangeEnd - rangeStart) + ", 16px)";
+  Array.from(container.classList)
+    .filter((name) => name.startsWith("grid-rows-"))
+    .forEach((name) => container.classList.remove(name));
+  container.classList.add("grid-rows-" + (rangeEnd - rangeStart));
 
   // corner
   const corner = document.createElement("div");
   corner.className = "cal-head corner";
-  corner.style.gridColumn = "1";
-  corner.style.gridRow = "1";
+  setGridPlacement(corner, 1, 1);
   container.appendChild(corner);
 
   // day headers
@@ -162,8 +209,7 @@ export function renderGrid(container, availableSet, options) {
     const head = document.createElement("div");
     head.className = "cal-head";
     head.textContent = d;
-    head.style.gridColumn = String(di + 2);
-    head.style.gridRow = "1";
+    setGridPlacement(head, di + 2, 1);
     container.appendChild(head);
   });
 
@@ -176,8 +222,7 @@ export function renderGrid(container, availableSet, options) {
       label.className =
         "cal-timelabel" + (s === rangeStart ? " cal-timelabel-first" : "");
       label.textContent = slotLabel(s);
-      label.style.gridColumn = "1";
-      label.style.gridRow = String(row);
+      setGridPlacement(label, 1, row);
       container.appendChild(label);
     }
     for (let di = 0; di < DAYS.length; di++) {
@@ -190,8 +235,7 @@ export function renderGrid(container, availableSet, options) {
         (isAvailable ? " available" : "");
       cell.dataset.day = String(di);
       cell.dataset.slot = String(s);
-      cell.style.gridColumn = String(di + 2);
-      cell.style.gridRow = String(row);
+      setGridPlacement(cell, di + 2, row);
       container.appendChild(cell);
     }
   }
@@ -212,9 +256,12 @@ export function renderGrid(container, availableSet, options) {
         : t.type === "break"
           ? "cal-break-block"
           : "cal-travel-block";
-    travel.style.gridColumn = String(t.day + 2);
-    travel.style.gridRow =
-      clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
+    setGridPlacement(
+      travel,
+      t.day + 2,
+      clippedStart - rangeStart + 2,
+      clippedEnd - clippedStart,
+    );
     travel.title = t.label;
     travel.textContent = t.label;
     // 이동 시간 블록 자체는 옮길 수 있는 데이터가 아니라(두 수업 사이 간격에서 계산되는
@@ -252,12 +299,11 @@ export function renderGrid(container, availableSet, options) {
       });
     }
     if (t.contextMenuItems) {
-      travel.style.cursor = "pointer";
+      travel.classList.add("clickable");
       travel.addEventListener("click", (e) => {
         e.stopPropagation();
         openContextMenu(
-          e.clientX,
-          e.clientY,
+          travel,
           t.contextMenuItems(e.clientX, e.clientY),
         );
       });
@@ -280,20 +326,18 @@ export function renderGrid(container, availableSet, options) {
       (b.confirmed ? " confirmed" : "");
     // 확정된 일정은 흰색을 넉넉히 섞은 배경으로 칠하고, 테두리는 원래 회원 색상 그대로 두껍게
     // 둘러서 미확정 블록과 한눈에 확 구분되게 한다.
-    if (!b.excluded) {
-      block.style.background = b.confirmed
-        ? "linear-gradient(rgba(255,255,255,0.72), rgba(255,255,255,0.72)), " +
-          b.color
-        : b.color;
-      if (b.confirmed) block.style.borderColor = b.color;
-    }
-    block.style.gridColumn = String(b.day + 2);
-    block.style.gridRow =
-      clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
+    if (!b.excluded) block.classList.add(blockColorClass(b.color));
+    setGridPlacement(
+      block,
+      b.day + 2,
+      clippedStart - rangeStart + 2,
+      clippedEnd - clippedStart,
+    );
     // 같은 칸에서 시간이 겹치는 블록(지점이 다른 가능 시간대)은 칸을 나눠 나란히 놓는다.
     if (b.laneCount > 1) {
-      block.style.width = 100 / b.laneCount + "%";
-      block.style.marginLeft = (100 * b.lane) / b.laneCount + "%";
+      const laneCount = Math.min(40, Math.max(2, b.laneCount));
+      const lane = Math.min(laneCount - 1, Math.max(0, b.lane || 0));
+      block.classList.add("lane-" + laneCount + "-" + lane);
     }
     block.title =
       b.label +
@@ -361,16 +405,15 @@ export function renderGrid(container, availableSet, options) {
       block.appendChild(delBtn);
     }
     if (!b.excluded && b.onClick) {
-      block.style.cursor = "pointer";
+      block.classList.add("clickable");
       block.addEventListener("click", () => b.onClick());
     }
     if (!b.excluded && b.contextMenuItems) {
-      block.style.cursor = "pointer";
+      block.classList.add("clickable");
       block.addEventListener("click", (e) => {
         e.stopPropagation();
         openContextMenu(
-          e.clientX,
-          e.clientY,
+          block,
           b.contextMenuItems(e.clientX, e.clientY),
         );
       });
@@ -449,9 +492,12 @@ export function renderGrid(container, availableSet, options) {
       dropPreviewEl.className = "cal-drop-preview";
       container.appendChild(dropPreviewEl);
     }
-    dropPreviewEl.style.gridColumn = String(day + 2);
-    dropPreviewEl.style.gridRow =
-      clippedStart - rangeStart + 2 + " / span " + (clippedEnd - clippedStart);
+    setGridPlacement(
+      dropPreviewEl,
+      day + 2,
+      clippedStart - rangeStart + 2,
+      clippedEnd - clippedStart,
+    );
     dropPreviewEl.classList.toggle("invalid", kind === "invalid");
     dropPreviewEl.classList.toggle("swap", kind === "swap");
   }
@@ -512,16 +558,21 @@ export function renderGrid(container, availableSet, options) {
 
 /* ---------------- Generic block click menu (그리드 블록 클릭 메뉴) ---------------- */
 export let activeContextMenuEl = null;
+export let activeContextMenuAnchorEl = null;
 
 export function closeContextMenu() {
   if (activeContextMenuEl) {
     activeContextMenuEl.remove();
     activeContextMenuEl = null;
   }
+  if (activeContextMenuAnchorEl) {
+    activeContextMenuAnchorEl.classList.remove("context-menu-open");
+    activeContextMenuAnchorEl = null;
+  }
 }
 
 // items: [{ label, onClick, disabled, danger }] 또는 { separator: true }
-export function openContextMenu(x, y, items) {
+export function openContextMenu(anchorEl, items) {
   closeContextMenu();
   const menu = document.createElement("div");
   menu.className = "block-context-menu";
@@ -544,12 +595,9 @@ export function openContextMenu(x, y, items) {
     });
     menu.appendChild(btn);
   });
-  document.body.appendChild(menu);
-  const rect = menu.getBoundingClientRect();
-  const left = Math.min(x, Math.max(0, window.innerWidth - rect.width - 8));
-  const top = Math.min(y, Math.max(0, window.innerHeight - rect.height - 8));
-  menu.style.left = left + "px";
-  menu.style.top = top + "px";
+  anchorEl.classList.add("context-menu-open");
+  anchorEl.appendChild(menu);
+  activeContextMenuAnchorEl = anchorEl;
   activeContextMenuEl = menu;
 }
 

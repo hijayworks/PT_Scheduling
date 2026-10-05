@@ -22,6 +22,8 @@ export async function saveCandidateCardAsImage(cardEl, title) {
     const canvas = await html2canvas(cardEl, {
       backgroundColor: "#ffffff",
       scale: 2,
+      width: neededWidth || undefined,
+      windowWidth: neededWidth || undefined,
       ignoreElements: (el) =>
         el.classList && el.classList.contains("candidate-card-actions"),
       // html2canvas가 repeating-linear-gradient 배경을 그리지 못하고 흰 배경으로 남기는 문제가
@@ -29,19 +31,16 @@ export async function saveCandidateCardAsImage(cardEl, title) {
       // 단색으로 바꿔치기한다. 화면에 실제로 보이는 원본 요소는 건드리지 않는다.
       onclone: (clonedDoc) => {
         clonedDoc.querySelectorAll(".cal-travel-block").forEach((el) => {
-          el.style.background = "#ffedd5";
+          el.classList.add("capture-travel-solid");
         });
         clonedDoc.querySelectorAll(".cal-block.excluded").forEach((el) => {
-          el.style.background = "#e5e7eb";
+          el.classList.add("capture-excluded-solid");
         });
         if (neededWidth) {
           const clonedCard = clonedDoc.querySelector(`[${CAPTURE_ATTR}]`);
-          if (clonedCard) {
-            clonedCard.style.width = neededWidth + "px";
-            clonedCard.style.maxWidth = "none";
-          }
+          if (clonedCard) clonedCard.classList.add("capture-card-wide");
           clonedDoc.querySelectorAll(".grid-scroll").forEach((el) => {
-            el.style.overflow = "visible";
+            el.classList.add("capture-grid-scroll");
           });
         }
       },

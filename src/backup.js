@@ -421,7 +421,7 @@ backupExportBtnEl.addEventListener("click", async () => {
       password,
     );
     backupExportTextareaEl.value = backupCode;
-    backupExportResultEl.style.display = "";
+    backupExportResultEl.hidden = false;
     showToast("백업 코드를 만들었습니다. 백업 비밀번호도 함께 기억해주세요.", "success");
   } catch (e) {
     console.warn("backup export failed", e);

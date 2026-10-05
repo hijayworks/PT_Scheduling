@@ -1603,11 +1603,11 @@ export async function runGenerate3({
   btnEl.disabled = true;
   btnEl.classList.add("loading");
   labelEl.textContent = "후보 생성 중...";
-  progressWrapEl.style.display = "";
-  progressFillEl.style.width = "0%";
+  progressWrapEl.hidden = false;
+  progressFillEl.className = "generate-progress-fill progress-pct-0";
   progressTextEl.textContent = "0%";
   progressWrapEl.setAttribute("aria-valuenow", "0");
-  cancelEl.style.display = "";
+  cancelEl.hidden = false;
   cancelEl.disabled = false;
   cancelEl.textContent = "생성 취소";
 
@@ -1616,7 +1616,8 @@ export async function runGenerate3({
     const result = await generateSchedule3Async(
       (progress) => {
         const pct = Math.round(progress * 100);
-        progressFillEl.style.width = pct + "%";
+        progressFillEl.className =
+          "generate-progress-fill progress-pct-" + pct;
         progressTextEl.textContent = pct + "%";
         progressWrapEl.setAttribute("aria-valuenow", String(pct));
       },
@@ -1733,8 +1734,8 @@ export async function runGenerate3({
     btnEl.disabled = false;
     btnEl.classList.remove("loading");
     labelEl.textContent = idleLabel;
-    progressWrapEl.style.display = "none";
-    cancelEl.style.display = "none";
+    progressWrapEl.hidden = true;
+    cancelEl.hidden = true;
     runtime.generationInProgress = false;
     runtime.generationCancelRequested = false;
     releaseWakeLock();

@@ -125,6 +125,19 @@ async function main() {
       );
     }
 
+    // strict style CSP에서 html2canvas 캡처 경로도 실제로 동작하는지 확인한다.
+    // 후보 생성 직후 첫 카드의 이미지 저장 버튼을 눌러 다운로드 완료까지 기다린다.
+    const imageSaveBtn = page
+      .locator('button[aria-label="이미지로 저장"]')
+      .first();
+    if (await imageSaveBtn.count()) {
+      const downloadPromise = page.waitForEvent("download", { timeout: 15000 });
+      await imageSaveBtn.click();
+      await downloadPromise;
+    } else {
+      failures.push("이미지 저장 버튼을 찾지 못함");
+    }
+
     // 새로고침 후에도 데이터와 생성 결과가 유지되는지(localStorage 로드 경로 회귀 확인)
     await page.reload();
     await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
@@ -139,6 +152,7 @@ async function main() {
     await page.waitForSelector("#pageMembers.active", { timeout: 5000 });
     const memberRowCount = await page.locator("#memberTableBody tr").count();
     assert(memberRowCount === 1, "회원관리 표에 회원이 정상적으로 표시되지 않음 (실제: " + memberRowCount + "행)");
+
 
     const cspViolations = await page.evaluate(() => window.__PT_CSP_VIOLATIONS__ || []);
     assert(

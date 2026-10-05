@@ -205,10 +205,10 @@ export function renderTravelMatrix() {
   travelMatrixEl.innerHTML = "";
   const locs = state.locations;
   if (locs.length < 2) {
-    travelTitleEl.style.display = "none";
+    travelTitleEl.hidden = true;
     return;
   }
-  travelTitleEl.style.display = "";
+  travelTitleEl.hidden = false;
   for (let i = 0; i < locs.length; i++) {
     for (let j = i + 1; j < locs.length; j++) {
       const a = locs[i],
