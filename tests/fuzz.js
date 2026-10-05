@@ -34,19 +34,10 @@ const FUZZ_ATTEMPTS = 2;
 const FUZZ_A_EVERY = 10;
 const FUZZ_A_GREEDY_ATTEMPTS = 1;
 const attempts = opt("--attempts", FUZZ_ATTEMPTS);
-// 이미 알고 아직 못 고친 위반: 실패로 세지 않고 "알려진" 열에 따로 센다(숨기지 않는다). 고치면 지운다.
-const KNOWN_VIOLATIONS = [
-  {
-    candidates: ["A1", "A2", "A3"],
-    rule: "soloTravel",
-    reason: "후보A 체인DP·다듬기에 세 지점 회원 규칙 미구현 — 별도 PR에서 수정",
-  },
-];
-const isKnown = ({ key, violation }) =>
-  KNOWN_VIOLATIONS.some(
-    (kv) => kv.rule === violation.rule && kv.candidates.includes(key),
-  );
 const aEvery = opt("--a-every", FUZZ_A_EVERY);
+// 과거에 위반을 낸 시드: 범위와 상관없이 항상 후보A까지 함께 돌린다(회귀 방지).
+// 1963·1355·1804·4979 — 후보A 다듬기가 회원을 빼며 이동시간이 누락된 지점 쌍을 이어 붙임(gap).
+const REGRESSION_SEEDS = [1963, 1355, 1804, 4979];
 
 /* ---------------- 입력 생성기 ---------------- */
 function mulberry32(a) {
@@ -392,15 +383,20 @@ async function shrink(input, rule, withA) {
   const count = single ? 1 : opt("--count", FUZZ_CI_COUNT);
   const t0 = Date.now();
   const tally = Object.fromEntries(
-    RULES.map((r) => [r, { violations: 0, known: 0, opportunities: 0 }]),
+    RULES.map((r) => [r, { violations: 0, opportunities: 0 }]),
   );
   const byScenario = {};
   const failures = [];
   let resultsChecked = 0,
     aRuns = 0;
-  for (let seed = start; seed < start + count; seed++) {
+  const seeds = Array.from({ length: count }, (_, i) => start + i);
+  if (!single) seeds.push(...REGRESSION_SEEDS);
+  for (const seed of seeds) {
     const input = fuzzInput(seed);
-    const withA = single || (aEvery > 0 && seed % aEvery === 0);
+    const withA =
+      single ||
+      REGRESSION_SEEDS.includes(seed) ||
+      (aEvery > 0 && seed % aEvery === 0);
     if (withA) aRuns++;
     byScenario[input.scenario] = (byScenario[input.scenario] || 0) + 1;
     const { generated, violations } = await check(input, withA);
@@ -411,20 +407,17 @@ async function shrink(input, rule, withA) {
       ([rule, n]) => (tally[rule].opportunities += n),
     );
     violations.forEach((v) => {
-      if (tally[v.violation.rule])
-        tally[v.violation.rule][isKnown(v) ? "known" : "violations"]++;
+      if (tally[v.violation.rule]) tally[v.violation.rule].violations++;
     });
     if (single)
       console.log(
         `시드 ${seed} (${input.scenario}): 회원 ${input.members.length}명, 지점 ${input.locations.length}개, 신청 ${input.requests.length}개, 근무 셀 ${input.availableCells.length}개, 제외 ${input.excludedMemberIds3.length}, 1회 제한 ${input.onceLimitedMemberIds3.length}`,
       );
-    const unknown = violations.filter((v) => !isKnown(v));
-    if (unknown.length)
-      failures.push({ seed, input, violations: unknown, withA });
+    if (violations.length) failures.push({ seed, input, violations, withA });
   }
 
   console.log(
-    `퍼즈 — 시드 ${start}~${start + count - 1} (${count}건, 후보A ${aRuns}건), 그리디 시도 ${attempts}회, 검사한 후보·동점 배치 ${resultsChecked}개, ${((Date.now() - t0) / 1000).toFixed(1)}s`,
+    `퍼즈 — 시드 ${start}~${start + count - 1}${single ? "" : " + 회귀 " + REGRESSION_SEEDS.length}(${seeds.length}건, 후보A ${aRuns}건), 그리디 시도 ${attempts}회, 검사한 후보·동점 배치 ${resultsChecked}개, ${((Date.now() - t0) / 1000).toFixed(1)}s`,
   );
   console.log(
     "시나리오: " +
@@ -432,10 +425,10 @@ async function shrink(input, rule, withA) {
         .map(([k, v]) => `${k} ${v}`)
         .join(", "),
   );
-  console.log("프로퍼티\t위반\t알려진\t기회\t규칙");
+  console.log("프로퍼티\t위반\t기회\t규칙");
   RULES.forEach((r) =>
     console.log(
-      `${r}\t${tally[r].violations}\t${tally[r].known}\t${tally[r].opportunities}\t${lib.HARD_RULES[r]}`,
+      `${r}\t${tally[r].violations}\t${tally[r].opportunities}\t${lib.HARD_RULES[r]}`,
     ),
   );
 
@@ -449,7 +442,7 @@ async function shrink(input, rule, withA) {
     ),
   );
   if (!failures.length && !vacuous.length) {
-    console.log(`${count}개 시드 통과 (퍼즈)`);
+    console.log(`${seeds.length}개 시드 통과 (퍼즈)`);
     return;
   }
   for (const f of failures.slice(0, 5)) {

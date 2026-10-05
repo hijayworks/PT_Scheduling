@@ -19,6 +19,7 @@ import {
   memberColor,
   travelMinutes,
   soloTravelMemberIds,
+  breaksSoloTravel,
   isOnceLimitEligible,
   appendOnceLimitMemberLabel,
   compareOnceLimitMembers,
@@ -109,14 +110,7 @@ export function eligibleSwapMembersFor(container, req) {
     dayAssigned.filter((a) => a.startSlot < req.startSlot).pop() || null;
   const nextAssigned =
     dayAssigned.find((a) => a.startSlot > req.startSlot) || null;
-  const arrivedViaTravel =
-    !!prevAssigned &&
-    travelMinutes(prevAssigned.locationId, req.locationId) > 0;
-  const departsViaTravel =
-    !!nextAssigned &&
-    travelMinutes(req.locationId, nextAssigned.locationId) > 0;
-  const soloTravelBlocked = arrivedViaTravel && departsViaTravel;
-  const soloIds = soloTravelBlocked ? soloTravelMemberIds() : null;
+  const soloIds = soloTravelMemberIds();
 
   const results = [];
   const seenMemberIds = new Set();
@@ -133,7 +127,16 @@ export function eligibleSwapMembersFor(container, req) {
     if (!member) return;
     if (state.excludedMemberIds3.includes(member.id)) return;
     if (!candidateLocationsForRequest(other).includes(req.locationId)) return;
-    if (soloTravelBlocked && soloIds.has(member.id)) return; // 이동-회원-이동 금지
+    if (
+      breaksSoloTravel(
+        member.id,
+        prevAssigned && prevAssigned.locationId,
+        req.locationId,
+        nextAssigned && nextAssigned.locationId,
+        soloIds,
+      )
+    )
+      return; // 이동-회원-이동 금지
     let weekCount = 0;
     let sameDayCount = 0;
     container.assigned.forEach((a) => {
@@ -325,14 +328,14 @@ export function validateMove(
       };
     }
   }
-  const arrivedViaTravel =
-    !!prevAssigned && travelMinutes(prevAssigned.locationId, locationId) > 0;
-  const departsViaTravel =
-    !!nextAssigned && travelMinutes(locationId, nextAssigned.locationId) > 0;
   if (
-    arrivedViaTravel &&
-    departsViaTravel &&
-    soloTravelMemberIds().has(req.memberId)
+    breaksSoloTravel(
+      req.memberId,
+      prevAssigned && prevAssigned.locationId,
+      locationId,
+      nextAssigned && nextAssigned.locationId,
+      soloTravelMemberIds(),
+    )
   ) {
     return {
       ok: false,

@@ -131,6 +131,37 @@ export function soloTravelMemberIds() {
   );
 }
 
+// "이동-회원-이동 금지" 규칙의 단일 정의: soloIds(soloTravelMemberIds) 회원의 수업이 앞
+// 수업에서 이동으로 도착해 다음 수업으로 또 이동해 떠나는 자리면 위반이다. 앞이나 뒤 수업이
+// 없으면(locId가 null) 위반이 아니다.
+export function breaksSoloTravel(memberId, prevLocId, locId, nextLocId, soloIds) {
+  return (
+    soloIds.has(memberId) &&
+    !!prevLocId &&
+    !!nextLocId &&
+    travelMinutes(prevLocId, locId) > 0 &&
+    travelMinutes(locId, nextLocId) > 0
+  );
+}
+
+// 시간순으로 정렬된 하루 체인([{memberId, locationId}])에 위 규칙을 어기는 자리가 있는지.
+export function chainBreaksSoloTravel(chain, soloIds) {
+  for (let i = 1; i + 1 < chain.length; i++) {
+    const cur = chain[i];
+    if (
+      breaksSoloTravel(
+        cur.memberId,
+        chain[i - 1].locationId,
+        cur.locationId,
+        chain[i + 1].locationId,
+        soloIds,
+      )
+    )
+      return true;
+  }
+  return false;
+}
+
 export function memberColor(id) {
   const idx = state.members.findIndex((m) => m.id === id);
   if (idx === -1) return BLOCK_COLOR;

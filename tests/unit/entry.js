@@ -12,6 +12,7 @@ export {
   knownLocationIdSet,
   maxSessionsFor,
   soloTravelMemberIds,
+  chainBreaksSoloTravel,
 } from "../../src/domain.js";
 export { state } from "../../src/state.js";
 export {
