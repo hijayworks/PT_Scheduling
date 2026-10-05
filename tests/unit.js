@@ -468,6 +468,67 @@ test("runChainDP: 이동시간이 누락된 서로 다른 지점 세션은 연�
   ]);
   assertEqual(chain.length, 1, "이동시간을 모르는 지점 사이를 0분 이동으로 연결하면 안 됨");
 });
+test("runChainDP: 이동시간 설정을 바꾸면 다음 호출부터 바로 반영된다", () => {
+  // 지점 쌍 이동시간은 호출마다 새로 구한다 — 호출 사이에 캐시가 남으면 설정 변경 후에도
+  // 옛 이동시간으로 배정하게 된다.
+  const nodes = () => [
+    node({ id: "a", memberId: "A", startSlot: 0, duration: 20, locationId: "L1" }),
+    node({ id: "b", memberId: "B", startSlot: 3, duration: 20, locationId: "L2" }),
+  ];
+  lib.state.travelTimes = { [lib.pairKey("L1", "L2")]: 10 };
+  assertEqual(lib.runChainDP(nodes()).length, 2, "10분 간격이면 이동 10분으로 연결 가능");
+  lib.state.travelTimes = { [lib.pairKey("L1", "L2")]: 20 };
+  assertEqual(lib.runChainDP(nodes()).length, 1, "이동 20분으로 바꾸면 10분 간격은 연결 불가");
+});
+test("runChainDP: 회원이 32명을 넘어도 하루 1회 제한을 지킨다", () => {
+  // 회원 중복 검사가 비트셋(32명 단위 word)이므로 word 경계를 넘는 회원도 확인한다.
+  lib.state.travelTimes = {};
+  const nodes = [];
+  for (let k = 0; k < 40; k++)
+    nodes.push(node({ id: "x" + k, memberId: "m" + k, startSlot: k * 2, duration: 20, locationId: "L1" }));
+  nodes.push(node({ id: "dup", memberId: "m35", startSlot: 80, duration: 20, locationId: "L1", weight: 5 }));
+  const chain = lib.runChainDP(nodes);
+  const ids = chain.map((n) => n.memberId);
+  assertEqual(new Set(ids).size, ids.length, "33번째 이후 회원이 하루에 두 번 배정됨");
+  assert(ids.includes("m35"), "가중치가 큰 자리로라도 m35는 배정돼야 함");
+});
+test("runChainDP: 입력 순서와 무관하게 앞 세션이 끝난 뒤 시작하는 세션만 잇는다", () => {
+  lib.state.travelTimes = {};
+  const chain = lib.runChainDP([
+    node({ id: "late", memberId: "C", startSlot: 6, duration: 20, locationId: "L1" }),
+    node({ id: "long", memberId: "A", startSlot: 0, duration: 60, locationId: "L1" }),
+    node({ id: "mid", memberId: "B", startSlot: 3, duration: 20, locationId: "L1" }),
+  ]);
+  assertEqual(chain.map((n) => n.id), ["long", "late"]);
+});
+test("memberById: 회원 추가·삭제·교체가 바로 반영된다", () => {
+  lib.state.members = [{ id: "A", name: "a" }, { id: "B", name: "b" }];
+  assertEqual(lib.memberById("B").name, "b");
+  lib.state.members.unshift({ id: "C", name: "c" });
+  assertEqual(lib.memberById("B").name, "b", "앞에 추가돼 위치가 밀려도 같은 회원");
+  assertEqual(lib.memberById("C").name, "c");
+  lib.state.members[1] = { id: "A", name: "a2" };
+  assertEqual(lib.memberById("A").name, "a2", "같은 자리에 바꿔 끼운 회원");
+  lib.state.members = lib.state.members.filter((m) => m.id !== "B");
+  assertEqual(lib.memberById("B"), undefined, "삭제된 회원");
+  lib.state.members[0] = { id: "D", name: "d" };
+  assertEqual(lib.memberById("D").name, "d", "다른 id로 바꿔 끼운 회원");
+  assertEqual(lib.memberById("C"), undefined, "바꿔 끼워져 사라진 회원");
+});
+test("knownLocationIdSet: 지점 추가·삭제·교체가 바로 반영된다", () => {
+  lib.state.locations = [{ id: "L1", name: "1" }];
+  assert(lib.knownLocationIdSet().has("L1"));
+  lib.state.locations.push({ id: "L2", name: "2" });
+  assert(lib.knownLocationIdSet().has("L2"), "추가된 지점");
+  lib.state.locations[0] = { id: "L9", name: "9" };
+  assert(!lib.knownLocationIdSet().has("L1"), "교체돼 사라진 지점");
+  lib.state.locations = [];
+  assertEqual(lib.knownLocationIdSet().size, 0);
+});
+test("pairKey: 문자열 정렬 순서로 키를 만든다(저장된 이동시간 키와 호환)", () => {
+  assertEqual(lib.pairKey("L2", "L10"), "L10|L2");
+  assertEqual(lib.pairKey("loc_b", "loc_a"), "loc_a|loc_b");
+});
 test("runChainDP: maxTravelsPerDay를 넘는 이동은 거부된다", () => {
   lib.state.travelTimes = {
     [lib.pairKey("L1", "L2")]: 10,
@@ -617,6 +678,29 @@ test("greedyAssign 우선순위: 비효율 이동 최소화가 수업 횟수 최
   assertEqual(memberIds.has("A") && memberIds.has("B"), true, "A·B는 비효율 없이 배정 가능해야 함");
   const info = lib.inefficientRoundTripLocationInfo();
   assertEqual(lib.totalInefficientMoveCount(assigned, info), 0);
+});
+test("greedyAssign: 회원이 32명을 넘어도 같은 회원을 하루에 두 번 배정하지 않는다", () => {
+  // 체인 안 회원 중복 검사가 비트셋(32명 단위 word)이므로 word 경계를 넘는 회원도 확인한다.
+  lib.state.locations = [{ id: "L1", name: "1" }];
+  lib.state.travelTimes = {};
+  lib.state.onceLimitedMemberIds3 = [];
+  lib.state.members = [];
+  const reqs = [];
+  for (let k = 0; k < 40; k++) {
+    lib.state.members.push({ id: "m" + k, locationIds: ["L1"], category: "등록" });
+    // 회원마다 빈틈없이 이어지는 자기 자리와, 다음 회원 자리에도 신청을 하나 더 둔다 — 하루 1회
+    // 제한이 깨지면 같은 회원이 연달아 들어갈 수 있다.
+    reqs.push({ id: "a" + k, memberId: "m" + k, day: 0, startSlot: k * 3, duration: 30 });
+    reqs.push({ id: "b" + k, memberId: "m" + k, day: 0, startSlot: (k + 1) * 3, duration: 30 });
+  }
+  const assigned = lib.greedyAssign(reqs, { sessionCountFirst: true }, []);
+  const perDay = new Set();
+  assigned.forEach((r) => {
+    const k = r.memberId + "|" + r.day;
+    assert(!perDay.has(k), r.memberId + "가 같은 날 두 번 배정됨");
+    perDay.add(k);
+  });
+  assertEqual(assigned.length, 40, "40명 모두 하루 1회씩 배정돼야 함");
 });
 test("greedyAssign 우선순위: 미배정 인원 없음이 비효율 이동 최소화보다 우선한다(기본 커버리지 단계)", () => {
   const reqs = ineffPriorityFixture();

@@ -138,6 +138,21 @@ export async function runSchedule2Pipeline(
   function reqAt(memberId, day, startSlot) {
     return reqsFor(memberId, day).find((r) => r.startSlot === startSlot);
   }
+  // 신청별 후보 지점은 이 실행 동안 바뀌지 않는데, 노드를 다시 만들거나 담금질이 자리를
+  // 제안할 때마다 같은 신청에 대해 아주 여러 번 다시 계산됐다(실측상 다듬기 시간의 약 10%).
+  // 이 실행 안에서만 쓰는 캐시라 실행이 끝나면 버려진다(신청·지점 편집과 무효화 문제 없음).
+  const locationsByReq = new Map();
+  function locationsForReq(r) {
+    let locs = locationsByReq.get(r);
+    if (!locs) {
+      locs = candidateLocationsForRequest(r);
+      locationsByReq.set(r, locs);
+    }
+    return locs;
+  }
+  function dayNodes(dayRequests, weightFn, jitterFn) {
+    return buildDayNodes(dayRequests, weightFn, jitterFn, locationsForReq);
+  }
 
   function isEligibleForDay(memberId, day) {
     const cap = maxSessionsFor2(memberById(memberId));
@@ -172,7 +187,7 @@ export async function runSchedule2Pipeline(
     const membersByLoc = new Map();
     reqsByDay.get(day).forEach((r) => {
       if ((assignedCountByMember.get(r.memberId) || 0) !== 0) return;
-      candidateLocationsForRequest(r).forEach((locId) => {
+      locationsForReq(r).forEach((locId) => {
         if (!membersByLoc.has(locId)) membersByLoc.set(locId, new Set());
         membersByLoc.get(locId).add(r.memberId);
       });
@@ -192,7 +207,7 @@ export async function runSchedule2Pipeline(
   // 아직 한 번도 배정받지 못한 회원들만으로 그 요일의 최선 체인(DP)을 짠다.
   stage1DayOrder.forEach((day) => {
     const dominantLoc = dominantLocationFor(day);
-    const nodes = buildDayNodes(
+    const nodes = dayNodes(
       reqsByDay.get(day),
       (memberId, startSlot, locationId) => {
         if ((assignedCountByMember.get(memberId) || 0) !== 0) return 0;
@@ -221,7 +236,7 @@ export async function runSchedule2Pipeline(
       ),
     );
     const pinnedMemberIds = new Set(existingChain.map((n) => n.memberId));
-    const nodes = buildDayNodes(
+    const nodes = dayNodes(
       reqsByDay.get(day),
       (memberId, startSlot, locationId) => {
         if (pinnedKeys.has(memberId + "|" + startSlot + "|" + locationId))
@@ -275,7 +290,7 @@ export async function runSchedule2Pipeline(
     for (const day of candidateDays) {
       const chain0 = dayChains.get(day) || [];
       const dayReqsForMember = reqsFor(memberId, day);
-      const candNodes = buildDayNodes(dayReqsForMember, () => 1);
+      const candNodes = dayNodes(dayReqsForMember, () => 1);
 
       // 1) 아무도 안 건드리고 바로 끼워넣을 수 있는 자리가 있는지 먼저 가볍게 훑는다
       //    (전체 DP를 다시 돌리지 않고, 그 요일 체인에 직접 삽입만 시도해본다 — 회원·
@@ -458,7 +473,7 @@ export async function runSchedule2Pipeline(
       const beforeUnassigned = stillUnassignedIds().length;
       const existingChain = dayChains.get(day) || [];
       existingChain.forEach((node) => uncommit(day, node));
-      const nodes = buildDayNodes(reqsByDay.get(day), (mId) => {
+      const nodes = dayNodes(reqsByDay.get(day), (mId) => {
         if (mId === memberId) return REBUILD_TARGET_WEIGHT;
         return isEligibleForDay(mId, day) ? 1 : 0;
       });
@@ -556,7 +571,7 @@ export async function runSchedule2Pipeline(
       const existingChain = dayChains.get(day) || [];
       const beforeIneff = dailyInefficientMoveCount(existingChain, ineffInfo);
       existingChain.forEach((node) => uncommit(day, node));
-      const nodes = buildDayNodes(reqsByDay.get(day), (mId) =>
+      const nodes = dayNodes(reqsByDay.get(day), (mId) =>
         isEligibleForDay(mId, day) ? 1 : 0,
       );
       const newChain = runChainDP(nodes, undefined, ineffInfo);
@@ -640,7 +655,7 @@ export async function runSchedule2Pipeline(
         // 끝나면 커밋 해제와 함께 dayChains도 다시 비워 다음 시도가 항상 같은 빈 상태에서
         // 시작하도록 한다.
         function attemptOrder(firstDay, secondDay, jitterFn) {
-          const firstNodes = buildDayNodes(
+          const firstNodes = dayNodes(
             reqsByDay.get(firstDay),
             (mId) => (isEligibleForDay(mId, firstDay) ? 1 : 0),
             jitterFn,
@@ -648,7 +663,7 @@ export async function runSchedule2Pipeline(
           const firstChain = runChainDP(firstNodes, undefined, ineffInfo);
           firstChain.forEach((node) => commit(firstDay, node));
           dayChains.set(firstDay, firstChain);
-          const secondNodes = buildDayNodes(
+          const secondNodes = dayNodes(
             reqsByDay.get(secondDay),
             (mId) => (isEligibleForDay(mId, secondDay) ? 1 : 0),
             jitterFn,
@@ -781,7 +796,7 @@ export async function runSchedule2Pipeline(
         // 시간순으로만 동점이 풀려 "누가 2회를 받는지" 조합이 거의 안 바뀌는 문제가 있었다.
         // 여기서도 지점 뭉치기 보너스를 함께 준다.
         const dominantLoc = dominantLocationFor(day);
-        const nodes = buildDayNodes(
+        const nodes = dayNodes(
           reqsByDay.get(day),
           (mId, startSlot, locationId) => {
             if (!isEligibleForDay(mId, day)) return 0;
@@ -937,7 +952,7 @@ export async function runSchedule2Pipeline(
         }
         const dayReqsForMember = reqsFor(memberId, day);
         if (dayReqsForMember.length === 0) return;
-        const candNodes = buildDayNodes(dayReqsForMember, () => 1);
+        const candNodes = dayNodes(dayReqsForMember, () => 1);
         const baseChain =
           day === currentDay ? currentChainWithout : dayChains.get(day) || [];
         const beforeTargetDayTravel =
@@ -1116,9 +1131,9 @@ export async function runSchedule2Pipeline(
         return false;
       const req1InDay2 = reqAt(member1, day2, node2.startSlot);
       const req2InDay1 = reqAt(member2, day1, node1.startSlot);
-      if (!candidateLocationsForRequest(req1InDay2).includes(node2.locationId))
+      if (!locationsForReq(req1InDay2).includes(node2.locationId))
         return false;
-      if (!candidateLocationsForRequest(req2InDay1).includes(node1.locationId))
+      if (!locationsForReq(req2InDay1).includes(node1.locationId))
         return false;
       // 회원당 1일 최대 1회 — 등록 회원은 원래 2회를 배정받으므로, member1이 day2에(그
       // 자리를 넘겨줄 node2 말고) 이미 별도로 다른 세션을 갖고 있을 수 있다(반대도 마찬가지).
@@ -1245,7 +1260,7 @@ export async function runSchedule2Pipeline(
           continue;
         const reqs = reqsFor(placeMemberId, day);
         if (reqs.length === 0) continue;
-        const candNodes = buildDayNodes(reqs, () => 1);
+        const candNodes = dayNodes(reqs, () => 1);
         const chain = dayChains.get(day) || [];
 
         // 1) 아무도 안 건드리고 바로 끼워넣을 수 있는 자리가 있는지 먼저 본다.
@@ -1557,7 +1572,7 @@ export async function runSchedule2Pipeline(
         });
         if (options.length === 0) return null;
         const picked = options[Math.floor(randomFn() * options.length)];
-        const locOptions = candidateLocationsForRequest(picked.req);
+        const locOptions = locationsForReq(picked.req);
         if (locOptions.length === 0) return null;
         const locationId =
           locOptions[Math.floor(randomFn() * locOptions.length)];
@@ -1661,9 +1676,9 @@ export async function runSchedule2Pipeline(
           return null;
         const req1InDay2 = reqAt(member1, day2, n2.startSlot);
         const req2InDay1 = reqAt(member2, day1, n1.startSlot);
-        if (!candidateLocationsForRequest(req1InDay2).includes(n2.locationId))
+        if (!locationsForReq(req1InDay2).includes(n2.locationId))
           return null;
-        if (!candidateLocationsForRequest(req2InDay1).includes(n1.locationId))
+        if (!locationsForReq(req2InDay1).includes(n1.locationId))
           return null;
         // 회원당 1일 최대 1회 — member1이 day2에 이미 다른 세션을 갖고 있거나(반대도
         // 마찬가지) 놓치면, 자리를 바꾼 뒤 그 요일에 같은 회원이 두 번 배정될 수 있다.

@@ -148,8 +148,35 @@
   }
 
   // src/domain.js
+  var memberPosIndex = { list: null, posById: /* @__PURE__ */ new Map() };
   function memberById(id) {
-    return state.members.find((m) => m.id === id);
+    const list = state.members;
+    if (memberPosIndex.list === list) {
+      const pos = memberPosIndex.posById.get(id);
+      const m = pos === void 0 ? void 0 : list[pos];
+      if (m && m.id === id) return m;
+    }
+    const found = list.find((m) => m.id === id);
+    if (found) {
+      const posById = /* @__PURE__ */ new Map();
+      list.forEach((m, i) => {
+        if (m && !posById.has(m.id)) posById.set(m.id, i);
+      });
+      memberPosIndex = { list, posById };
+    }
+    return found;
+  }
+  var knownLocationCache = { ids: [], set: /* @__PURE__ */ new Set() };
+  function knownLocationIdSet() {
+    const list = state.locations;
+    const ids = knownLocationCache.ids;
+    let same = ids.length === list.length;
+    for (let i = 0; same && i < list.length; i++) same = list[i].id === ids[i];
+    if (!same) {
+      const nextIds = list.map((l) => l.id);
+      knownLocationCache = { ids: nextIds, set: new Set(nextIds) };
+    }
+    return knownLocationCache.set;
   }
   function sessionDurationFor(member) {
     if (!member) return CONSULT_DURATION_MIN;
@@ -208,7 +235,8 @@
     return idx === -1 ? null : MEMBER_COLORS[idx % MEMBER_COLORS.length];
   }
   function pairKey(idA, idB) {
-    return [idA, idB].sort().join("|");
+    const a = String(idA), b = String(idB);
+    return a < b ? a + "|" + b : b + "|" + a;
   }
   function travelMinutes(locIdA, locIdB) {
     if (!locIdA || !locIdB || locIdA === locIdB) return 0;
@@ -1113,13 +1141,13 @@
     }
     return true;
   }
-  function buildDayNodes(dayRequests, weightFn, jitterFn) {
+  function buildDayNodes(dayRequests, weightFn, jitterFn, locationsFor = candidateLocationsForRequest) {
     const nodes = [];
     dayRequests.forEach((r) => {
       const member = memberById(r.memberId);
       const duration = sessionDurationFor2(member);
       const end = r.startSlot + durationToSlots(duration);
-      candidateLocationsForRequest(r).forEach((locationId) => {
+      locationsFor(r).forEach((locationId) => {
         const weight = weightFn(r.memberId, r.startSlot, locationId);
         if (!weight) return;
         nodes.push({
@@ -1141,7 +1169,9 @@
     if (maxTravelsPerDay === void 0) maxTravelsPerDay = MAX_TRAVELS_PER_DAY;
     nodes = nodes.slice().sort((a, b) => a.end - b.end || a.startSlot - b.startSlot);
     const n = nodes.length;
-    const dp = new Array(n), tc = new Array(n), tm = new Array(n), idle = new Array(n), js = new Array(n), ineff = new Array(n), prev = new Array(n);
+    const dp = new Array(n), tc = new Array(n), tm = new Array(n), idle = new Array(n), js = new Array(n), ineff = new Array(n), prev = new Array(n), twoBackLocIdx = new Array(n);
+    const prevOrNull = (k) => prev[k] !== -1 ? prev[k] : null;
+    const locOfIndex = (k) => nodes[k].locationId;
     function better(dpA, ineffA, tcA, tmA, idleA, jsA, dpB, ineffB, tcB, tmB, idleB, jsB) {
       const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;
       if (coveragePriority || hardWeightGap) {
@@ -1157,41 +1187,59 @@
       if (idleA !== idleB) return idleA < idleB;
       return jsA < jsB;
     }
-    function chainContainsMember(endIndex, memberId) {
-      let cur2 = endIndex;
-      while (cur2 !== -1 && cur2 !== void 0) {
-        if (nodes[cur2].memberId === memberId) return true;
-        cur2 = prev[cur2];
+    const locIndex = /* @__PURE__ */ new Map();
+    nodes.forEach((nd) => {
+      if (!locIndex.has(nd.locationId)) locIndex.set(nd.locationId, locIndex.size);
+    });
+    const locIds = Array.from(locIndex.keys());
+    const L = locIds.length;
+    const travelOf = new Array(L * L), gapNeedOf = new Array(L * L);
+    for (let a = 0; a < L; a++)
+      for (let b = 0; b < L; b++) {
+        travelOf[a * L + b] = travelMinutes(locIds[a], locIds[b]);
+        gapNeedOf[a * L + b] = requiredGapMin2(locIds[a], locIds[b]);
       }
-      return false;
-    }
+    const locIdxOf = nodes.map((nd) => locIndex.get(nd.locationId));
+    const ineffOf = new Array((L + 1) * L * L);
+    for (let a = 0; a <= L; a++)
+      for (let b = 0; b < L; b++)
+        for (let c = 0; c < L; c++)
+          ineffOf[(a * L + b) * L + c] = isInefficientRoundTrip(
+            ineffInfo,
+            a === L ? null : locIds[a],
+            locIds[b],
+            locIds[c]
+          ) ? 1 : 0;
+    const memberIndex = /* @__PURE__ */ new Map();
+    nodes.forEach((nd) => {
+      if (!memberIndex.has(nd.memberId))
+        memberIndex.set(nd.memberId, memberIndex.size);
+    });
+    const W = Math.max(1, Math.ceil(memberIndex.size / 32));
+    const memberBits = new Uint32Array(n * W);
+    const memberIdxOf = nodes.map((nd) => memberIndex.get(nd.memberId));
     for (let i = 0; i < n; i++) {
       const node = nodes[i];
       let bestDp = node.weight, bestIneff = 0, bestTc = 0, bestTm = 0, bestIdle = 0, bestJs = node.jitter || 0, bestPrev = -1;
+      const mIdx = memberIdxOf[i];
+      const mWord = mIdx >>> 5, mMask = 1 << (mIdx & 31);
       for (let j = 0; j < i; j++) {
         const p = nodes[j];
-        if (chainContainsMember(j, node.memberId)) continue;
-        const gapNeed = requiredGapMin2(p.locationId, node.locationId);
+        if (p.end > node.startSlot) break;
+        const pair = locIdxOf[j] * L + locIdxOf[i];
+        const gapNeed = gapNeedOf[pair];
         const gapActual = (node.startSlot - p.end) * SLOT_MIN;
         if (gapActual < gapNeed) continue;
-        const addsTravel = travelMinutes(p.locationId, node.locationId) > 0 ? 1 : 0;
+        const travel = travelOf[pair];
+        const addsTravel = travel > 0 ? 1 : 0;
         const newTc = tc[j] + addsTravel;
         if (newTc > maxTravelsPerDay) continue;
+        if (memberBits[j * W + mWord] & mMask) continue;
         const newDp = dp[j] + node.weight;
-        const newTm = tm[j] + travelMinutes(p.locationId, node.locationId);
+        const newTm = tm[j] + travel;
         const newIdle = idle[j] + (gapActual - gapNeed);
         const newJs = js[j] + (node.jitter || 0);
-        const pTwoBackLoc = roundTripOriginLoc(
-          j,
-          (k) => prev[k] !== -1 ? prev[k] : null,
-          (k) => nodes[k].locationId
-        );
-        const newIneff = ineff[j] + (isInefficientRoundTrip(
-          ineffInfo,
-          pTwoBackLoc,
-          p.locationId,
-          node.locationId
-        ) ? 1 : 0);
+        const newIneff = ineff[j] + ineffOf[(twoBackLocIdx[j] * L + locIdxOf[j]) * L + locIdxOf[i]];
         if (better(
           newDp,
           newIneff,
@@ -1222,6 +1270,14 @@
       idle[i] = bestIdle;
       js[i] = bestJs;
       prev[i] = bestPrev;
+      const twoBack = roundTripOriginLoc(i, prevOrNull, locOfIndex);
+      twoBackLocIdx[i] = twoBack === null ? L : locIndex.get(twoBack);
+      if (bestPrev !== -1)
+        memberBits.set(
+          memberBits.subarray(bestPrev * W, bestPrev * W + W),
+          i * W
+        );
+      memberBits[i * W + mWord] |= mMask;
     }
     let bestEnd = -1, bestDpAll = 0, bestIneffAll = 0, bestTcAll = 0, bestTmAll = 0, bestIdleAll = 0, bestJsAll = 0;
     for (let i = 0; i < n; i++) {
@@ -1376,7 +1432,7 @@
   function candidateLocationsFor(memberId) {
     const member = memberById(memberId);
     if (!member || !Array.isArray(member.locationIds)) return [];
-    const knownLocationIds = new Set(state.locations.map((l) => l.id));
+    const knownLocationIds = knownLocationIdSet();
     return member.locationIds.filter((id) => knownLocationIds.has(id));
   }
   function candidateLocationsForRequest(req) {
@@ -1384,7 +1440,7 @@
     const base = candidateLocationsFor(req.memberId).filter(
       (id) => id !== null && !excluded.includes(id)
     );
-    const knownLocationIds = new Set(state.locations.map((l) => l.id));
+    const knownLocationIds = knownLocationIdSet();
     const extra = (req.extraLocationIds || []).filter(
       (id) => knownLocationIds.has(id) && !base.includes(id)
     );
@@ -1447,8 +1503,43 @@
     });
     const days = [...byDay.keys()].sort((a, b) => a - b);
     const allLocIds = state.locations.map((l) => l.id).concat([null]);
+    const memberIdsByDay = /* @__PURE__ */ new Map();
     function allMemberIdsForDay(day) {
-      return new Set((byDay.get(day) || []).map((r) => r.memberId));
+      let ids = memberIdsByDay.get(day);
+      if (!ids) {
+        ids = new Set((byDay.get(day) || []).map((r) => r.memberId));
+        memberIdsByDay.set(day, ids);
+      }
+      return ids;
+    }
+    const locationsByReq = /* @__PURE__ */ new Map();
+    function locationsForReq(r) {
+      let locs = locationsByReq.get(r);
+      if (!locs) {
+        locs = candidateLocationsForRequest(r);
+        locationsByReq.set(r, locs);
+      }
+      return locs;
+    }
+    const locIndexOf = new Map(allLocIds.map((id, i) => [id, i]));
+    const LOCS = allLocIds.length;
+    const needOfPair = new Array(LOCS * LOCS), travelOfPair = new Array(LOCS * LOCS);
+    allLocIds.forEach(
+      (a, i) => allLocIds.forEach((b, j) => {
+        needOfPair[i * LOCS + j] = requiredGapMin(a, b);
+        travelOfPair[i * LOCS + j] = travelMinutes(a, b);
+      })
+    );
+    const memberBitOf = /* @__PURE__ */ new Map();
+    eligibleReqs.forEach((r) => {
+      if (!memberBitOf.has(r.memberId)) memberBitOf.set(r.memberId, memberBitOf.size);
+    });
+    const MEMBER_WORDS = Math.max(1, Math.ceil(memberBitOf.size / 32));
+    function pairNeed(predIdx, predLoc, locId, locIdx) {
+      return locIdx === void 0 ? requiredGapMin(predLoc, locId) : needOfPair[predIdx * LOCS + locIdx];
+    }
+    function pairTravel(predIdx, predLoc, locId, locIdx) {
+      return locIdx === void 0 ? travelMinutes(predLoc, locId) : travelOfPair[predIdx * LOCS + locIdx];
     }
     function runPass(stage1Order, allowGapMin) {
       const assigned = [];
@@ -1485,7 +1576,7 @@
         );
         const nodes = [];
         cands.forEach((cand) => {
-          const memberLocs = candidateLocationsForRequest(cand);
+          const memberLocs = locationsForReq(cand);
           const locs = onlyLocationId ? memberLocs.includes(onlyLocationId) ? [onlyLocationId] : [] : memberLocs;
           locs.forEach((locId) => {
             nodes.push({
@@ -1499,14 +1590,24 @@
           (a, b) => a.end - b.end || priorityRank.get(a.cand.id) - priorityRank.get(b.cand.id)
         );
         const index = /* @__PURE__ */ new Map();
-        const key = (end, locId) => end + "|" + locId;
+        function indexList(end, locId) {
+          const byEnd = index.get(locId);
+          return byEnd && byEnd.get(end);
+        }
         function timeCostOf(n) {
           return n.travelMinutesSum + n.idleMinutesSum;
         }
         function addToIndex(node) {
-          const k = key(node.end, node.locationId);
-          if (!index.has(k)) index.set(k, []);
-          const list = index.get(k);
+          let byEnd = index.get(node.locationId);
+          if (!byEnd) {
+            byEnd = /* @__PURE__ */ new Map();
+            index.set(node.locationId, byEnd);
+          }
+          let list = byEnd.get(node.end);
+          if (!list) {
+            list = [];
+            byEnd.set(node.end, list);
+          }
           list.push(node);
           list.sort(
             (a, b) => travelFirst ? a.travelCount - b.travelCount || b.dp - a.dp || a.ineffCount - b.ineffCount || (travelCountOnly ? 0 : a.travelMinutesSum - b.travelMinutesSum || timeCostOf(a) - timeCostOf(b) || b.alignedScore - a.alignedScore || a.soloSlackPenalty - b.soloSlackPenalty) || (preferDaytime ? b.daytimeScore - a.daytimeScore : 0) || (groupByLocation ? b.groupScore - a.groupScore : 0) : (coveragePriority || Math.abs(a.dp - b.dp) >= COVERAGE_WEIGHT_GAP_THRESHOLD ? b.dp - a.dp || a.ineffCount - b.ineffCount : a.ineffCount - b.ineffCount || b.dp - a.dp) || a.travelCount - b.travelCount || (travelCountOnly ? 0 : a.travelMinutesSum - b.travelMinutesSum || timeCostOf(a) - timeCostOf(b) || b.alignedScore - a.alignedScore || a.soloSlackPenalty - b.soloSlackPenalty) || (preferDaytime ? b.daytimeScore - a.daytimeScore : 0) || (groupByLocation ? b.groupScore - a.groupScore : 0)
@@ -1544,18 +1645,28 @@
           if (groupByLocation && groupA !== groupB) return groupA > groupB;
           return false;
         }
+        const usedBits = new Uint32Array(nodes.length * MEMBER_WORDS);
         let best = null;
-        nodes.forEach((node) => {
+        nodes.forEach((node, nodeIdx) => {
+          const memberBit = memberBitOf.get(node.cand.memberId);
+          const memberWord = memberBit >>> 5, memberMask = 1 << (memberBit & 31);
+          node.bitBase = nodeIdx * MEMBER_WORDS;
           let bestPrev = null, bestPrevDp = -Infinity, bestResultTravelOnly = Infinity, bestResultTimeCost = Infinity, bestResultAligned = -Infinity, bestResultSlackPen = Infinity, bestResultDaytime = -Infinity, bestResultGroup = -Infinity, bestTravelCount = Infinity, bestResultIneffCount = Infinity, bestTransitionMin = 0, bestSlackMin = 0;
-          allLocIds.forEach((predLoc) => {
-            const need = requiredGapMin(predLoc, node.locationId);
-            const transitionMin = travelMinutes(predLoc, node.locationId);
+          const nodeLocIdx = locIndexOf.get(node.locationId);
+          allLocIds.forEach((predLoc, predIdx) => {
+            const need = pairNeed(predIdx, predLoc, node.locationId, nodeLocIdx);
+            const transitionMin = pairTravel(
+              predIdx,
+              predLoc,
+              node.locationId,
+              nodeLocIdx
+            );
             for (let slackMin = 0; slackMin <= allowGapMin; slackMin += SLOT_MIN) {
               const reqEnd2 = node.cand.startSlot - (need + slackMin) / SLOT_MIN;
-              const list = index.get(key(reqEnd2, predLoc));
+              const list = indexList(reqEnd2, predLoc);
               if (!list) continue;
               for (const prevNode of list) {
-                if (prevNode.usedMembers.has(node.cand.memberId)) continue;
+                if (usedBits[prevNode.bitBase + memberWord] & memberMask) continue;
                 if (soloTravelIds.has(prevNode.cand.memberId) && prevNode.arrivedViaTravel && transitionMin > 0)
                   continue;
                 const tc = prevNode.travelCount + (transitionMin > 0 ? 1 : 0);
@@ -1566,14 +1677,9 @@
                 const resultTimeCost = resultTravelOnly + prevNode.idleMinutesSum + slackMin;
                 const slackPenalty = soloTravelIds.has(node.cand.memberId) && transitionMin === 0 && slackMin > 0 ? slackMin : 0;
                 const resultSlackPen = prevNode.soloSlackPenalty + slackPenalty;
-                const prevTwoBackLoc = roundTripOriginLoc(
-                  prevNode,
-                  (n) => n.prev,
-                  (n) => n.locationId
-                );
                 const resultIneffCount = prevNode.ineffCount + (isInefficientRoundTrip(
                   ineffInfo,
-                  prevTwoBackLoc,
+                  prevNode.twoBackLoc,
                   prevNode.locationId,
                   node.locationId
                 ) ? 1 : 0);
@@ -1628,8 +1734,11 @@
             node.soloSlackPenalty = bestResultSlackPen;
             node.daytimeScore = bestPrev.daytimeScore + daytimeBonus;
             node.groupScore = bestPrev.groupScore + (bestPrev.locationId === node.locationId ? 1 : 0);
-            node.usedMembers = new Set(bestPrev.usedMembers);
-            node.usedMembers.add(node.cand.memberId);
+            usedBits.copyWithin(
+              node.bitBase,
+              bestPrev.bitBase,
+              bestPrev.bitBase + MEMBER_WORDS
+            );
             node.arrivedViaTravel = bestPrev.locationId !== node.locationId;
           } else {
             node.dp = weightFn(node.cand.memberId);
@@ -1642,9 +1751,14 @@
             node.soloSlackPenalty = 0;
             node.daytimeScore = daytimeBonus;
             node.groupScore = 0;
-            node.usedMembers = /* @__PURE__ */ new Set([node.cand.memberId]);
             node.arrivedViaTravel = false;
           }
+          usedBits[node.bitBase + memberWord] |= memberMask;
+          node.twoBackLoc = roundTripOriginLoc(
+            node,
+            (n) => n.prev,
+            (n) => n.locationId
+          );
           if (node.dp > -Infinity) {
             addToIndex(node);
             const nodeTimeCost = timeCostOf(node);
@@ -1681,20 +1795,15 @@
             const transitionMin = travelMinutes(loc, endBefore.locationId);
             for (let slackMin = 0; slackMin <= allowGapMin; slackMin += SLOT_MIN) {
               const gapSlots = (need + slackMin) / SLOT_MIN;
-              const list = index.get(key(endBefore.slot - gapSlots, loc));
+              const list = indexList(endBefore.slot - gapSlots, loc);
               if (!list || list.length === 0) continue;
               const node = list.find(
                 (n) => !(soloTravelIds.has(n.cand.memberId) && n.arrivedViaTravel && transitionMin > 0)
               );
               if (!node) continue;
-              const nodeTwoBackLoc = roundTripOriginLoc(
-                node,
-                (n) => n.prev,
-                (n) => n.locationId
-              );
               const nodeIneffCount = node.ineffCount + (isInefficientRoundTrip(
                 ineffInfo,
-                nodeTwoBackLoc,
+                node.twoBackLoc,
                 node.locationId,
                 endBefore.locationId
               ) ? 1 : 0);
@@ -1763,7 +1872,7 @@
             if (!eligibleMemberIds.has(cand.memberId) || usedMembers.has(cand.memberId))
               return;
             let bestLoc = null;
-            candidateLocationsForRequest(cand).forEach((locId) => {
+            locationsForReq(cand).forEach((locId) => {
               const need = requiredGapMin(chainEnd.locationId, locId);
               const actual = (cand.startSlot - (chainEnd.startSlot + durationToSlots(chainEnd.duration))) * SLOT_MIN;
               if (actual < need || actual > need + allowGapMin) return;
@@ -2579,6 +2688,18 @@
     function reqAt(memberId, day, startSlot) {
       return reqsFor(memberId, day).find((r) => r.startSlot === startSlot);
     }
+    const locationsByReq = /* @__PURE__ */ new Map();
+    function locationsForReq(r) {
+      let locs = locationsByReq.get(r);
+      if (!locs) {
+        locs = candidateLocationsForRequest(r);
+        locationsByReq.set(r, locs);
+      }
+      return locs;
+    }
+    function dayNodes(dayRequests, weightFn, jitterFn) {
+      return buildDayNodes(dayRequests, weightFn, jitterFn, locationsForReq);
+    }
     function isEligibleForDay(memberId, day) {
       const cap = maxSessionsFor2(memberById(memberId));
       if ((assignedCountByMember.get(memberId) || 0) >= cap) return false;
@@ -2605,7 +2726,7 @@
       const membersByLoc = /* @__PURE__ */ new Map();
       reqsByDay.get(day).forEach((r) => {
         if ((assignedCountByMember.get(r.memberId) || 0) !== 0) return;
-        candidateLocationsForRequest(r).forEach((locId) => {
+        locationsForReq(r).forEach((locId) => {
           if (!membersByLoc.has(locId)) membersByLoc.set(locId, /* @__PURE__ */ new Set());
           membersByLoc.get(locId).add(r.memberId);
         });
@@ -2621,7 +2742,7 @@
     }
     stage1DayOrder.forEach((day) => {
       const dominantLoc = dominantLocationFor(day);
-      const nodes = buildDayNodes(
+      const nodes = dayNodes(
         reqsByDay.get(day),
         (memberId, startSlot, locationId) => {
           if ((assignedCountByMember.get(memberId) || 0) !== 0) return 0;
@@ -2643,7 +2764,7 @@
         )
       );
       const pinnedMemberIds = new Set(existingChain.map((n) => n.memberId));
-      const nodes = buildDayNodes(
+      const nodes = dayNodes(
         reqsByDay.get(day),
         (memberId, startSlot, locationId) => {
           if (pinnedKeys.has(memberId + "|" + startSlot + "|" + locationId))
@@ -2673,7 +2794,7 @@
       for (const day of candidateDays) {
         const chain0 = dayChains.get(day) || [];
         const dayReqsForMember = reqsFor(memberId, day);
-        const candNodes = buildDayNodes(dayReqsForMember, () => 1);
+        const candNodes = dayNodes(dayReqsForMember, () => 1);
         for (const cand of candNodes) {
           let insertAt = 0;
           while (insertAt < chain0.length && chain0[insertAt].startSlot < cand.startSlot)
@@ -2793,7 +2914,7 @@
         const beforeUnassigned = stillUnassignedIds().length;
         const existingChain = dayChains.get(day) || [];
         existingChain.forEach((node) => uncommit(day, node));
-        const nodes = buildDayNodes(reqsByDay.get(day), (mId) => {
+        const nodes = dayNodes(reqsByDay.get(day), (mId) => {
           if (mId === memberId) return REBUILD_TARGET_WEIGHT;
           return isEligibleForDay(mId, day) ? 1 : 0;
         });
@@ -2910,7 +3031,7 @@
           }
           const dayReqsForMember = reqsFor(memberId, day);
           if (dayReqsForMember.length === 0) return;
-          const candNodes = buildDayNodes(dayReqsForMember, () => 1);
+          const candNodes = dayNodes(dayReqsForMember, () => 1);
           const baseChain = day === currentDay ? currentChainWithout : dayChains.get(day) || [];
           const beforeTargetDayTravel = day === currentDay ? 0 : totalTravelCount(baseChain);
           const beforeTargetDayIdle = day === currentDay ? 0 : dayIdleMinutes(baseChain);
@@ -3022,9 +3143,9 @@
           return false;
         const req1InDay2 = reqAt(member1, day2, node2.startSlot);
         const req2InDay1 = reqAt(member2, day1, node1.startSlot);
-        if (!candidateLocationsForRequest(req1InDay2).includes(node2.locationId))
+        if (!locationsForReq(req1InDay2).includes(node2.locationId))
           return false;
-        if (!candidateLocationsForRequest(req2InDay1).includes(node1.locationId))
+        if (!locationsForReq(req2InDay1).includes(node1.locationId))
           return false;
         if ((dayChains.get(day2) || []).some((n) => n.memberId === member1))
           return false;
@@ -3102,7 +3223,7 @@
             continue;
           const reqs = reqsFor(placeMemberId, day);
           if (reqs.length === 0) continue;
-          const candNodes = buildDayNodes(reqs, () => 1);
+          const candNodes = dayNodes(reqs, () => 1);
           const chain = dayChains.get(day) || [];
           for (const cand of candNodes) {
             const newNode = {
@@ -3301,7 +3422,7 @@
         const existingChain = dayChains.get(day) || [];
         const beforeIneff = dailyInefficientMoveCount(existingChain, ineffInfo);
         existingChain.forEach((node) => uncommit(day, node));
-        const nodes = buildDayNodes(
+        const nodes = dayNodes(
           reqsByDay.get(day),
           (mId) => isEligibleForDay(mId, day) ? 1 : 0
         );
@@ -3324,7 +3445,7 @@
       stage6: for (let i = 0; i < daysWithReqs.length && now() < STAGE6_DEADLINE; i++) {
         for (let j = i + 1; j < daysWithReqs.length; j++) {
           let attemptOrder = function(firstDay, secondDay, jitterFn) {
-            const firstNodes = buildDayNodes(
+            const firstNodes = dayNodes(
               reqsByDay.get(firstDay),
               (mId) => isEligibleForDay(mId, firstDay) ? 1 : 0,
               jitterFn
@@ -3332,7 +3453,7 @@
             const firstChain = runChainDP(firstNodes, void 0, ineffInfo);
             firstChain.forEach((node) => commit(firstDay, node));
             dayChains.set(firstDay, firstChain);
-            const secondNodes = buildDayNodes(
+            const secondNodes = dayNodes(
               reqsByDay.get(secondDay),
               (mId) => isEligibleForDay(mId, secondDay) ? 1 : 0,
               jitterFn
@@ -3452,7 +3573,7 @@
         );
         shuffled(daysWithReqs, polishRandomFn).forEach((day) => {
           const dominantLoc = dominantLocationFor(day);
-          const nodes = buildDayNodes(
+          const nodes = dayNodes(
             reqsByDay.get(day),
             (mId, startSlot, locationId) => {
               if (!isEligibleForDay(mId, day)) return 0;
@@ -3549,7 +3670,7 @@
           });
           if (options.length === 0) return null;
           const picked = options[Math.floor(randomFn() * options.length)];
-          const locOptions = candidateLocationsForRequest(picked.req);
+          const locOptions = locationsForReq(picked.req);
           if (locOptions.length === 0) return null;
           const locationId = locOptions[Math.floor(randomFn() * locOptions.length)];
           if (picked.day === currentDay && picked.startSlot === node.startSlot && locationId === node.locationId)
@@ -3612,9 +3733,9 @@
             return null;
           const req1InDay2 = reqAt(member1, day2, n2.startSlot);
           const req2InDay1 = reqAt(member2, day1, n1.startSlot);
-          if (!candidateLocationsForRequest(req1InDay2).includes(n2.locationId))
+          if (!locationsForReq(req1InDay2).includes(n2.locationId))
             return null;
-          if (!candidateLocationsForRequest(req2InDay1).includes(n1.locationId))
+          if (!locationsForReq(req2InDay1).includes(n1.locationId))
             return null;
           if ((dayChains.get(day2) || []).some((n) => n.memberId === member1))
             return null;

@@ -8,6 +8,8 @@ export {
   inefficientRoundTripLocationInfo,
   isInefficientRoundTrip,
   roundTripOriginLoc,
+  memberById,
+  knownLocationIdSet,
 } from "../../src/domain.js";
 export { state } from "../../src/state.js";
 export {

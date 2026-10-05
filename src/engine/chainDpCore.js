@@ -76,13 +76,20 @@ export function isEligibleRequest2(req) {
 // 다른 조건이 모두 동점일 때 이 값을 마지막 동점 처리 기준으로 써서, 요일 순서를 아무리
 // 바꿔도 항상 시간순으로만 동점을 처리해 매번 "누가 2회를 받을지"가 똑같이 정해지던
 // 문제를 깨뜨린다(요일 전체 재섞기 다듬기 단계 전용).
-export function buildDayNodes(dayRequests, weightFn, jitterFn) {
+// locationsFor는 신청 하나의 후보 지점을 돌려주는 함수(기본 candidateLocationsForRequest) —
+// 다듬기 파이프라인이 실행 단위로 캐시한 버전을 넘긴다.
+export function buildDayNodes(
+  dayRequests,
+  weightFn,
+  jitterFn,
+  locationsFor = candidateLocationsForRequest,
+) {
   const nodes = [];
   dayRequests.forEach((r) => {
     const member = memberById(r.memberId);
     const duration = sessionDurationFor2(member);
     const end = r.startSlot + durationToSlots(duration);
-    candidateLocationsForRequest(r).forEach((locationId) => {
+    locationsFor(r).forEach((locationId) => {
       const weight = weightFn(r.memberId, r.startSlot, locationId);
       if (!weight) return;
       nodes.push({
@@ -125,7 +132,10 @@ export function runChainDP(
     idle = new Array(n),
     js = new Array(n),
     ineff = new Array(n),
-    prev = new Array(n);
+    prev = new Array(n),
+    twoBackLocIdx = new Array(n);
+  const prevOrNull = (k) => (prev[k] !== -1 ? prev[k] : null);
+  const locOfIndex = (k) => nodes[k].locationId;
   // 인원(가중치 합) → 비효율 이동(상암점이 낀 A→B→A 왕복) 횟수 → 이동 횟수 → 이동 시간 →
   // 빈 시간(이동에 실제로 필요한 시간을 넘어서는 여분의 간격) → 지터(무작위 값, buildDayNodes
   // 참고) 순으로 비교한다. coveragePriority(아직 한 번도 못 받은 회원만 채우는 진짜 커버리지
@@ -167,17 +177,49 @@ export function runChainDP(
     if (idleA !== idleB) return idleA < idleB;
     return jsA < jsB;
   }
-  // 해당 DP 상태의 predecessor 체인에 특정 회원이 이미 포함돼 있는지 확인한다.
-  // 인접 노드만 비교하면 A→B→A처럼 비인접 중복을 놓쳐 잘못된 3개 체인을 점수에 반영한 뒤
-  // reconstruction에서 하나를 지우게 되므로, 전이 시점부터 이런 경로를 금지한다.
-  function chainContainsMember(endIndex, memberId) {
-    let cur = endIndex;
-    while (cur !== -1 && cur !== undefined) {
-      if (nodes[cur].memberId === memberId) return true;
-      cur = prev[cur];
+  // 지점 쌍별 이동 시간·필요 간격을 이 호출 동안만 미리 구해둔다 — 안쪽 루프가 O(노드 수^2)라
+  // 쌍마다 travelMinutes를 다시 부르면 그 자체가 전체 생성 시간의 대부분을 차지했다(실측).
+  // 호출 안에서만 쓰므로 이동 시간 설정이 바뀌어도 무효화할 캐시가 없다.
+  const locIndex = new Map();
+  nodes.forEach((nd) => {
+    if (!locIndex.has(nd.locationId)) locIndex.set(nd.locationId, locIndex.size);
+  });
+  const locIds = Array.from(locIndex.keys());
+  const L = locIds.length;
+  const travelOf = new Array(L * L),
+    gapNeedOf = new Array(L * L);
+  for (let a = 0; a < L; a++)
+    for (let b = 0; b < L; b++) {
+      travelOf[a * L + b] = travelMinutes(locIds[a], locIds[b]);
+      gapNeedOf[a * L + b] = requiredGapMin2(locIds[a], locIds[b]);
     }
-    return false;
-  }
+  const locIdxOf = nodes.map((nd) => locIndex.get(nd.locationId));
+  // 비효율 왕복 판정도 (2칸 전 지점, 직전 지점, 이번 지점) 조합별로 미리 구해둔다. 2칸 전
+  // 지점이 없는 경우(null)는 인덱스 L로 둔다.
+  const ineffOf = new Array((L + 1) * L * L);
+  for (let a = 0; a <= L; a++)
+    for (let b = 0; b < L; b++)
+      for (let c = 0; c < L; c++)
+        ineffOf[(a * L + b) * L + c] = isInefficientRoundTrip(
+          ineffInfo,
+          a === L ? null : locIds[a],
+          locIds[b],
+          locIds[c],
+        )
+          ? 1
+          : 0;
+  // 각 DP 상태(그 노드로 끝나는 최선 체인)에 들어 있는 회원 집합을 비트셋으로 들고 다닌다 —
+  // 인접 노드만 비교하면 A→B→A처럼 비인접 중복을 놓쳐 잘못된 3개 체인을 점수에 반영한 뒤
+  // reconstruction에서 하나를 지우게 되므로, 전이 시점부터 이런 경로를 금지해야 하는데,
+  // 매 전이마다 predecessor 체인을 거슬러 올라가지 않고 O(1)로 확인하기 위함이다.
+  const memberIndex = new Map();
+  nodes.forEach((nd) => {
+    if (!memberIndex.has(nd.memberId))
+      memberIndex.set(nd.memberId, memberIndex.size);
+  });
+  const W = Math.max(1, Math.ceil(memberIndex.size / 32));
+  const memberBits = new Uint32Array(n * W);
+  const memberIdxOf = nodes.map((nd) => memberIndex.get(nd.memberId));
 
   for (let i = 0; i < n; i++) {
     const node = nodes[i];
@@ -188,37 +230,30 @@ export function runChainDP(
       bestIdle = 0,
       bestJs = node.jitter || 0,
       bestPrev = -1;
+    const mIdx = memberIdxOf[i];
+    const mWord = mIdx >>> 5,
+      mMask = 1 << (mIdx & 31);
     for (let j = 0; j < i; j++) {
       const p = nodes[j];
-      if (chainContainsMember(j, node.memberId)) continue; // 회원당 1일 최대 1회
-      const gapNeed = requiredGapMin2(p.locationId, node.locationId);
+      // 노드는 끝 시각 순으로 정렬돼 있으므로, 이 노드가 시작하기 전에 끝나지 않는 노드가
+      // 처음 나오면 그 뒤도 전부 겹친다(필요 간격은 항상 0 이상) — 더 볼 필요가 없다.
+      if (p.end > node.startSlot) break;
+      const pair = locIdxOf[j] * L + locIdxOf[i];
+      const gapNeed = gapNeedOf[pair];
       const gapActual = (node.startSlot - p.end) * SLOT_MIN;
       if (gapActual < gapNeed) continue;
-      const addsTravel =
-        travelMinutes(p.locationId, node.locationId) > 0 ? 1 : 0;
+      const travel = travelOf[pair];
+      const addsTravel = travel > 0 ? 1 : 0;
       const newTc = tc[j] + addsTravel;
       if (newTc > maxTravelsPerDay) continue;
+      if (memberBits[j * W + mWord] & mMask) continue; // 회원당 1일 최대 1회
       const newDp = dp[j] + node.weight;
-      const newTm = tm[j] + travelMinutes(p.locationId, node.locationId);
+      const newTm = tm[j] + travel;
       const newIdle = idle[j] + (gapActual - gapNeed);
       const newJs = js[j] + (node.jitter || 0);
-      // 2칸 전 지점(p가 도착하기 전에 있던 지점)까지 알아야 지금 완성되는 A→B→A 왕복(p 이전
-      // 지점 → p의 지점 → 이번 node의 지점)을 판정할 수 있다.
-      const pTwoBackLoc = roundTripOriginLoc(
-        j,
-        (k) => (prev[k] !== -1 ? prev[k] : null),
-        (k) => nodes[k].locationId,
-      );
       const newIneff =
         ineff[j] +
-        (isInefficientRoundTrip(
-          ineffInfo,
-          pTwoBackLoc,
-          p.locationId,
-          node.locationId,
-        )
-          ? 1
-          : 0);
+        ineffOf[(twoBackLocIdx[j] * L + locIdxOf[j]) * L + locIdxOf[i]];
       if (
         better(
           newDp,
@@ -251,6 +286,16 @@ export function runChainDP(
     idle[i] = bestIdle;
     js[i] = bestJs;
     prev[i] = bestPrev;
+    // 2칸 전 지점(i가 도착하기 전에 있던 지점)까지 알아야 i 다음 노드에서 완성되는 A→B→A
+    // 왕복을 판정할 수 있다. prev[i]가 여기서 확정되므로 i마다 한 번만 구한다.
+    const twoBack = roundTripOriginLoc(i, prevOrNull, locOfIndex);
+    twoBackLocIdx[i] = twoBack === null ? L : locIndex.get(twoBack);
+    if (bestPrev !== -1)
+      memberBits.set(
+        memberBits.subarray(bestPrev * W, bestPrev * W + W),
+        i * W,
+      );
+    memberBits[i * W + mWord] |= mMask;
   }
   let bestEnd = -1,
     bestDpAll = 0,
