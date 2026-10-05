@@ -656,8 +656,8 @@ export let bulkImportRows = [];
 
 export function openBulkImportModal() {
   bulkImportTextareaEl.value = "";
-  bulkImportStepInputEl.style.display = "";
-  bulkImportStepPreviewEl.style.display = "none";
+  bulkImportStepInputEl.hidden = false;
+  bulkImportStepPreviewEl.hidden = true;
   bulkImportOverlayEl.classList.add("open");
   setTimeout(() => bulkImportTextareaEl.focus(), 0);
 }
@@ -699,8 +699,8 @@ bulkImportOverlayEl.addEventListener("click", (e) => {
   if (e.target === bulkImportOverlayEl) closeBulkImportModal();
 });
 bulkImportBackBtn.addEventListener("click", () => {
-  bulkImportStepInputEl.style.display = "";
-  bulkImportStepPreviewEl.style.display = "none";
+  bulkImportStepInputEl.hidden = false;
+  bulkImportStepPreviewEl.hidden = true;
 });
 
 export function renderBulkImportPreview() {
@@ -851,7 +851,7 @@ export function renderBulkImportPreview() {
 
     function renderRowState() {
       rowEl.classList.toggle("skip", row.choice === "__skip__");
-      newFields.style.display = row.choice === "__new__" ? "flex" : "none";
+      newFields.hidden = row.choice !== "__new__";
     }
     renderRowState();
 
@@ -872,8 +872,8 @@ export function renderBulkImportPreview() {
     "명" +
     "<br>적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다.";
 
-  bulkImportStepInputEl.style.display = "none";
-  bulkImportStepPreviewEl.style.display = "";
+  bulkImportStepInputEl.hidden = true;
+  bulkImportStepPreviewEl.hidden = false;
 }
 
 bulkImportPreviewBtn.addEventListener("click", renderBulkImportPreview);
@@ -1346,12 +1346,9 @@ export function renderMemberTable() {
       const locBadge = document.createElement("span");
       locBadge.className = "chip location-chip";
       locBadge.textContent = loc.name;
-      const color = locationColor(locId);
-      if (color) {
-        locBadge.style.background = color;
-        locBadge.style.borderColor = color;
-        locBadge.style.color = "#fff";
-      }
+      const colorIndex = state.locations.findIndex((l) => l.id === locId);
+      if (colorIndex >= 0)
+        locBadge.classList.add("location-color-" + (colorIndex % 8));
       locBadgeWrap.appendChild(locBadge);
     });
     locCell.appendChild(locBadgeWrap);
@@ -1463,11 +1460,11 @@ export function renderMemberTable() {
     const memoInput = document.createElement("textarea");
     memoInput.rows = 1;
     memoInput.value = member.memo || "";
-    const growMemo = () => {
-      memoInput.style.height = "auto";
-      memoInput.style.height = memoInput.scrollHeight + "px";
-    };
-    memoInput.addEventListener("input", growMemo);
+    memoInput.classList.add("member-memo-input");
+    memoInput.addEventListener("input", () => {
+      const lineHeight = 20;
+      memoInput.rows = Math.max(1, Math.ceil(memoInput.scrollHeight / lineHeight));
+    });
     memoInput.addEventListener("change", () =>
       setMemberMemo(member, memoInput.value),
     );
@@ -1642,8 +1639,8 @@ export function parseMemberBulkLine(line) {
 
 export function openMemberBulkImportModal() {
   memberBulkImportTextareaEl.value = "";
-  memberBulkImportStepInputEl.style.display = "";
-  memberBulkImportStepPreviewEl.style.display = "none";
+  memberBulkImportStepInputEl.hidden = false;
+  memberBulkImportStepPreviewEl.hidden = true;
   memberBulkImportOverlayEl.classList.add("open");
   setTimeout(() => memberBulkImportTextareaEl.focus(), 0);
 }
@@ -1659,8 +1656,8 @@ memberBulkImportOverlayEl.addEventListener("click", (e) => {
   if (e.target === memberBulkImportOverlayEl) closeMemberBulkImportModal();
 });
 memberBulkImportBackBtn.addEventListener("click", () => {
-  memberBulkImportStepInputEl.style.display = "";
-  memberBulkImportStepPreviewEl.style.display = "none";
+  memberBulkImportStepInputEl.hidden = false;
+  memberBulkImportStepPreviewEl.hidden = true;
 });
 
 export function memberBulkRowIsDuplicate(row) {
@@ -1694,9 +1691,7 @@ export function renderMemberBulkImportPreview() {
     const nameInput = document.createElement("input");
     nameInput.type = "text";
     nameInput.value = row.name;
-    nameInput.className = "bulk-preview-name";
-    nameInput.style.cssText =
-      "border:1px solid var(--border);border-radius:8px;height:32px;padding:0 8px;width:120px;font-family:inherit;";
+    nameInput.className = "bulk-preview-name bulk-preview-name-input";
     nameInput.addEventListener("input", () => {
       row.name = nameInput.value.trim();
       renderMemberBulkImportPreview();
@@ -1719,8 +1714,7 @@ export function renderMemberBulkImportPreview() {
     head.appendChild(catSelect);
 
     const skipLabel = document.createElement("label");
-    skipLabel.style.cssText =
-      "display:inline-flex;align-items:center;gap:4px;font-size:12.5px;color:var(--text-mute);margin-left:auto;";
+    skipLabel.className = "bulk-preview-skip-label";
     const skipCheckbox = document.createElement("input");
     skipCheckbox.type = "checkbox";
     skipCheckbox.checked = row.skip;
@@ -1739,8 +1733,7 @@ export function renderMemberBulkImportPreview() {
     locWrap.className = "bulk-preview-new-fields";
     state.locations.forEach((loc) => {
       const label = document.createElement("label");
-      label.style.cssText =
-        "display:inline-flex;align-items:center;gap:4px;font-size:12.5px;";
+      label.className = "bulk-preview-location-label";
       const cb = document.createElement("input");
       cb.type = "checkbox";
       cb.checked = row.locationIds.includes(loc.id);
@@ -1793,8 +1786,8 @@ memberBulkImportPreviewBtn.addEventListener("click", () => {
     return;
   }
   memberBulkImportRows = lines;
-  memberBulkImportStepInputEl.style.display = "none";
-  memberBulkImportStepPreviewEl.style.display = "";
+  memberBulkImportStepInputEl.hidden = true;
+  memberBulkImportStepPreviewEl.hidden = false;
   renderMemberBulkImportPreview();
 });
 
@@ -2151,11 +2144,11 @@ export function renderRequestList() {
       })(),
       "에서 먼저 회원을 등록해 주세요.",
     );
-    requestSummaryEl.style.display = "";
-    scheduleInteractiveEl.style.display = "none";
+    requestSummaryEl.hidden = false;
+    scheduleInteractiveEl.hidden = true;
     return;
   }
-  scheduleInteractiveEl.style.display = "";
+  scheduleInteractiveEl.hidden = false;
 
   // 지점 등록 순서(state.locations)를 기준으로 회원 탭을 첫 번째 지점별로 묶어서 표시한다.
   // 같은 지점 안에서는 회원을 실제로 등록한 순서(먼저 등록한 회원이 먼저)로 정렬한다 —
@@ -2192,7 +2185,7 @@ export function renderRequestList() {
     "명 · 미등록 " +
     (state.members.length - registeredCount) +
     "명";
-  requestSummaryEl.style.display = "";
+  requestSummaryEl.hidden = false;
 
   sortedMembers.forEach((member) => {
     const reqCount = state.requests.filter(
@@ -2240,9 +2233,8 @@ export function renderRequestList() {
     memberTabsEl.appendChild(tab);
   });
 
-  rangeAddRowEl.style.display =
-    activeMember && activeMember.locationIds.length > 0 ? "" : "none";
-  scheduleGridScrollEl.style.display = activeMember ? "" : "none";
+  rangeAddRowEl.hidden = !(activeMember && activeMember.locationIds.length > 0);
+  scheduleGridScrollEl.hidden = !activeMember;
 
   if (!activeMember) {
     const hint = document.createElement("p");
