@@ -66,6 +66,15 @@ async function main() {
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
+    await page.addInitScript(() => {
+      window.__PT_CSP_VIOLATIONS__ = [];
+      document.addEventListener("securitypolicyviolation", (event) => {
+        window.__PT_CSP_VIOLATIONS__.push({
+          directive: event.effectiveDirective,
+          blockedURI: event.blockedURI,
+        });
+      });
+    });
     page.on("pageerror", (err) => failures.push("페이지 런타임 에러: " + err.message));
     page.on("console", (msg) => {
       if (msg.type() === "error") failures.push("콘솔 에러: " + msg.text());
@@ -130,6 +139,12 @@ async function main() {
     await page.waitForSelector("#pageMembers.active", { timeout: 5000 });
     const memberRowCount = await page.locator("#memberTableBody tr").count();
     assert(memberRowCount === 1, "회원관리 표에 회원이 정상적으로 표시되지 않음 (실제: " + memberRowCount + "행)");
+
+    const cspViolations = await page.evaluate(() => window.__PT_CSP_VIOLATIONS__ || []);
+    assert(
+      cspViolations.length === 0,
+      "CSP 위반 발생: " + JSON.stringify(cspViolations),
+    );
   } finally {
     await browser.close();
   }
