@@ -167,6 +167,18 @@ export function runChainDP(
     if (idleA !== idleB) return idleA < idleB;
     return jsA < jsB;
   }
+  // 해당 DP 상태의 predecessor 체인에 특정 회원이 이미 포함돼 있는지 확인한다.
+  // 인접 노드만 비교하면 A→B→A처럼 비인접 중복을 놓쳐 잘못된 3개 체인을 점수에 반영한 뒤
+  // reconstruction에서 하나를 지우게 되므로, 전이 시점부터 이런 경로를 금지한다.
+  function chainContainsMember(endIndex, memberId) {
+    let cur = endIndex;
+    while (cur !== -1 && cur !== undefined) {
+      if (nodes[cur].memberId === memberId) return true;
+      cur = prev[cur];
+    }
+    return false;
+  }
+
   for (let i = 0; i < n; i++) {
     const node = nodes[i];
     let bestDp = node.weight,
@@ -178,7 +190,7 @@ export function runChainDP(
       bestPrev = -1;
     for (let j = 0; j < i; j++) {
       const p = nodes[j];
-      if (p.memberId === node.memberId) continue; // 회원당 1일 최대 1회
+      if (chainContainsMember(j, node.memberId)) continue; // 회원당 1일 최대 1회
       const gapNeed = requiredGapMin2(p.locationId, node.locationId);
       const gapActual = (node.startSlot - p.end) * SLOT_MIN;
       if (gapActual < gapNeed) continue;
@@ -275,16 +287,9 @@ export function runChainDP(
     }
   }
   const chain = [];
-  const used = new Set();
   let cur = bestEnd;
   while (cur !== -1 && cur !== undefined) {
-    const node = nodes[cur];
-    // 회원이 하루에 서로 겹치지 않는 신청을 두 번(예: 오전·저녁을 따로 등록) 낸 드문
-    // 경우를 위한 안전망 — 인접 검사만으로는 못 거르는 비인접 중복을 여기서 한 번 더 막는다.
-    if (!used.has(node.memberId)) {
-      chain.unshift(node);
-      used.add(node.memberId);
-    }
+    chain.unshift(nodes[cur]);
     cur = prev[cur];
   }
   return chain;
