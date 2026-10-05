@@ -243,7 +243,9 @@
   }
 
   // src/state.js
+  var CURRENT_SCHEMA_VERSION = 1;
   var state = {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
     availableCells: [],
     // array of "day-slot" strings
     locations: [],
@@ -323,6 +325,7 @@
   };
   function saveState() {
     if (runtime.suppressAutosave) return;
+    state.schemaVersion = CURRENT_SCHEMA_VERSION;
     state.availableCells = Array.from(runtime.availableCells);
     state.candidates = runtime.candidates;
     state.schedule3Result = runtime.schedule3Result;
@@ -398,8 +401,12 @@
         }
       }
       if (parsed) {
+        const savedSchemaVersion = parsed.schemaVersion === void 0 ? 0 : parsed.schemaVersion;
+        if (!Number.isInteger(savedSchemaVersion) || savedSchemaVersion < 0 || savedSchemaVersion > CURRENT_SCHEMA_VERSION)
+          throw new Error("unsupported schema version");
         migrateStartMinShift(parsed);
         hadSavedState = true;
+        state.schemaVersion = CURRENT_SCHEMA_VERSION;
         state.locations = parsed.locations || [];
         state.travelTimes = parsed.travelTimes || {};
         state.members = parsed.members || [];
@@ -7542,8 +7549,11 @@
   }
 
   // src/backup.js
-  var BACKUP_PBKDF2_ITERATIONS = 1e5;
-  async function deriveBackupKey(pin, salt, usage) {
+  var LEGACY_BACKUP_PBKDF2_ITERATIONS = 1e5;
+  var BACKUP_PBKDF2_ITERATIONS = 6e5;
+  var BACKUP_VERSION = 2;
+  var BACKUP_PREFIX = "PTB2.";
+  async function deriveBackupKey(pin, salt, usage, iterations = BACKUP_PBKDF2_ITERATIONS) {
     const keyMaterial = await crypto.subtle.importKey(
       "raw",
       new TextEncoder().encode(pin),
@@ -7555,7 +7565,7 @@
       {
         name: "PBKDF2",
         salt,
-        iterations: BACKUP_PBKDF2_ITERATIONS,
+        iterations,
         hash: "SHA-256"
       },
       keyMaterial,
@@ -7577,34 +7587,105 @@
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
     return bytes;
   }
+  function textToBase64(text) {
+    return backupBytesToBase64(new TextEncoder().encode(text));
+  }
+  function base64ToText(base64) {
+    return new TextDecoder().decode(backupBase64ToBytes(base64));
+  }
+  function backupEnvelopeAdditionalData(envelope) {
+    return new TextEncoder().encode(
+      JSON.stringify({
+        backupVersion: envelope.backupVersion,
+        kdf: envelope.kdf,
+        cipher: envelope.cipher
+      })
+    );
+  }
+  function parseBackupEnvelope(code) {
+    const trimmed = code.trim();
+    if (!trimmed.startsWith(BACKUP_PREFIX)) return null;
+    const envelope = JSON.parse(base64ToText(trimmed.slice(BACKUP_PREFIX.length)));
+    if (!isPlainObject(envelope) || envelope.backupVersion !== BACKUP_VERSION || !isPlainObject(envelope.kdf) || envelope.kdf.name !== "PBKDF2" || envelope.kdf.hash !== "SHA-256" || !Number.isInteger(envelope.kdf.iterations) || envelope.kdf.iterations < 1e5 || typeof envelope.kdf.salt !== "string" || !isPlainObject(envelope.cipher) || envelope.cipher.name !== "AES-GCM" || envelope.cipher.keyLength !== 256 || typeof envelope.cipher.iv !== "string" || typeof envelope.ciphertext !== "string")
+      throw new Error("invalid backup envelope");
+    return envelope;
+  }
   async function encryptBackupText(plainText, pin) {
     const salt = crypto.getRandomValues(new Uint8Array(16));
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const key = await deriveBackupKey(pin, salt, "encrypt");
+    const envelope = {
+      backupVersion: BACKUP_VERSION,
+      kdf: {
+        name: "PBKDF2",
+        hash: "SHA-256",
+        iterations: BACKUP_PBKDF2_ITERATIONS,
+        salt: backupBytesToBase64(salt)
+      },
+      cipher: {
+        name: "AES-GCM",
+        keyLength: 256,
+        iv: backupBytesToBase64(iv)
+      },
+      ciphertext: ""
+    };
+    const key = await deriveBackupKey(
+      pin,
+      salt,
+      "encrypt",
+      envelope.kdf.iterations
+    );
     const cipherBuf = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv },
+      {
+        name: "AES-GCM",
+        iv,
+        additionalData: backupEnvelopeAdditionalData(envelope)
+      },
       key,
       new TextEncoder().encode(plainText)
     );
-    const combined = new Uint8Array(
-      salt.length + iv.length + cipherBuf.byteLength
-    );
-    combined.set(salt, 0);
-    combined.set(iv, salt.length);
-    combined.set(new Uint8Array(cipherBuf), salt.length + iv.length);
-    return backupBytesToBase64(combined);
+    envelope.ciphertext = backupBytesToBase64(new Uint8Array(cipherBuf));
+    return BACKUP_PREFIX + textToBase64(JSON.stringify(envelope));
   }
-  async function decryptBackupText(base64Text, pin) {
+  async function decryptLegacyBackupText(base64Text, pin) {
     const combined = backupBase64ToBytes(base64Text.trim());
-    if (combined.length <= 28) throw new Error("invalid backup code");
+    if (combined.length <= 28) throw new Error("invalid legacy backup code");
     const salt = combined.slice(0, 16);
     const iv = combined.slice(16, 28);
     const cipherBytes = combined.slice(28);
-    const key = await deriveBackupKey(pin, salt, "decrypt");
+    const key = await deriveBackupKey(
+      pin,
+      salt,
+      "decrypt",
+      LEGACY_BACKUP_PBKDF2_ITERATIONS
+    );
     const plainBuf = await crypto.subtle.decrypt(
       { name: "AES-GCM", iv },
       key,
       cipherBytes
+    );
+    return new TextDecoder().decode(plainBuf);
+  }
+  async function decryptBackupText(code, pin) {
+    const envelope = parseBackupEnvelope(code);
+    if (!envelope) return decryptLegacyBackupText(code, pin);
+    const salt = backupBase64ToBytes(envelope.kdf.salt);
+    const iv = backupBase64ToBytes(envelope.cipher.iv);
+    if (salt.length !== 16 || iv.length !== 12)
+      throw new Error("invalid backup envelope parameters");
+    const key = await deriveBackupKey(
+      pin,
+      salt,
+      "decrypt",
+      envelope.kdf.iterations
+    );
+    const plainBuf = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv,
+        additionalData: backupEnvelopeAdditionalData(envelope)
+      },
+      key,
+      backupBase64ToBytes(envelope.ciphertext)
     );
     return new TextDecoder().decode(plainBuf);
   }
@@ -7622,6 +7703,8 @@
   }
   function validateBackupState(data) {
     if (!isPlainObject(data)) throw new Error("backup root must be an object");
+    if (data.schemaVersion !== void 0 && (!Number.isInteger(data.schemaVersion) || data.schemaVersion < 0 || data.schemaVersion > CURRENT_SCHEMA_VERSION))
+      throw new Error("unsupported schema version");
     ["locations", "members", "requests", "availableCells", "candidates"].forEach(
       (key) => assertArrayField(data, key)
     );
@@ -7700,6 +7783,36 @@
   function parseAndValidateBackupText(plainText) {
     return validateBackupState(JSON.parse(plainText));
   }
+  function createPortableBackupState(data) {
+    const validated = validateBackupState(data);
+    const portable = {
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      locations: validated.locations || [],
+      travelTimes: validated.travelTimes || {},
+      members: validated.members || [],
+      requests: validated.requests || [],
+      availableCells: validated.availableCells || [],
+      onceLimitedMemberIds3: validated.onceLimitedMemberIds3 || [],
+      excludedMemberIds3: validated.excludedMemberIds3 || [],
+      startMinBase: validated.startMinBase
+    };
+    if (portable.startMinBase === void 0) delete portable.startMinBase;
+    return portable;
+  }
+  function prepareBackupStateForRestore(data) {
+    const validated = validateBackupState(data);
+    const restored = {
+      ...validated,
+      schemaVersion: validated.schemaVersion === void 0 ? 0 : validated.schemaVersion,
+      // 후보A/B/C와 페이지 위치는 원본 데이터에서 다시 만들 수 있는 파생/세션 상태다.
+      // 오래된 후보가 새 코드에서 stale하게 살아나는 일을 막기 위해 복원 시 항상 버린다.
+      candidates: [],
+      schedule3Result: { candidateAList: [null, null, null] }
+    };
+    delete restored.currentPage;
+    delete restored.currentStep;
+    return restored;
+  }
   var backupExportBtnEl = document.getElementById("backupExportBtn");
   var backupExportResultEl = document.getElementById("backupExportResult");
   var backupExportTextareaEl = document.getElementById(
@@ -7722,8 +7835,10 @@
     }
     saveState();
     try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
+      const portable = createPortableBackupState(saved);
       const backupCode = await encryptBackupText(
-        localStorage.getItem(STORAGE_KEY) || "{}",
+        JSON.stringify(portable),
         pin
       );
       backupExportTextareaEl.value = backupCode;
@@ -7791,7 +7906,9 @@
     let parsedBackup;
     try {
       const plainText = await decryptBackupText(code, pin);
-      parsedBackup = parseAndValidateBackupText(plainText);
+      parsedBackup = prepareBackupStateForRestore(
+        parseAndValidateBackupText(plainText)
+      );
     } catch (e) {
       console.warn("backup import validation failed", e);
       backupImportHintEl.textContent = "복원에 실패했습니다. 백업 코드가 손상되었거나 현재 데이터 형식과 맞지 않습니다.";

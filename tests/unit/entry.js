@@ -48,6 +48,13 @@ export {
 export { candidatePreservesConfirmed } from "../../src/schedule3.js";
 
 export {
+  BACKUP_VERSION,
+  BACKUP_PREFIX,
+  BACKUP_PBKDF2_ITERATIONS,
+  parseBackupEnvelope,
   validateBackupState,
   parseAndValidateBackupText,
+  createPortableBackupState,
+  prepareBackupStateForRestore,
 } from "../../src/backup.js";
+export { CURRENT_SCHEMA_VERSION } from "../../src/state.js";
