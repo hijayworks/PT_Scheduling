@@ -23,7 +23,10 @@ import {
 } from "./domain.js";
 
 /* ---------------- State ---------------- */
+export const CURRENT_SCHEMA_VERSION = 1;
+
 export let state = {
+  schemaVersion: CURRENT_SCHEMA_VERSION,
   availableCells: [], // array of "day-slot" strings
   locations: [], // {id, name}
   travelTimes: {}, // { "locIdA|locIdB": minutes }
@@ -111,6 +114,7 @@ export const OLD_PAGE_TO_NEW = {
 /* ---------------- Persistence ---------------- */
 export function saveState() {
   if (runtime.suppressAutosave) return;
+  state.schemaVersion = CURRENT_SCHEMA_VERSION;
   state.availableCells = Array.from(runtime.availableCells);
   state.candidates = runtime.candidates;
   state.schedule3Result = runtime.schedule3Result;
@@ -203,8 +207,17 @@ export function loadState() {
       }
     }
     if (parsed) {
+      const savedSchemaVersion =
+        parsed.schemaVersion === undefined ? 0 : parsed.schemaVersion;
+      if (
+        !Number.isInteger(savedSchemaVersion) ||
+        savedSchemaVersion < 0 ||
+        savedSchemaVersion > CURRENT_SCHEMA_VERSION
+      )
+        throw new Error("unsupported schema version");
       migrateStartMinShift(parsed);
       hadSavedState = true;
+      state.schemaVersion = CURRENT_SCHEMA_VERSION;
       state.locations = parsed.locations || [];
       state.travelTimes = parsed.travelTimes || {};
       state.members = parsed.members || [];
