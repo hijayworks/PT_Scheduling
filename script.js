@@ -7987,10 +7987,7 @@
       return null;
     }
   }
-  function restoreRecoverySnapshot(
-    storage = typeof sessionStorage !== "undefined" ? sessionStorage : null,
-    targetStorage = typeof localStorage !== "undefined" ? localStorage : null
-  ) {
+  function restoreRecoverySnapshot(storage = typeof sessionStorage !== "undefined" ? sessionStorage : null, targetStorage = typeof localStorage !== "undefined" ? localStorage : null) {
     if (!storage || !targetStorage) return false;
     const snapshot = readRestoreRecoverySnapshot(storage);
     if (!snapshot) return false;
@@ -8006,9 +8003,9 @@
     if (!snapshot) return;
     const banner = document.createElement("div");
     banner.className = "restore-recovery-banner";
-    const text2 = document.createElement("p");
-    text2.textContent = "백업을 복원했습니다. 문제가 있다면 이 탭을 닫기 전에 복원 전 데이터로 되돌릴 수 있습니다.";
-    banner.appendChild(text2);
+    const text = document.createElement("p");
+    text.textContent = "백업을 복원했습니다. 문제가 있다면 이 탭을 닫기 전에 복원 전 데이터로 되돌릴 수 있습니다.";
+    banner.appendChild(text);
     const actions = document.createElement("div");
     actions.className = "restore-recovery-actions";
     const undoBtn = document.createElement("button");
