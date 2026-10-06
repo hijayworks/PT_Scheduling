@@ -257,20 +257,25 @@ export function selectCandidates(entries) {
   };
 }
 
-// 재최적화(5a) 제안 고르기: 고정 세션(pins)을 넘겨 다시 생성한 결과들(results, 후보A·B·C와 동점 풀)에
-// 지금 수정 카드(current)를 함께 넣고, 기존 추천 비교 기준(isSchedule2ResultBetter)으로 가장 나은 것을
-// 고른다. 그래서 제안은 그 기준으로 current보다 엄격히 나을 때만 나오고, 못 찾으면 current를 그대로
-// 둔다. "나빠지지 않는다"는 모든 개별 지표가 아니라 이 비교 기준으로 나쁘지 않다는 뜻이다 — 예를 들어
-// 수업 1건이 늘면 빈 시간이 20분 늘어도 더 나은 결과다.
-// 최종 gate: 고정 세션을 하나라도 같은 자리에 두지 않았거나(missingPins) 하드 제약을 어긴 결과는
-// 비교 기준으로 더 나아도 버린다. 엔진의 고정 처리와 별개로 여기서 다시 확인한다.
+// 재최적화(5a) 제안 고르기: 고정 세션(pins)을 넘겨 다시 생성한 결과들(results, 후보A·B·C와 동점 풀)
+// 중에서 지금 수정 카드(current)보다 나은 것을 고른다. 사용자 기대는 "고정한 수업을 유지하면서 나머지를
+// 더 잘 정리"이므로 제안 자격(업무 정책)은 다음 순서로 본다.
+//   1) 최종 gate: 고정 세션을 하나라도 같은 자리에 두지 않았거나(missingPins) 하드 제약을 어긴 결과는
+//      버린다. 엔진의 고정 처리와 별개로 여기서 다시 확인한다.
+//   2) 수업 유지: 미배정이 current보다 많거나 총 수업 수가 current보다 적은 결과는 버린다 — 기존 비교
+//      기준은 수업 1건을 빈 시간 SESSION_VALUE_MINUTES분과 바꿔 주므로, 수업을 빼고 공강을 크게 줄인
+//      결과도 "더 낫다"가 된다.
+//   3) 남은 결과 중 기존 추천 비교 기준(isSchedule2ResultBetter)으로 current보다 엄격히 나은 최선만
+//      제안한다. 같은 품질의 다른 배치는 개선이 아니다. 개별 지표는 나빠질 수 있다 — 예를 들어 수업
+//      1건이 늘면 빈 시간이 20분 늘어도 더 나은 결과다.
 // variants: 제안과 비교 기준으로 완전히 같은 품질의 다른 배치(pickVariants, 제안이 첫 번째).
 // state(회원·선택 상태)를 읽으므로 생성 때와 같은 선택 상태에서, 빈 시간 최소화 모드를 끈 채 호출한다.
 // 반환 { status: "improved" | "no-better", reason, proposal, variants, stats }
-//   reason(no-better): "same-layout"(current와 같은 배치를 다시 찾음) | "equal-quality"(다른 배치지만
-//   비교 기준으로 동점) | "worse"(gate를 통과한 결과가 모두 더 나쁨) | "none"(gate 통과 결과 없음)
+//   reason(no-better): "fewer-sessions"(비교 기준으로 더 나은 결과는 있었지만 모두 수업이 줄거나 미배정이
+//   늘었음) | "same-layout"(current와 같은 배치를 다시 찾음) | "equal-quality"(다른 배치지만 비교 기준으로
+//   동점) | "worse"(자격을 통과한 결과가 모두 더 나쁨) | "none"(gate 통과 결과 없음)
 export function selectReoptimization(current, results, pins) {
-  const stats = { results: results.length, missingPins: 0, hardViolations: 0 };
+  const stats = { results: results.length, missingPins: 0, hardViolations: 0, fewerSessions: 0 };
   const passed = results.filter((r) => {
     if (missingPins(r.assigned, pins).length) return stats.missingPins++, false;
     if (scheduleViolations(r).length) return stats.hardViolations++, false;
@@ -279,14 +284,22 @@ export function selectReoptimization(current, results, pins) {
   stats.passed = passed.length;
   const none = (reason) => ({ status: "no-better", reason, proposal: null, variants: [], stats });
   if (!passed.length) return none("none");
-  const best = passed.reduce((x, y) => (isSchedule2ResultBetter(y, x) ? y : x));
-  if (!isSchedule2ResultBetter(best, current)) {
-    if (isSchedule2ResultBetter(current, best)) return none("worse");
+  const keepsSessions = (r) =>
+    r.unassignedMembers.length <= current.unassignedMembers.length &&
+    r.assigned.length >= current.assigned.length;
+  const eligible = passed.filter(keepsSessions);
+  stats.fewerSessions = passed.length - eligible.length;
+  const bestIn = (list) => list.reduce((x, y) => (isSchedule2ResultBetter(y, x) ? y : x));
+  const best = eligible.length ? bestIn(eligible) : null;
+  if (!best || !isSchedule2ResultBetter(best, current)) {
+    if (passed.some((r) => !keepsSessions(r) && isSchedule2ResultBetter(r, current)))
+      return none("fewer-sessions");
+    if (!best || isSchedule2ResultBetter(current, best)) return none("worse");
     const cur = layoutSignature(current);
-    return none(passed.some((r) => layoutSignature(r) === cur) ? "same-layout" : "equal-quality");
+    return none(eligible.some((r) => layoutSignature(r) === cur) ? "same-layout" : "equal-quality");
   }
   const seen = new Set();
-  const group = passed
+  const group = eligible
     .filter((r) => !isSchedule2ResultBetter(best, r))
     .filter((r) => {
       const sig = layoutSignature(r);
