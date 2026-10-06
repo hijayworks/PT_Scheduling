@@ -10,6 +10,7 @@ import { isEligibleRequest2, runChainDP, setIdleFirst } from "./chainDpCore.js";
 import { runSchedule2Pipeline } from "./chainDpPolish.js";
 import { runPolishAttemptsInWorkers } from "./polishWorkerPool.js";
 import { mulberry32, shuffled } from "./rng.js";
+import { missingPins } from "./pins.js";
 import {
   isSchedule2ResultBetter,
   floorIsBetter,
@@ -140,6 +141,7 @@ async function searchWithinBase(
   seedBase,
   randomFn,
   onEval,
+  pins,
 ) {
   const dayOrdersToTry = fixedDayOrders(daysWithReqs, reqsByDay);
   for (let k = 0; k < shuffleCount; k++)
@@ -167,6 +169,7 @@ async function searchWithinBase(
       false,
       undefined,
       seedOffset,
+      pins,
     );
     // seedOffset을 결과와 함께 기억해둔다 — 다듬기 단계가 이 요일 순서를 다시 쓸 때 시드까지
     // 그대로 재현해야, 그리디 1·2단계의 동점 처리가 달라져 수업 건수 자체가 바뀌는 일 없이
@@ -188,13 +191,15 @@ async function searchWithinBase(
 
 // 재시작 그룹 하나를 처음부터 끝까지(요일 순서 탐색 → 다듬기) 돌려 그 그룹의 최종 결과
 // 하나를 반환한다. groupSeed가 요일 순서 무작위 셔플을 결정하고, groupIndex는 다듬기
-// 단계의 담금질 시드가 그룹끼리 겹치지 않도록 seedOffset의 밑변을 벌려준다.
+// 단계의 담금질 시드가 그룹끼리 겹치지 않도록 seedOffset의 밑변을 벌려준다. pins는 재최적화의
+// 고정 세션(engine/pins.js) — 앱의 일반 생성은 [].
 export async function runSchedule2RestartGroup(
   eligibleReqsMaster,
   groupSeed,
   groupIndex,
   onProgress,
   targetFloor,
+  pins = [],
 ) {
   const randomFn = mulberry32(groupSeed);
 
@@ -228,6 +233,7 @@ export async function runSchedule2RestartGroup(
         checkGenerationCancelled();
       }
     },
+    pins,
   );
   let evaluated = primary.evaluated,
     best = primary.best,
@@ -273,6 +279,7 @@ export async function runSchedule2RestartGroup(
             checkGenerationCancelled();
           }
         },
+        pins,
       );
       const improved = alt.best && isSchedule2ResultBetter(alt.best, best);
       if (improved) {
@@ -359,7 +366,7 @@ export async function runSchedule2RestartGroup(
   // 어느 쪽이든 결과는 시도 번호 순서대로 비교하므로 최선·동점 선택은 순차 실행과 같다.
   let completedAttempts = 0;
   const fromWorkers = await runPolishAttemptsInWorkers(
-    { eligibleReqs, reqsByDay, daysWithReqs },
+    { eligibleReqs, reqsByDay, daysWithReqs, pins },
     attempts,
     perAttemptBudget,
     () => {
@@ -382,6 +389,7 @@ export async function runSchedule2RestartGroup(
         true,
         perAttemptBudget,
         attempts[i].seedOffset,
+        pins,
       );
       completedAttempts++;
       if (onProgress) {
@@ -390,7 +398,7 @@ export async function runSchedule2RestartGroup(
         checkGenerationCancelled();
       }
     }
-    const attempt = dropSessionsForBalance(raw);
+    const attempt = dropSessionsForBalance(raw, pins);
     allPolished.push(attempt);
     if (!bestPolished || isSchedule2ResultBetter(attempt, bestPolished))
       bestPolished = attempt;
@@ -429,8 +437,11 @@ export async function runSchedule2RestartGroup(
 // 때마다 진행률을 알리고 화면을 다시 그릴 틈(yieldToUI)을 준다.
 // options.greedyAttempts: 아래 그리디 기준선의 시도 횟수(생략하면 운영값). 테스트 하네스가
 // 후보A의 하드 제약 스모크를 짧게 돌릴 때만 넘긴다.
+// options.pins: 재최적화의 고정 세션(engine/pins.js). 모든 카드 탐색과 그리디 기준선에 넘기고,
+// 카드를 바꿔치기할 외부 결과(화면의 후보B·C 등)도 고정 세션을 모두 지킨 것만 쓴다.
 export async function generateSchedule2Async(onProgress, options = {}) {
   const eligibleReqs = state.requests.filter(isEligibleRequest2);
+  const pins = options.pins || [];
 
   // 아래 "카드 간 품질 하한 공유"가 후보A 버튼만 단독으로 눌러도(후보B·C를 따로 생성해두지
   // 않아도) 항상 그리디 수준까지 확인할 수 있도록, 그리디 엔진(engine/greedy.js)으로 빠른
@@ -445,6 +456,7 @@ export async function generateSchedule2Async(onProgress, options = {}) {
       if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
     },
     { attempts: options.greedyAttempts },
+    pins,
   );
   const cardProgressShare = 1 - GREEDY_BASELINE_PROGRESS_SHARE;
 
@@ -479,6 +491,7 @@ export async function generateSchedule2Async(onProgress, options = {}) {
             );
         },
         targetFloor,
+        pins,
       );
     } finally {
       setIdleFirst(false);
@@ -524,6 +537,7 @@ export async function generateSchedule2Async(onProgress, options = {}) {
         .concat([].concat(...(greedyBaseline.pools || [])))
         .map((cand) => {
           if (!cand || !cand.assigned) return null;
+          if (missingPins(cand.assigned, pins).length) return null;
           return {
             assigned: cand.assigned,
             unassignedMembers: cand.unassignedMembers || [],

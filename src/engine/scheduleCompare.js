@@ -9,6 +9,7 @@ import {
 } from "./greedy.js";
 import { requiredGapMin2, isIdleFirst } from "./chainDpCore.js";
 import { soloTravelMemberIds, chainBreaksSoloTravel } from "../domain.js";
+import { pinKey } from "./pins.js";
 
 // "수업 스케줄 생성2" 결과끼리 비교하고 서명(중복 판별)하는 순수 함수 모음. chainDp.js(카드
 // 재시작 오케스트레이션)가 요일 순서 후보·다듬은 결과를 고를 때 이 모듈에 의존한다.
@@ -53,7 +54,9 @@ export function isSchedule2ResultBetter(a, b) {
 // 그 회원의 유일한 수업은 빼지 않는다 — 미배정이 늘어나기 때문이다.
 // ponytail: 빼기만 하고 나머지 수업은 재배치하지 않는다. 뺀 자리를 활용한 재배치까지 보려면
 // 다듬기 예산 일부를 떼어 "빼고 다시 다듬기"를 추가한다.
-export function dropSessionsForBalance(result) {
+// pins(재최적화의 고정 세션, engine/pins.js)는 빼지 않는다.
+export function dropSessionsForBalance(result, pins = []) {
+  const pinned = new Set(pins.map(pinKey));
   // 수업을 빼면 그 요일의 앞뒤 수업이 새로 이어지며 이동시간이 모자라거나(누락된 지점 쌍이면
   // 연결 불가) 이동-회원-이동이 생길 수 있다 — 그런 제거는 후보에서 뺀다.
   const soloIds = soloTravelMemberIds();
@@ -84,6 +87,7 @@ export function dropSessionsForBalance(result) {
     let best = cur;
     cur.assigned.forEach((r) => {
       if (sessionsByMember.get(r.memberId) < 2) return;
+      if (pinned.has(pinKey(r))) return;
       const cand = { ...cur, assigned: cur.assigned.filter((x) => x !== r) };
       if (!dayAllowed(cand.assigned, r.day)) return;
       if (isSchedule2ResultBetter(cand, best)) best = cand;

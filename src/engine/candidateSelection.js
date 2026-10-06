@@ -1,5 +1,7 @@
 import { isSchedule2ResultBetter } from "./scheduleCompare.js";
 import { formatDelta } from "./candidateDiff.js";
+import { scheduleMetrics, scheduleViolations } from "./scheduleQuality.js";
+import { missingPins } from "./pins.js";
 
 // 후보 선정 정책의 단일 소유자: 여러 엔진(후보A-1~3·B·C와 각 동점 풀)이 만든 결과 전체를 하나의
 // 후보 풀로 보고, 사용자에게 보여줄 카드(실제 trade-off)를 고른다. 역할(추천·수업 우선 등)은 풀에
@@ -74,7 +76,7 @@ export function formatTradeoff(deltas) {
 const better = (a, b) => isSchedule2ResultBetter(a.result, b.result);
 const bestOf = (list) => list.reduce((x, y) => (better(y, x) ? y : x));
 // 같은 품질 그룹 안의 순서: 이동 시간이 짧은 순, 같으면 배치 서명 순(입력 순서와 무관하게 결정적).
-function byTravelThenSignature(x, y) {
+export function byTravelThenSignature(x, y) {
   return (
     x.metrics.travelMinutes - y.metrics.travelMinutes ||
     (layoutSignature(x.result) < layoutSignature(y.result) ? -1 : 1)
@@ -253,4 +255,45 @@ export function selectCandidates(entries) {
       cardsShown: cards.length,
     },
   };
+}
+
+// 재최적화(5a) 제안 고르기: 고정 세션(pins)을 넘겨 다시 생성한 결과들(results, 후보A·B·C와 동점 풀)에
+// 지금 수정 카드(current)를 함께 넣고, 기존 추천 비교 기준(isSchedule2ResultBetter)으로 가장 나은 것을
+// 고른다. 그래서 제안은 그 기준으로 current보다 엄격히 나을 때만 나오고, 못 찾으면 current를 그대로
+// 둔다. "나빠지지 않는다"는 모든 개별 지표가 아니라 이 비교 기준으로 나쁘지 않다는 뜻이다 — 예를 들어
+// 수업 1건이 늘면 빈 시간이 20분 늘어도 더 나은 결과다.
+// 최종 gate: 고정 세션을 하나라도 같은 자리에 두지 않았거나(missingPins) 하드 제약을 어긴 결과는
+// 비교 기준으로 더 나아도 버린다. 엔진의 고정 처리와 별개로 여기서 다시 확인한다.
+// variants: 제안과 비교 기준으로 완전히 같은 품질의 다른 배치(pickVariants, 제안이 첫 번째).
+// state(회원·선택 상태)를 읽으므로 생성 때와 같은 선택 상태에서, 빈 시간 최소화 모드를 끈 채 호출한다.
+// 반환 { status: "improved" | "no-better", reason, proposal, variants, stats }
+//   reason(no-better): "same-layout"(current와 같은 배치를 다시 찾음) | "equal-quality"(다른 배치지만
+//   비교 기준으로 동점) | "worse"(gate를 통과한 결과가 모두 더 나쁨) | "none"(gate 통과 결과 없음)
+export function selectReoptimization(current, results, pins) {
+  const stats = { results: results.length, missingPins: 0, hardViolations: 0 };
+  const passed = results.filter((r) => {
+    if (missingPins(r.assigned, pins).length) return stats.missingPins++, false;
+    if (scheduleViolations(r).length) return stats.hardViolations++, false;
+    return true;
+  });
+  stats.passed = passed.length;
+  const none = (reason) => ({ status: "no-better", reason, proposal: null, variants: [], stats });
+  if (!passed.length) return none("none");
+  const best = passed.reduce((x, y) => (isSchedule2ResultBetter(y, x) ? y : x));
+  if (!isSchedule2ResultBetter(best, current)) {
+    if (isSchedule2ResultBetter(current, best)) return none("worse");
+    const cur = layoutSignature(current);
+    return none(passed.some((r) => layoutSignature(r) === cur) ? "same-layout" : "equal-quality");
+  }
+  const seen = new Set();
+  const group = passed
+    .filter((r) => !isSchedule2ResultBetter(best, r))
+    .filter((r) => {
+      const sig = layoutSignature(r);
+      return !seen.has(sig) && seen.add(sig);
+    })
+    .map((result) => ({ result, metrics: scheduleMetrics(result) }))
+    .sort(byTravelThenSignature);
+  const { kept } = pickVariants(group);
+  return { status: "improved", reason: null, proposal: kept[0], variants: kept, stats };
 }

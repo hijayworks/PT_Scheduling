@@ -34,6 +34,7 @@ export {
   dominates,
   formatTradeoff,
   selectCandidates,
+  selectReoptimization,
   MAX_CARD_VARIANTS,
   pickVariants,
 } from "../../src/engine/candidateSelection.js";
@@ -107,3 +108,4 @@ export {
   CURRENT_SCHEMA_VERSION,
   saveState,
 } from "../../src/state.js";
+export { pinKey, pinsFromResult, missingPins } from "../../src/engine/pins.js";

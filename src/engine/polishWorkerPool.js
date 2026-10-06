@@ -31,7 +31,7 @@ export function defaultPolishWorkerCount(attemptCount) {
   );
 }
 
-// attempts[i] = { order, seedOffset }. 반환값은 attempts와 같은 길이의 배열로, 워커가 끝낸
+// base.pins: 재최적화의 고정 세션(없으면 []). attempts[i] = { order, seedOffset }. 반환값은 attempts와 같은 길이의 배열로, 워커가 끝낸
 // 시도 자리에는 runSchedule2Pipeline과 같은 모양의 결과({assigned, unassignedMembers})가,
 // 워커를 못 쓰거나 워커가 실패한 시도 자리에는 undefined가 들어 있다 — 호출하는 쪽이
 // undefined 자리를 메인 스레드에서 직접 계산한다(workerPool.js 참고).
@@ -49,6 +49,7 @@ export async function runPolishAttemptsInWorkers(
       eligibleReqs: base.eligibleReqs,
       reqsByDay: base.reqsByDay,
       daysWithReqs: base.daysWithReqs,
+      pins: base.pins || [],
     }),
     taskCount: attempts.length,
     taskMessage: (i) => ({
