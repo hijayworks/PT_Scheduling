@@ -2731,7 +2731,9 @@
     { key: "travelMinutes", label: "이동 시간", dir: -1 },
     { key: "idleMinutes", label: "빈 시간", dir: -1 },
     { key: "workDays", label: "근무일 수", dir: -1 },
-    { key: "lastEndMinute", label: "마지막 수업 종료", dir: -1 }
+    { key: "spanMinutes", label: "체류 시간(요일 합)", dir: -1 },
+    { key: "firstStartMinute", label: "첫 수업 시작", dir: 0 },
+    { key: "lastEndMinute", label: "마지막 수업 종료", dir: 0 }
   ];
   var DELTA_LABELS = {
     unassigned: ["미배정", "명"],
@@ -2741,6 +2743,8 @@
     travelMinutes: ["이동 시간", "분"],
     idleMinutes: ["빈 시간", "분"],
     workDays: ["근무일", "일"],
+    spanMinutes: ["체류 시간", "분"],
+    firstStartMinute: ["첫 시작", "분"],
     lastEndMinute: ["마지막 종료", "분"]
   };
   function formatDelta(key, delta) {
@@ -2750,16 +2754,18 @@
   function metricDiff(base, other) {
     return COMPARE_METRICS.map(({ key, label, dir }) => {
       const delta = other[key] - base[key];
-      const effect = delta === 0 ? "same" : delta * dir > 0 ? "better" : "worse";
+      const effect = delta === 0 ? "same" : dir === 0 ? "neutral" : delta * dir > 0 ? "better" : "worse";
       return { key, label, base: base[key], value: other[key], delta, effect };
     });
   }
   function summarizeMetricDiff(diff) {
     const list = (effect) => diff.filter((d) => d.effect === effect).map((d) => formatDelta(d.key, d.delta)).join(" / ");
-    const gains = list("better"), losses = list("worse");
-    if (gains && losses) return `${gains} 대신 ${losses}`;
-    if (gains) return `${gains} (나빠지는 지표 없음)`;
-    if (losses) return `나아지는 지표 없이 ${losses}`;
+    const gains = list("better"), losses = list("worse"), neutral = list("neutral");
+    const note = neutral ? ` · 참고: ${neutral}` : "";
+    if (gains && losses) return `${gains} 대신 ${losses}${note}`;
+    if (gains) return `${gains} (나빠지는 지표 없음)${note}`;
+    if (losses) return `나아지는 지표 없이 ${losses}${note}`;
+    if (neutral) return `좋아지거나 나빠지는 지표 없음${note}`;
     return "지표는 모두 같고 배치만 다릅니다";
   }
   var sameSession = (a, b) => a.day === b.day && a.startSlot === b.startSlot && a.locationId === b.locationId;
@@ -2833,9 +2839,11 @@
     travelCount: "회",
     travelMinutes: "분",
     idleMinutes: "분",
-    workDays: "일"
+    workDays: "일",
+    spanMinutes: "분"
   };
-  var formatValue = (key, v) => key === "lastEndMinute" ? v ? minutesLabel(v) : "-" : v + UNITS[key];
+  var CLOCK_KEYS = /* @__PURE__ */ new Set(["firstStartMinute", "lastEndMinute"]);
+  var formatValue = (key, v) => CLOCK_KEYS.has(key) ? v ? minutesLabel(v) : "-" : v + UNITS[key];
   var el = (tag, className, text) => {
     const e = document.createElement(tag);
     if (className) e.className = className;
@@ -2894,7 +2902,7 @@
         el(
           "td",
           "compare-delta compare-" + d.effect,
-          d.effect === "same" ? "같음" : (d.delta > 0 ? "+" : "") + d.delta + (d.key === "lastEndMinute" ? "분" : UNITS[d.key])
+          d.effect === "same" ? "같음" : (d.delta > 0 ? "+" : "") + d.delta + (CLOCK_KEYS.has(d.key) ? "분" : UNITS[d.key])
         )
       );
       tbody.appendChild(tr);
@@ -4650,6 +4658,7 @@
     ).length;
     let longestIdleMinutes = 0;
     let spanMinutes = 0;
+    let firstStartMinute = 0;
     let lastEndMinute = 0;
     byDaySorted(assigned).forEach((reqs) => {
       for (let i = 1; i < reqs.length; i++) {
@@ -4660,6 +4669,8 @@
       const first = reqs[0], last = reqs[reqs.length - 1];
       const endMin = last.startSlot * SLOT_MIN + last.duration;
       spanMinutes += endMin - first.startSlot * SLOT_MIN;
+      const startMin = START_MIN + first.startSlot * SLOT_MIN;
+      firstStartMinute = firstStartMinute ? Math.min(firstStartMinute, startMin) : startMin;
       lastEndMinute = Math.max(lastEndMinute, START_MIN + endMin);
     });
     return {
@@ -4675,6 +4686,7 @@
       longestIdleMinutes,
       workDays: new Set(assigned.map((r) => r.day)).size,
       spanMinutes,
+      firstStartMinute,
       lastEndMinute
     };
   }

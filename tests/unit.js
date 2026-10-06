@@ -1020,7 +1020,10 @@ test("품질 지표: 수업·이동·빈 시간·근무 시간을 계산한다",
   );
   assertEqual([m.travelCount, m.travelMinutes, m.inefficientMoves], [1, 30, 0]);
   assertEqual([m.idleMinutes, m.longestIdleMinutes], [30, 30], "이동에 쓴 30분은 빈 시간이 아님");
-  assertEqual([m.workDays, m.spanMinutes, m.lastEndMinute], [2, 120 + 150, 12 * 60 + 150]);
+  assertEqual(
+    [m.workDays, m.spanMinutes, m.firstStartMinute, m.lastEndMinute],
+    [2, 120 + 150, 12 * 60, 12 * 60 + 150],
+  );
 });
 
 test("하드 제약 검사: 정상 스케줄은 위반이 없다", () => {
@@ -1261,9 +1264,9 @@ test("후보 풀: 사용자가 손댄 슬롯은 수정 후보로 넣고, 그 슬
 });
 
 /* ---------------- candidateDiff.js: 후보 비교(지표 차이·배정 차이) ---------------- */
-const CMP_BASE = { unassigned: 0, sessions: 10, inefficientMoves: 0, travelCount: 2, travelMinutes: 60, idleMinutes: 90, workDays: 4, lastEndMinute: 20 * 60 };
-test("후보 비교: 8개 지표 모두 절대값, 추천 대비 차이, 좋아졌는지를 돌려준다", () => {
-  const other = { ...CMP_BASE, sessions: 9, travelCount: 3, idleMinutes: 30, lastEndMinute: 19 * 60 + 30 };
+const CMP_BASE = { unassigned: 0, sessions: 10, inefficientMoves: 0, travelCount: 2, travelMinutes: 60, idleMinutes: 90, workDays: 4, spanMinutes: 600, firstStartMinute: 10 * 60, lastEndMinute: 20 * 60 };
+test("후보 비교: 모든 지표의 절대값, 추천 대비 차이, 좋아졌는지를 돌려준다", () => {
+  const other = { ...CMP_BASE, sessions: 9, travelCount: 3, idleMinutes: 30, spanMinutes: 570, lastEndMinute: 19 * 60 + 30 };
   const diff = lib.metricDiff(CMP_BASE, other);
   assertEqual(diff.map((d) => d.key), lib.COMPARE_METRICS.map((m) => m.key));
   assertEqual(
@@ -1272,9 +1275,28 @@ test("후보 비교: 8개 지표 모두 절대값, 추천 대비 차이, 좋아�
       ["sessions", 10, 9, -1, "worse"],
       ["travelCount", 2, 3, 1, "worse"],
       ["idleMinutes", 90, 30, -60, "better"],
-      ["lastEndMinute", 1200, 1170, -30, "better"],
+      ["spanMinutes", 600, 570, -30, "better"],
+      ["lastEndMinute", 1200, 1170, -30, "neutral"],
     ],
   );
+});
+test("후보 비교: 근무 부담은 체류 시간으로 판정하고, 첫 시작·마지막 종료는 방향 없는 참고 정보다", () => {
+  // 하루 10:00~20:00(체류 600분) 기준
+  const shift = (first, last) => ({ ...CMP_BASE, firstStartMinute: first * 60, lastEndMinute: last * 60, spanMinutes: (last - first) * 60 });
+  const effects = (o) => lib.metricDiff(CMP_BASE, o).filter((d) => d.effect !== "same").map((d) => [d.key, d.delta, d.effect]);
+  assertEqual(
+    effects(shift(9, 19)),
+    [["firstStartMinute", -60, "neutral"], ["lastEndMinute", -60, "neutral"]],
+    "일정 전체가 1시간 앞당겨진 것은 개선이 아님",
+  );
+  assertEqual(effects(shift(10, 19)), [["spanMinutes", -60, "better"], ["lastEndMinute", -60, "neutral"]], "일찍 끝나서 체류가 줄면 개선");
+  assertEqual(effects(shift(11, 20)), [["spanMinutes", -60, "better"], ["firstStartMinute", 60, "neutral"]], "늦게 시작해서 체류가 줄면 개선");
+  assertEqual(lib.summarizeMetricDiff(lib.metricDiff(CMP_BASE, shift(9, 19))), "좋아지거나 나빠지는 지표 없음 · 참고: 첫 시작 -60분 / 마지막 종료 -60분");
+  assertEqual(lib.summarizeMetricDiff(lib.metricDiff(CMP_BASE, shift(10, 19))), "체류 시간 -60분 (나빠지는 지표 없음) · 참고: 마지막 종료 -60분");
+});
+test("후보 선정: 근무일 수와 체류 시간은 Pareto 핵심 축에 넣지 않는다", () => {
+  const axes = lib.QUALITY_AXES.map(([k]) => k);
+  assert(!axes.includes("workDays") && !axes.includes("spanMinutes") && !axes.includes("lastEndMinute"), axes.join(","));
 });
 test("후보 비교: 요약 문장은 얻는 것을 앞에, 포기하는 것을 뒤에 쓰고 차이가 없는 지표는 뺀다", () => {
   const sum = (o) => lib.summarizeMetricDiff(lib.metricDiff(CMP_BASE, { ...CMP_BASE, ...o }));

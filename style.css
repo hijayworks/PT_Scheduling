@@ -1135,6 +1135,7 @@ body {
 .compare-better { color: var(--success); }
 .compare-worse { color: var(--danger); }
 .compare-same { color: var(--text-mute); font-weight: 500; }
+.compare-neutral { color: var(--text); font-weight: 500; }
 .candidate-compare-subtitle { margin: 16px 0 4px; font-size: 14px; }
 .candidate-compare-counts { margin: 0 0 8px; font-size: 12px; color: var(--text-mute); }
 .candidate-compare-members { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
