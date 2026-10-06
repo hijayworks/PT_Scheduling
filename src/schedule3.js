@@ -30,6 +30,7 @@ import {
 import { withSelectionOverride } from "./selectionOverride.js";
 import { renderGrid } from "./grid.js";
 import { saveCandidateCardAsImage } from "./imageExport.js";
+import { renderCandidateCompare } from "./candidateCompare.js";
 import {
   generateCandidatesAsync,
   candidatePools,
@@ -1083,17 +1084,23 @@ export function candidatePoolEntries() {
 // 카드마다 지금 보고 있는 배치(서명). 카드 키는 자동 카드면 품질 키, 수정 카드면 그 배치 서명.
 // 세션 한정 — 새로고침하면 각 카드의 첫 배치부터 다시 보인다.
 const shownVariantByCard = new Map();
+// 추천안과 비교 중인 카드 키(세션 한정). 그 카드가 사라지면 비교 패널도 닫힌다.
+let compareCardKey = null;
+export const candidateCompare3El = document.getElementById("candidateCompare3");
 
 const CARD_DESC = {
   recommended:
     "미배정 → 비효율 이동 → 수업·이동·빈 시간 균형(수업 1건 = 이동 1번 = 빈 시간 60분) 순으로 가장 나은 후보입니다.",
-  edited: "직접 옮기거나 확정한 후보입니다. 다시 생성해도 지워지지 않습니다.",
+  edited:
+    "직접 옮기거나 확정한 후보입니다. 다시 생성해도 유지되지만, 회원·신청·설정이 바뀌면 함께 초기화됩니다.",
 };
 
 // 후보 카드를 그린다. 카드는 저장된 후보 풀에서 매번 selectCandidates로 파생한다(역할·추천 여부·
 // trade-off 문구는 저장하지 않는다).
 export function renderSchedule3Result() {
   candidates3El.innerHTML = "";
+  candidateCompare3El.hidden = true;
+  candidateCompare3El.innerHTML = "";
   const gridRange = businessHoursGridRange();
   const { cards } = selectCandidates(candidatePoolEntries());
 
@@ -1110,6 +1117,7 @@ export function renderSchedule3Result() {
   }
 
   let promoted = false;
+  const shown = new Map(); // 카드 키 → {card, entry}
   cards.forEach((c) => {
     const cardKey =
       c.role === "edited"
@@ -1128,7 +1136,8 @@ export function renderSchedule3Result() {
       entry.slot.result = entry.result;
       promoted = true;
     }
-    buildCard(c, entry.result, idx, (newIdx) => {
+    shown.set(cardKey, { card: c, entry });
+    buildCard(c, cardKey, entry.result, idx, (newIdx) => {
       shownVariantByCard.set(
         cardKey,
         layoutSignature(c.variants[newIdx].result),
@@ -1137,6 +1146,19 @@ export function renderSchedule3Result() {
     });
   });
   if (promoted) saveState();
+  const rec = [...shown.values()].find((x) => x.card.role === "recommended");
+  const target = shown.get(compareCardKey);
+  if (rec && target && target !== rec) {
+    const side = ({ card, entry }) => ({
+      label: card.label,
+      result: entry.result,
+      metrics: entry.metrics,
+    });
+    renderCandidateCompare(candidateCompare3El, side(rec), side(target), () => {
+      compareCardKey = null;
+      renderSchedule3Result();
+    });
+  }
   if (cards.filter((c) => c.role !== "edited").length === 1) {
     const note = document.createElement("p");
     note.className = "pool-pager-hint candidates-note";
@@ -1144,7 +1166,7 @@ export function renderSchedule3Result() {
     candidates3El.appendChild(note);
   }
 
-  function buildCard(c, result, variantIdx, onSelectVariant) {
+  function buildCard(c, cardKey, result, variantIdx, onSelectVariant) {
     const title = c.label;
     const desc =
       c.role === "recommended"
@@ -1175,6 +1197,25 @@ export function renderSchedule3Result() {
 
     const actions = document.createElement("div");
     actions.className = "candidate-card-actions";
+    if (c.role !== "recommended" && cards[0].role === "recommended") {
+      const comparing = compareCardKey === cardKey;
+      const compareBtn = document.createElement("button");
+      compareBtn.type = "button";
+      compareBtn.className = "btn btn-ghost compare-candidate-btn";
+      compareBtn.textContent = "추천안과 비교";
+      compareBtn.setAttribute("aria-pressed", String(comparing));
+      compareBtn.setAttribute("aria-controls", "candidateCompare3");
+      compareBtn.addEventListener("click", () => {
+        compareCardKey = comparing ? null : cardKey;
+        renderSchedule3Result();
+        if (!candidateCompare3El.hidden)
+          candidateCompare3El.scrollIntoView({
+            behavior: "smooth",
+            block: "start",
+          });
+      });
+      actions.appendChild(compareBtn);
+    }
     function makeIconBtn(iconSvg, label, tooltip) {
       const b = document.createElement("button");
       b.type = "button";

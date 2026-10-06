@@ -1260,6 +1260,55 @@ test("후보 풀: 사용자가 손댄 슬롯은 수정 후보로 넣고, 그 슬
   lib.runtime.schedule3Result = { candidateAList: [null, null, null] };
 });
 
+/* ---------------- candidateDiff.js: 후보 비교(지표 차이·배정 차이) ---------------- */
+const CMP_BASE = { unassigned: 0, sessions: 10, inefficientMoves: 0, travelCount: 2, travelMinutes: 60, idleMinutes: 90, workDays: 4, lastEndMinute: 20 * 60 };
+test("후보 비교: 8개 지표 모두 절대값, 추천 대비 차이, 좋아졌는지를 돌려준다", () => {
+  const other = { ...CMP_BASE, sessions: 9, travelCount: 3, idleMinutes: 30, lastEndMinute: 19 * 60 + 30 };
+  const diff = lib.metricDiff(CMP_BASE, other);
+  assertEqual(diff.map((d) => d.key), lib.COMPARE_METRICS.map((m) => m.key));
+  assertEqual(
+    diff.filter((d) => d.effect !== "same").map((d) => [d.key, d.base, d.value, d.delta, d.effect]),
+    [
+      ["sessions", 10, 9, -1, "worse"],
+      ["travelCount", 2, 3, 1, "worse"],
+      ["idleMinutes", 90, 30, -60, "better"],
+      ["lastEndMinute", 1200, 1170, -30, "better"],
+    ],
+  );
+});
+test("후보 비교: 요약 문장은 얻는 것을 앞에, 포기하는 것을 뒤에 쓰고 차이가 없는 지표는 뺀다", () => {
+  const sum = (o) => lib.summarizeMetricDiff(lib.metricDiff(CMP_BASE, { ...CMP_BASE, ...o }));
+  assertEqual(sum({ sessions: 9, travelCount: 3, idleMinutes: 30 }), "빈 시간 -60분 대신 수업 -1 / 이동 +1");
+  assertEqual(sum({ idleMinutes: 30 }), "빈 시간 -60분 (나빠지는 지표 없음)");
+  assertEqual(sum({ workDays: 5 }), "나아지는 지표 없이 근무일 +1일");
+  assertEqual(sum({}), "지표는 모두 같고 배치만 다릅니다");
+});
+test("배정 차이: 회원별 요일·시작 시각·지점 변경과 배정↔미배정, 수업 추가·빠짐을 구분한다", () => {
+  const s = (memberId, day, startSlot, locationId) => ({ memberId, day, startSlot, locationId });
+  const base = { assigned: [s("A", 0, 0, "L1"), s("A", 2, 6, "L1"), s("B", 1, 0, "L1"), s("C", 0, 12, "L2"), s("D", 3, 0, "L1"), s("E", 0, 6, "L1")] };
+  const other = { assigned: [s("A", 2, 6, "L1"), s("A", 4, 3, "L2"), s("B", 1, 9, "L1"), s("D", 3, 0, "L1"), s("D", 4, 0, "L1"), s("F", 1, 6, "L1"), s("E", 0, 6, "L1")] };
+  const { members, counts } = lib.assignmentDiff(base, other);
+  assertEqual(
+    members.map((m) => [m.memberId, m.status, m.changes.map((c) => [c.from && c.from.day, c.to && c.to.day, c.dayChanged, c.startChanged, c.locationChanged])]),
+    [
+      ["A", "moved", [[0, 4, true, true, true]]], // 수요일 수업은 그대로, 월 → 금(시각·지점도 바뀜)
+      ["B", "moved", [[1, 1, false, true, false]]],
+      ["C", "unassigned", [[0, null, false, false, false]]],
+      ["D", "moved", [[null, 4, false, false, false]]], // 수업 추가
+      ["F", "assigned", [[null, 1, false, false, false]]],
+    ],
+  );
+  assertEqual(counts, { changedMembers: 5, dayChanges: 1, startChanges: 2, locationChanges: 1, newlyAssigned: 1, newlyUnassigned: 1, sessionsAdded: 2, sessionsRemoved: 1 });
+});
+test("배정 차이: 세션 순서만 다르고 배정이 같으면 변화가 없고, 같은 요일 안의 이동은 요일 변경이 아니다", () => {
+  const s = (memberId, day, startSlot, locationId) => ({ memberId, day, startSlot, locationId });
+  const base = { assigned: [s("A", 0, 0, "L1"), s("A", 2, 0, "L1")] };
+  assertEqual(lib.assignmentDiff(base, { assigned: base.assigned.slice().reverse() }).members, []);
+  const moved = lib.assignmentDiff(base, { assigned: [s("A", 2, 3, "L1"), s("A", 0, 0, "L1")] });
+  assertEqual(moved.counts.dayChanges, 0);
+  assertEqual(moved.counts.startChanges, 1);
+});
+
 /* ---------------- schedule3.js: 입력이 바뀌면 후보(수정 후보 포함)를 무효화 ---------------- */
 // 생성 당시 입력과 현재 입력이 다르면 사람이 수정한 후보도 남기지 않는다.
 function staleFixture(inputKey) {
