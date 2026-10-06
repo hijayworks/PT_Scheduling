@@ -1098,7 +1098,7 @@
         scale: 2,
         width: neededWidth || void 0,
         windowWidth: neededWidth || void 0,
-        ignoreElements: (el2) => el2.classList && el2.classList.contains("candidate-card-actions"),
+        ignoreElements: (el2) => el2.classList && (el2.classList.contains("candidate-card-actions") || el2.classList.contains("reopt-row")),
         // html2canvas가 repeating-linear-gradient 배경을 그리지 못하고 흰 배경으로 남기는 문제가
         // 있어(이동 시간 블록·제외 회원 블록에 사용 중), 캡처용 복제 문서에서만 무늬를 대표하는
         // 단색으로 바꿔치기한다. 화면에 실제로 보이는 원본 요소는 건드리지 않는다.
@@ -2904,10 +2904,73 @@
       summarizeMetricDiff(diff)
     );
     container.appendChild(summary);
+    appendMetricTable(container, base, other, diff, "추천 대비");
+    appendAssignmentDiff(container, base, other);
+  }
+  function renderReoptimizeProposal(container, p) {
+    container.innerHTML = "";
+    container.hidden = false;
+    const head = el("div", "candidate-compare-head");
+    head.appendChild(el("h3", "candidate-compare-title", "재최적화 제안"));
+    container.appendChild(head);
+    const { counts } = assignmentDiff(p.current.result, p.proposal.result);
+    container.appendChild(
+      el(
+        "p",
+        "candidate-compare-summary",
+        `유지할 수업 ${p.keptCount}개는 그대로 두고 나머지 일정을 다시 짰습니다. 회원 ${counts.changedMembers}명의 일정이 바뀝니다. 적용하기 전까지 지금 카드는 바뀌지 않습니다.`
+      )
+    );
+    const diff = metricDiff(p.current.metrics, p.proposal.metrics);
+    const list = (effect) => diff.filter((d) => d.effect === effect).map((d) => formatDelta(d.key, d.delta)).join(" / ") || "없음";
+    const gains = el("p", "reopt-effect reopt-better");
+    gains.append(el("b", null, "좋아지는 것 "), list("better"));
+    const losses = el("p", "reopt-effect reopt-worse");
+    losses.append(el("b", null, "나빠지는 것 "), list("worse"));
+    container.append(gains, losses);
+    if (p.variantCount > 1) {
+      const pager = el("div", "candidate-pool-pager");
+      const btn = (label, idx) => {
+        const b = el("button", "btn btn-ghost reopt-variant-btn", label);
+        b.type = "button";
+        b.disabled = idx < 0 || idx >= p.variantCount;
+        b.addEventListener("click", () => p.onVariant(idx));
+        return b;
+      };
+      pager.append(
+        btn("이전 배치", p.variantIdx - 1),
+        el(
+          "span",
+          "pool-pager-label",
+          `같은 품질의 배치 ${p.variantIdx + 1}/${p.variantCount}`
+        ),
+        btn("다음 배치", p.variantIdx + 1)
+      );
+      container.appendChild(pager);
+    }
+    appendMetricTable(
+      container,
+      { ...p.current, label: "지금 카드" },
+      { ...p.proposal, label: "제안" },
+      diff,
+      "지금 대비"
+    );
+    appendAssignmentDiff(container, p.current, p.proposal);
+    const actions = el("div", "reopt-actions");
+    const apply = el("button", "btn btn-primary reopt-apply", "적용");
+    apply.type = "button";
+    apply.addEventListener("click", p.onApply);
+    const discard = el("button", "btn btn-ghost reopt-discard", "버리기");
+    discard.type = "button";
+    discard.addEventListener("click", p.onDiscard);
+    actions.append(apply, discard);
+    container.appendChild(actions);
+  }
+  function appendMetricTable(container, base, other, diff, deltaHeader) {
     const table = el("table", "candidate-compare-table");
     const thead = el("thead");
     const hr = el("tr");
-    ["지표", base.label, other.label, "추천 대비"].forEach(
+    ["지표", base.label, other.label, deltaHeader].forEach(
       (t) => hr.appendChild(el("th", null, t))
     );
     thead.appendChild(hr);
@@ -2931,6 +2994,8 @@
     const tableWrap = el("div", "candidate-compare-table-wrap");
     tableWrap.appendChild(table);
     container.appendChild(tableWrap);
+  }
+  function appendAssignmentDiff(container, base, other) {
     const { members, counts } = assignmentDiff(base.result, other.result);
     container.appendChild(el("h4", "candidate-compare-subtitle", "배정 차이"));
     const countText = [
@@ -5022,7 +5087,7 @@
     };
   }
   function selectReoptimization(current, results, pins) {
-    const stats = { results: results.length, missingPins: 0, hardViolations: 0 };
+    const stats = { results: results.length, missingPins: 0, hardViolations: 0, fewerSessions: 0 };
     const passed = results.filter((r) => {
       if (missingPins(r.assigned, pins).length) return stats.missingPins++, false;
       if (scheduleViolations(r).length) return stats.hardViolations++, false;
@@ -5031,14 +5096,20 @@
     stats.passed = passed.length;
     const none = (reason) => ({ status: "no-better", reason, proposal: null, variants: [], stats });
     if (!passed.length) return none("none");
-    const best = passed.reduce((x, y) => isSchedule2ResultBetter(y, x) ? y : x);
-    if (!isSchedule2ResultBetter(best, current)) {
-      if (isSchedule2ResultBetter(current, best)) return none("worse");
+    const keepsSessions = (r) => r.unassignedMembers.length <= current.unassignedMembers.length && r.assigned.length >= current.assigned.length;
+    const eligible = passed.filter(keepsSessions);
+    stats.fewerSessions = passed.length - eligible.length;
+    const bestIn = (list) => list.reduce((x, y) => isSchedule2ResultBetter(y, x) ? y : x);
+    const best = eligible.length ? bestIn(eligible) : null;
+    if (!best || !isSchedule2ResultBetter(best, current)) {
+      if (passed.some((r) => !keepsSessions(r) && isSchedule2ResultBetter(r, current)))
+        return none("fewer-sessions");
+      if (!best || isSchedule2ResultBetter(current, best)) return none("worse");
       const cur = layoutSignature(current);
-      return none(passed.some((r) => layoutSignature(r) === cur) ? "same-layout" : "equal-quality");
+      return none(eligible.some((r) => layoutSignature(r) === cur) ? "same-layout" : "equal-quality");
     }
     const seen = /* @__PURE__ */ new Set();
-    const group = passed.filter((r) => !isSchedule2ResultBetter(best, r)).filter((r) => {
+    const group = eligible.filter((r) => !isSchedule2ResultBetter(best, r)).filter((r) => {
       const sig = layoutSignature(r);
       return !seen.has(sig) && seen.add(sig);
     }).map((result) => ({ result, metrics: scheduleMetrics(result) })).sort(byTravelThenSignature);
@@ -6929,6 +7000,7 @@
   function snapshotContainer(container) {
     return {
       assigned: container.assigned.map((a) => ({ ...a })),
+      unassignedMembers: (container.unassignedMembers || []).slice(),
       confirmedIds: (container.confirmedIds || []).slice()
     };
   }
@@ -6947,6 +7019,7 @@
     if (!stack || stack.length === 0) return;
     const snapshot = stack.pop();
     container.assigned = snapshot.assigned;
+    container.unassignedMembers = snapshot.unassignedMembers;
     container.confirmedIds = snapshot.confirmedIds;
     saveState();
     onDone();
@@ -7515,21 +7588,24 @@
     },
     onChanged: onSchedule3SelectionChanged
   });
-  async function generateSchedule3Async(onProgress) {
+  async function generateSchedule3Async(onProgress, pins = []) {
     const excludedIds3 = state.excludedMemberIds3;
     const onceLimitIds3 = state.onceLimitedMemberIds3;
     const v1Built = await withSelectionOverride(
       excludedIds3,
       onceLimitIds3,
       () => generateCandidatesAsync(
-        (progress) => onProgress(progress * 0.5, "후보 탐색")
+        (progress) => onProgress(progress * 0.5, "후보 탐색"),
+        {},
+        pins
       )
     );
     const v2Result = await withSelectionOverride(
       excludedIds3,
       onceLimitIds3,
       () => generateSchedule2Async(
-        (progress) => onProgress(0.5 + progress * 0.5, "비교·최적화")
+        (progress) => onProgress(0.5 + progress * 0.5, "비교·최적화"),
+        { pins }
       )
     );
     onProgress(1, "후보 정리");
@@ -7633,9 +7709,12 @@
     candidates3El.innerHTML = "";
     candidateCompare3El.hidden = true;
     candidateCompare3El.innerHTML = "";
+    reoptimize3El.hidden = true;
+    reoptimize3El.innerHTML = "";
     const gridRange = businessHoursGridRange();
     const { cards } = selectCandidates(candidatePoolEntries());
     if (cards.length === 0) {
+      reoptProposal = null;
       const card = document.createElement("div");
       card.className = "candidate-card candidate-card-placeholder";
       const hint = document.createElement("p");
@@ -7670,6 +7749,9 @@
       });
     });
     if (promoted) saveState();
+    renderReoptimizeProposal3(
+      [...shown.values()].filter((x) => x.card.role === "edited").map((x) => x.entry.result)
+    );
     const rec = [...shown.values()].find((x) => x.card.role === "recommended");
     const target = shown.get(compareCardKey);
     if (rec && target && target !== rec) {
@@ -7742,7 +7824,7 @@
       const undoManualBtn = makeIconBtn(
         '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>',
         "편집 취소",
-        "방금 드래그로 옮기거나 맞바꾸거나 교체·확정한 것을 취소합니다."
+        "방금 드래그로 옮기거나 맞바꾸거나 교체·확정하거나 재최적화를 적용한 것을 취소합니다."
       );
       undoManualBtn.disabled = !hasManualUndo(result);
       undoManualBtn.addEventListener("click", () => {
@@ -7767,6 +7849,22 @@
       descEl.className = "candidate-desc";
       descEl.textContent = desc;
       card.appendChild(descEl);
+      const keptCount = c.role === "edited" ? pinsFromResult(result).length : 0;
+      if (keptCount > 0) {
+        const row = document.createElement("div");
+        row.className = "reopt-row";
+        const reoptBtn = document.createElement("button");
+        reoptBtn.type = "button";
+        reoptBtn.className = "btn btn-ghost btn-small reopt-btn";
+        reoptBtn.textContent = "나머지 일정 다시 최적화";
+        reoptBtn.disabled = runtime.generationInProgress;
+        reoptBtn.addEventListener("click", () => runReoptimize3(result));
+        const hint = document.createElement("span");
+        hint.className = "reopt-hint";
+        hint.textContent = "옮기거나 확정한 유지할 수업 " + keptCount + "개는 그대로 둡니다.";
+        row.append(reoptBtn, hint);
+        card.appendChild(row);
+      }
       if (c.variants.length > 1) {
         const pager = document.createElement("div");
         pager.className = "candidate-pool-pager";
@@ -7913,6 +8011,160 @@
       candidates3El.appendChild(card);
     }
   }
+  function startGenerationProgress(label, cancelLabel) {
+    generateBtn3El.disabled = true;
+    generateBtn3El.classList.add("loading");
+    generateBtn3LabelEl.textContent = label;
+    generateProgressWrap3El.hidden = false;
+    generateProgressFill3El.className = "generate-progress-fill progress-pct-0";
+    generateProgressText3El.textContent = "후보 탐색 0%";
+    generateProgressWrap3El.setAttribute("aria-valuenow", "0");
+    generateBtn3CancelEl.hidden = false;
+    generateBtn3CancelEl.disabled = false;
+    generateBtn3CancelEl.textContent = cancelLabel;
+  }
+  function showGenerationProgress(progress, phase) {
+    const pct = Math.round(progress * 100);
+    generateProgressFill3El.className = "generate-progress-fill progress-pct-" + pct;
+    generateProgressText3El.textContent = phase + " " + pct + "%";
+    generateProgressWrap3El.setAttribute("aria-valuenow", String(pct));
+  }
+  function endGenerationProgress() {
+    generateBtn3El.disabled = false;
+    generateBtn3El.classList.remove("loading");
+    generateBtn3LabelEl.textContent = GENERATE3_IDLE_LABEL;
+    generateProgressWrap3El.hidden = true;
+    generateBtn3CancelEl.hidden = true;
+    runtime.generationInProgress = false;
+    runtime.generationCancelRequested = false;
+    releaseWakeLock();
+  }
+  var reoptimize3El = document.getElementById("reoptimize3");
+  var reoptProposal = null;
+  var editStateSig = (r) => layoutSignature(r) + "#" + (r.confirmedIds || []).slice().sort().join(",");
+  function renderReoptimizeProposal3(editedResults) {
+    const p = reoptProposal;
+    if (!p) return;
+    if (!editedResults.includes(p.target) || editStateSig(p.target) !== p.targetSig) {
+      reoptProposal = null;
+      return;
+    }
+    const side = (result) => ({ result, metrics: scheduleMetrics(result) });
+    renderReoptimizeProposal(reoptimize3El, {
+      current: side(p.target),
+      proposal: p.variants[p.variantIdx],
+      keptCount: p.keptCount,
+      variantIdx: p.variantIdx,
+      variantCount: p.variants.length,
+      onVariant: (idx) => {
+        p.variantIdx = idx;
+        renderSchedule3Result();
+      },
+      onApply: applyReoptimization,
+      onDiscard: () => {
+        reoptProposal = null;
+        renderSchedule3Result();
+        showToast("재최적화 제안을 버렸습니다", "info");
+      }
+    });
+  }
+  function applyReoptimization() {
+    const p = reoptProposal;
+    if (!p) return;
+    const chosen = p.variants[p.variantIdx].result;
+    const pinned = new Set(pinsFromResult(p.target).map(pinKey));
+    pushManualUndo(p.target);
+    p.target.assigned = chosen.assigned.map((a) => ({ ...a }));
+    p.target.unassignedMembers = chosen.unassignedMembers.slice();
+    p.target.confirmedIds = p.target.assigned.filter((a) => pinned.has(pinKey(a))).map((a) => a.id);
+    reoptProposal = null;
+    saveState();
+    renderSchedule3Result();
+    showToast(
+      "재최적화 제안을 적용했습니다. 편집 취소로 되돌릴 수 있습니다.",
+      "success"
+    );
+  }
+  var REOPT_NO_BETTER = {
+    "fewer-sessions": "수업 수를 줄이지 않고는 지금보다 나은 배치를 찾지 못했습니다. 지금 카드를 그대로 둡니다.",
+    default: "지금보다 나은 배치를 찾지 못했습니다. 지금 카드를 그대로 둡니다."
+  };
+  async function runReoptimize3(target) {
+    if (runtime.generationInProgress) {
+      showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
+      return;
+    }
+    if (dropStaleCandidates()) return;
+    const pins = pinsFromResult(target);
+    const sel = [state.excludedMemberIds3, state.onceLimitedMemberIds3];
+    const violations = await withSelectionOverride(
+      ...sel,
+      () => scheduleViolations(target)
+    );
+    if (pins.length === 0 || violations.length) {
+      generateHint3El.textContent = violations.length ? "이 카드에 규칙 위반이 있어 다시 최적화할 수 없습니다: " + violations[0].message : "유지할 수업이 없어 다시 최적화할 수 없습니다.";
+      return;
+    }
+    reoptProposal = null;
+    generateHint3El.textContent = "";
+    runtime.generationInProgress = true;
+    runtime.generationCancelRequested = false;
+    const inputKey = candidateInputKey();
+    const targetSig = editStateSig(target);
+    renderSchedule3Result();
+    startGenerationProgress("나머지 일정 다시 최적화 중...", "다시 최적화 취소");
+    generateProgressWrap3El.scrollIntoView({
+      behavior: "smooth",
+      block: "center"
+    });
+    await acquireWakeLock();
+    try {
+      const g = await generateSchedule3Async(showGenerationProgress, pins);
+      const results = [g.candidateB, g.candidateC].concat(
+        Object.values(g.poolsBC).flat(),
+        g.candidateAList,
+        g.candidateAPools.flat()
+      ).filter(Boolean);
+      if (candidateInputKey() !== inputKey) {
+        dropStaleCandidates();
+        return;
+      }
+      if (editStateSig(target) !== targetSig) {
+        generateHint3El.textContent = "다시 최적화하는 동안 카드가 바뀌어 결과를 버렸습니다. 다시 시도해주세요.";
+        return;
+      }
+      const out = await withSelectionOverride(
+        ...sel,
+        () => selectReoptimization(target, results, pins)
+      );
+      if (out.status !== "improved") {
+        generateHint3El.textContent = REOPT_NO_BETTER[out.reason] || REOPT_NO_BETTER.default;
+        showToast("더 나은 배치를 찾지 못했습니다", "info");
+        return;
+      }
+      reoptProposal = {
+        target,
+        targetSig,
+        keptCount: pins.length,
+        variants: out.variants,
+        variantIdx: 0
+      };
+      showToast("재최적화 제안을 확인해주세요", "success");
+    } catch (err) {
+      if (err instanceof GenerationCancelledError) {
+        showToast("다시 최적화를 취소했습니다", "info");
+      } else {
+        console.error(err);
+        generateHint3El.textContent = "다시 최적화 중 오류가 발생했습니다. 다시 시도해주세요.";
+        showToast("다시 최적화에 실패했습니다", "danger");
+      }
+    } finally {
+      endGenerationProgress();
+      renderSchedule3Result();
+      if (!reoptimize3El.hidden)
+        reoptimize3El.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
   async function runGenerate3() {
     if (runtime.generationInProgress) {
       showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
@@ -7937,16 +8189,7 @@
     const inputKey = candidateInputKey();
     const prevCandidateAList = runtime.schedule3Result.candidateAList;
     const prevCandidates = runtime.candidates;
-    generateBtn3El.disabled = true;
-    generateBtn3El.classList.add("loading");
-    generateBtn3LabelEl.textContent = "후보 생성 중...";
-    generateProgressWrap3El.hidden = false;
-    generateProgressFill3El.className = "generate-progress-fill progress-pct-0";
-    generateProgressText3El.textContent = "후보 탐색 0%";
-    generateProgressWrap3El.setAttribute("aria-valuenow", "0");
-    generateBtn3CancelEl.hidden = false;
-    generateBtn3CancelEl.disabled = false;
-    generateBtn3CancelEl.textContent = "생성 취소";
+    startGenerationProgress("후보 생성 중...", "생성 취소");
     await acquireWakeLock();
     try {
       let pickCandidateASlot = function(prev, freshResult, freshPool) {
@@ -7973,12 +8216,7 @@
         }
         return { candidate: prev, pool: null };
       };
-      const result = await generateSchedule3Async((progress, phase) => {
-        const pct = Math.round(progress * 100);
-        generateProgressFill3El.className = "generate-progress-fill progress-pct-" + pct;
-        generateProgressText3El.textContent = phase + " " + pct + "%";
-        generateProgressWrap3El.setAttribute("aria-valuenow", String(pct));
-      });
+      const result = await generateSchedule3Async(showGenerationProgress);
       const candidateAList = [];
       for (let i = 0; i < SCHEDULE2_CARD_COUNT; i++) {
         const prev = prevCandidateAList[i] || null;
@@ -8023,14 +8261,7 @@
         showToast("후보 생성에 실패했습니다", "danger");
       }
     } finally {
-      generateBtn3El.disabled = false;
-      generateBtn3El.classList.remove("loading");
-      generateBtn3LabelEl.textContent = GENERATE3_IDLE_LABEL;
-      generateProgressWrap3El.hidden = true;
-      generateBtn3CancelEl.hidden = true;
-      runtime.generationInProgress = false;
-      runtime.generationCancelRequested = false;
-      releaseWakeLock();
+      endGenerationProgress();
     }
   }
   generateBtn3El.addEventListener("click", () => runGenerate3());

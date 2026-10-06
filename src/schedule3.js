@@ -30,7 +30,10 @@ import {
 import { withSelectionOverride } from "./selectionOverride.js";
 import { renderGrid } from "./grid.js";
 import { saveCandidateCardAsImage } from "./imageExport.js";
-import { renderCandidateCompare } from "./candidateCompare.js";
+import {
+  renderCandidateCompare,
+  renderReoptimizeProposal,
+} from "./candidateCompare.js";
 import {
   generateCandidatesAsync,
   candidatePools,
@@ -61,7 +64,9 @@ import {
   layoutSignature,
   qualityKey,
   formatTradeoff,
+  selectReoptimization,
 } from "./engine/candidateSelection.js";
+import { pinKey, pinsFromResult } from "./engine/pins.js";
 import {
   renderRequestList,
   setActiveScheduleMemberId,
@@ -162,7 +167,7 @@ export function eligibleSwapMembersFor(container, req) {
 }
 
 // 드래그 이동·자리 맞바꾸기·인원 교체·확정 등 "수동 편집" 하나를 취소할 수 있도록, 편집
-// 직전의 assigned/confirmedIds 스냅샷을 후보 객체(container)별로 최대 20개까지 쌓아둔다.
+// 직전의 assigned/unassignedMembers/confirmedIds 스냅샷을 후보 객체(container)별로 최대 20개까지 쌓아둔다.
 // WeakMap을 써서 container 객체(저장 슬롯의 결과) 자체를 키로 삼으므로, 다시 생성해 그 자리의
 // container 객체가 통째로 새로 만들어지면 자연스럽게 새 빈 되돌리기 이력에서 다시 시작한다.
 // 저장하지 않으므로 새로고침하면 초기화된다.
@@ -171,6 +176,7 @@ export const MANUAL_UNDO_LIMIT = 20;
 export function snapshotContainer(container) {
   return {
     assigned: container.assigned.map((a) => ({ ...a })),
+    unassignedMembers: (container.unassignedMembers || []).slice(),
     confirmedIds: (container.confirmedIds || []).slice(),
   };
 }
@@ -189,6 +195,7 @@ export function undoManualEdit(container, onDone) {
   if (!stack || stack.length === 0) return;
   const snapshot = stack.pop();
   container.assigned = snapshot.assigned;
+  container.unassignedMembers = snapshot.unassignedMembers;
   container.confirmedIds = snapshot.confirmedIds;
   saveState();
   onDone();
@@ -951,20 +958,24 @@ export const excluded3Widget = createMemberSelectionWidget({
 // 않도록 runtime.generationInProgress 가드로 막는다.
 // onProgress(진행률 0~1, 단계 이름): 앞 절반은 그리디 탐색("후보 탐색"), 뒤 절반은 체인 DP 다듬기
 // ("비교·최적화")다. 사용자에게는 엔진 이름 대신 단계 이름만 보여준다.
-export async function generateSchedule3Async(onProgress) {
+// pins: 재최적화의 고정 세션(engine/pins.js) — 두 엔진 모두 그 자리를 그대로 두고 나머지만 짠다.
+export async function generateSchedule3Async(onProgress, pins = []) {
   const excludedIds3 = state.excludedMemberIds3;
   const onceLimitIds3 = state.onceLimitedMemberIds3;
   const v1Built = await withSelectionOverride(excludedIds3, onceLimitIds3, () =>
-    generateCandidatesAsync((progress) =>
-      onProgress(progress * 0.5, "후보 탐색"),
+    generateCandidatesAsync(
+      (progress) => onProgress(progress * 0.5, "후보 탐색"),
+      {},
+      pins,
     ),
   );
   const v2Result = await withSelectionOverride(
     excludedIds3,
     onceLimitIds3,
     () =>
-      generateSchedule2Async((progress) =>
-        onProgress(0.5 + progress * 0.5, "비교·최적화"),
+      generateSchedule2Async(
+        (progress) => onProgress(0.5 + progress * 0.5, "비교·최적화"),
+        { pins },
       ),
   );
   onProgress(1, "후보 정리");
@@ -1101,10 +1112,13 @@ export function renderSchedule3Result() {
   candidates3El.innerHTML = "";
   candidateCompare3El.hidden = true;
   candidateCompare3El.innerHTML = "";
+  reoptimize3El.hidden = true;
+  reoptimize3El.innerHTML = "";
   const gridRange = businessHoursGridRange();
   const { cards } = selectCandidates(candidatePoolEntries());
 
   if (cards.length === 0) {
+    reoptProposal = null;
     const card = document.createElement("div");
     card.className = "candidate-card candidate-card-placeholder";
     const hint = document.createElement("p");
@@ -1146,6 +1160,11 @@ export function renderSchedule3Result() {
     });
   });
   if (promoted) saveState();
+  renderReoptimizeProposal3(
+    [...shown.values()]
+      .filter((x) => x.card.role === "edited")
+      .map((x) => x.entry.result),
+  );
   const rec = [...shown.values()].find((x) => x.card.role === "recommended");
   const target = shown.get(compareCardKey);
   if (rec && target && target !== rec) {
@@ -1225,11 +1244,11 @@ export function renderSchedule3Result() {
       b.innerHTML = iconSvg;
       return b;
     }
-    // 드래그 이동·자리 맞바꾸기·인원 교체·확정 등 "방금 한 조정 하나"만 되돌린다.
+    // 드래그 이동·자리 맞바꾸기·인원 교체·확정·재최적화 적용 등 "방금 한 조정 하나"만 되돌린다.
     const undoManualBtn = makeIconBtn(
       '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>',
       "편집 취소",
-      "방금 드래그로 옮기거나 맞바꾸거나 교체·확정한 것을 취소합니다.",
+      "방금 드래그로 옮기거나 맞바꾸거나 교체·확정하거나 재최적화를 적용한 것을 취소합니다.",
     );
     undoManualBtn.disabled = !hasManualUndo(result);
     undoManualBtn.addEventListener("click", () => {
@@ -1255,6 +1274,23 @@ export function renderSchedule3Result() {
     descEl.className = "candidate-desc";
     descEl.textContent = desc;
     card.appendChild(descEl);
+    const keptCount = c.role === "edited" ? pinsFromResult(result).length : 0;
+    if (keptCount > 0) {
+      const row = document.createElement("div");
+      row.className = "reopt-row";
+      const reoptBtn = document.createElement("button");
+      reoptBtn.type = "button";
+      reoptBtn.className = "btn btn-ghost btn-small reopt-btn";
+      reoptBtn.textContent = "나머지 일정 다시 최적화";
+      reoptBtn.disabled = runtime.generationInProgress;
+      reoptBtn.addEventListener("click", () => runReoptimize3(result));
+      const hint = document.createElement("span");
+      hint.className = "reopt-hint";
+      hint.textContent =
+        "옮기거나 확정한 유지할 수업 " + keptCount + "개는 그대로 둡니다.";
+      row.append(reoptBtn, hint);
+      card.appendChild(row);
+    }
 
     // 배치 페이저: 품질 지표가 같지만 회원·요일·지점 배정이 다른 배치(variant)를 넘겨 본다.
     if (c.variants.length > 1) {
@@ -1426,6 +1462,188 @@ export function renderSchedule3Result() {
   }
 }
 
+// 생성·재최적화 공통 진행 표시. 취소 버튼은 runtime.generationCancelRequested를 켠다.
+function startGenerationProgress(label, cancelLabel) {
+  generateBtn3El.disabled = true;
+  generateBtn3El.classList.add("loading");
+  generateBtn3LabelEl.textContent = label;
+  generateProgressWrap3El.hidden = false;
+  generateProgressFill3El.className = "generate-progress-fill progress-pct-0";
+  generateProgressText3El.textContent = "후보 탐색 0%";
+  generateProgressWrap3El.setAttribute("aria-valuenow", "0");
+  generateBtn3CancelEl.hidden = false;
+  generateBtn3CancelEl.disabled = false;
+  generateBtn3CancelEl.textContent = cancelLabel;
+}
+function showGenerationProgress(progress, phase) {
+  const pct = Math.round(progress * 100);
+  generateProgressFill3El.className =
+    "generate-progress-fill progress-pct-" + pct;
+  generateProgressText3El.textContent = phase + " " + pct + "%";
+  generateProgressWrap3El.setAttribute("aria-valuenow", String(pct));
+}
+function endGenerationProgress() {
+  generateBtn3El.disabled = false;
+  generateBtn3El.classList.remove("loading");
+  generateBtn3LabelEl.textContent = GENERATE3_IDLE_LABEL;
+  generateProgressWrap3El.hidden = true;
+  generateBtn3CancelEl.hidden = true;
+  runtime.generationInProgress = false;
+  runtime.generationCancelRequested = false;
+  releaseWakeLock();
+}
+
+// 재최적화(5a) 제안 — 세션 한정, 저장하지 않는다. 적용하기 전까지 수정 카드(target)는 바꾸지 않는다.
+// { target, targetSig, keptCount, variants, variantIdx }. target이 화면에서 사라지거나(무효화·초기화)
+// 계산 뒤에 바뀌었으면(편집·되돌리기) 제안은 버린다.
+export const reoptimize3El = document.getElementById("reoptimize3");
+let reoptProposal = null;
+const editStateSig = (r) =>
+  layoutSignature(r) + "#" + (r.confirmedIds || []).slice().sort().join(",");
+
+function renderReoptimizeProposal3(editedResults) {
+  const p = reoptProposal;
+  if (!p) return;
+  if (
+    !editedResults.includes(p.target) ||
+    editStateSig(p.target) !== p.targetSig
+  ) {
+    reoptProposal = null;
+    return;
+  }
+  const side = (result) => ({ result, metrics: scheduleMetrics(result) });
+  renderReoptimizeProposal(reoptimize3El, {
+    current: side(p.target),
+    proposal: p.variants[p.variantIdx],
+    keptCount: p.keptCount,
+    variantIdx: p.variantIdx,
+    variantCount: p.variants.length,
+    onVariant: (idx) => {
+      p.variantIdx = idx;
+      renderSchedule3Result();
+    },
+    onApply: applyReoptimization,
+    onDiscard: () => {
+      reoptProposal = null;
+      renderSchedule3Result();
+      showToast("재최적화 제안을 버렸습니다", "info");
+    },
+  });
+}
+
+// 제안을 수정 카드에 반영한다: 이전 상태를 수동 편집 되돌리기 스택에 넣어 기존 "편집 취소"로 원복할
+// 수 있다. 유지한 수업(고정)은 제안에서도 같은 자리이므로 그 세션들을 계속 확정 상태로 둔다.
+export function applyReoptimization() {
+  const p = reoptProposal;
+  if (!p) return;
+  const chosen = p.variants[p.variantIdx].result;
+  const pinned = new Set(pinsFromResult(p.target).map(pinKey));
+  pushManualUndo(p.target);
+  p.target.assigned = chosen.assigned.map((a) => ({ ...a }));
+  p.target.unassignedMembers = chosen.unassignedMembers.slice();
+  p.target.confirmedIds = p.target.assigned
+    .filter((a) => pinned.has(pinKey(a)))
+    .map((a) => a.id);
+  reoptProposal = null;
+  saveState();
+  renderSchedule3Result();
+  showToast(
+    "재최적화 제안을 적용했습니다. 편집 취소로 되돌릴 수 있습니다.",
+    "success",
+  );
+}
+
+const REOPT_NO_BETTER = {
+  "fewer-sessions":
+    "수업 수를 줄이지 않고는 지금보다 나은 배치를 찾지 못했습니다. 지금 카드를 그대로 둡니다.",
+  default: "지금보다 나은 배치를 찾지 못했습니다. 지금 카드를 그대로 둡니다.",
+};
+
+// 수정 카드(target)의 옮기거나 확정한 수업(pinsFromResult)은 그대로 두고 나머지를 다시 생성해,
+// selectReoptimization이 고른 제안을 미리보기로 보여준다. 다른 후보 슬롯과 target은 바꾸지 않는다.
+export async function runReoptimize3(target) {
+  if (runtime.generationInProgress) {
+    showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
+    return;
+  }
+  if (dropStaleCandidates()) return;
+  const pins = pinsFromResult(target);
+  const sel = [state.excludedMemberIds3, state.onceLimitedMemberIds3];
+  const violations = await withSelectionOverride(...sel, () =>
+    scheduleViolations(target),
+  );
+  if (pins.length === 0 || violations.length) {
+    generateHint3El.textContent = violations.length
+      ? "이 카드에 규칙 위반이 있어 다시 최적화할 수 없습니다: " +
+        violations[0].message
+      : "유지할 수업이 없어 다시 최적화할 수 없습니다.";
+    return;
+  }
+  reoptProposal = null;
+  generateHint3El.textContent = "";
+  runtime.generationInProgress = true;
+  runtime.generationCancelRequested = false;
+  const inputKey = candidateInputKey();
+  const targetSig = editStateSig(target);
+  renderSchedule3Result();
+  startGenerationProgress("나머지 일정 다시 최적화 중...", "다시 최적화 취소");
+  generateProgressWrap3El.scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+  });
+  await acquireWakeLock();
+  try {
+    const g = await generateSchedule3Async(showGenerationProgress, pins);
+    const results = [g.candidateB, g.candidateC]
+      .concat(
+        Object.values(g.poolsBC).flat(),
+        g.candidateAList,
+        g.candidateAPools.flat(),
+      )
+      .filter(Boolean);
+    if (candidateInputKey() !== inputKey) {
+      dropStaleCandidates();
+      return;
+    }
+    if (editStateSig(target) !== targetSig) {
+      generateHint3El.textContent =
+        "다시 최적화하는 동안 카드가 바뀌어 결과를 버렸습니다. 다시 시도해주세요.";
+      return;
+    }
+    const out = await withSelectionOverride(...sel, () =>
+      selectReoptimization(target, results, pins),
+    );
+    if (out.status !== "improved") {
+      generateHint3El.textContent =
+        REOPT_NO_BETTER[out.reason] || REOPT_NO_BETTER.default;
+      showToast("더 나은 배치를 찾지 못했습니다", "info");
+      return;
+    }
+    reoptProposal = {
+      target,
+      targetSig,
+      keptCount: pins.length,
+      variants: out.variants,
+      variantIdx: 0,
+    };
+    showToast("재최적화 제안을 확인해주세요", "success");
+  } catch (err) {
+    if (err instanceof GenerationCancelledError) {
+      showToast("다시 최적화를 취소했습니다", "info");
+    } else {
+      console.error(err);
+      generateHint3El.textContent =
+        "다시 최적화 중 오류가 발생했습니다. 다시 시도해주세요.";
+      showToast("다시 최적화에 실패했습니다", "danger");
+    }
+  } finally {
+    endGenerationProgress();
+    renderSchedule3Result();
+    if (!reoptimize3El.hidden)
+      reoptimize3El.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+}
+
 // 후보 생성: 그리디 탐색과 체인 DP 다듬기를 모두 돌려 저장 슬롯(후보 풀)을 새로 채운다. 사용자가
 // 손댄 슬롯(keepsUserEditedSlot)은 덮어쓰지 않는다. 체인 DP 슬롯은 다듬기가 시간 예산제라 매번
 // 미세하게 달라지므로, 새 결과가 이전 결과보다 못하면 이전 결과를 지킨다(데이터가 그대로일 때 다시
@@ -1458,26 +1676,11 @@ export async function runGenerate3() {
   const prevCandidateAList = runtime.schedule3Result.candidateAList;
   const prevCandidates = runtime.candidates;
 
-  generateBtn3El.disabled = true;
-  generateBtn3El.classList.add("loading");
-  generateBtn3LabelEl.textContent = "후보 생성 중...";
-  generateProgressWrap3El.hidden = false;
-  generateProgressFill3El.className = "generate-progress-fill progress-pct-0";
-  generateProgressText3El.textContent = "후보 탐색 0%";
-  generateProgressWrap3El.setAttribute("aria-valuenow", "0");
-  generateBtn3CancelEl.hidden = false;
-  generateBtn3CancelEl.disabled = false;
-  generateBtn3CancelEl.textContent = "생성 취소";
+  startGenerationProgress("후보 생성 중...", "생성 취소");
 
   await acquireWakeLock();
   try {
-    const result = await generateSchedule3Async((progress, phase) => {
-      const pct = Math.round(progress * 100);
-      generateProgressFill3El.className =
-        "generate-progress-fill progress-pct-" + pct;
-      generateProgressText3El.textContent = phase + " " + pct + "%";
-      generateProgressWrap3El.setAttribute("aria-valuenow", String(pct));
-    });
+    const result = await generateSchedule3Async(showGenerationProgress);
     // 체인 DP 슬롯 하나(prev/fresh)를 비교해 채택할 결과와 그 풀을 정한다: 새 결과가 실제로 더
     // 나으면 새 결과·새 풀을 채택하고, 완전 동점이면 새 풀을 쓰되 prev와 서명이 같은 자리를 prev
     // 참조로 바꿔 넣는다(prev가 풀에 없으면 앞에 추가). 새 결과가 더 못하면 기존 결과·풀을
@@ -1555,14 +1758,7 @@ export async function runGenerate3() {
       showToast("후보 생성에 실패했습니다", "danger");
     }
   } finally {
-    generateBtn3El.disabled = false;
-    generateBtn3El.classList.remove("loading");
-    generateBtn3LabelEl.textContent = GENERATE3_IDLE_LABEL;
-    generateProgressWrap3El.hidden = true;
-    generateBtn3CancelEl.hidden = true;
-    runtime.generationInProgress = false;
-    runtime.generationCancelRequested = false;
-    releaseWakeLock();
+    endGenerationProgress();
   }
 }
 

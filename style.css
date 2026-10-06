@@ -1152,6 +1152,18 @@ body {
 }
 .compare-status-unassigned { background: var(--danger-soft); color: var(--danger); }
 .compare-status-assigned { background: var(--cell-available); color: var(--success); }
+/* 재최적화: 수정 카드의 실행 줄과 제안 패널(비교 패널 스타일 재사용). */
+.reopt-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 0 0 10px; }
+.reopt-btn { flex: 0 0 auto; white-space: nowrap; font-weight: 700; }
+.reopt-hint { font-size: 12px; color: var(--text-mute); }
+.reopt-proposal { margin: 0 0 16px; }
+.reopt-effect { margin: 0 0 4px; font-size: 13px; }
+.reopt-effect b { margin-right: 6px; }
+.reopt-better b { color: var(--success); }
+.reopt-worse b { color: var(--danger); }
+.reopt-proposal .candidate-pool-pager { margin: 8px 0; }
+.reopt-variant-btn { height: 28px; padding: 0 10px; font-size: 12px; }
+.reopt-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
 @media (max-width: 480px) {
   .candidate-compare { padding: 12px 10px; }
   .candidate-compare-table { font-size: 12px; }

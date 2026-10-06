@@ -1,7 +1,7 @@
 import { showToast } from "./utils.js";
 
 // 후보 카드를 이미지(PNG)로 캡처해 다운로드한다. 편집취소·이전 후보·다음 후보·저장 버튼이 모인
-// actions 영역은 스크린샷에 의미가 없으므로 ignoreElements로 제외한다.
+// actions 영역과 재최적화 실행 줄은 스크린샷에 의미가 없으므로 ignoreElements로 제외한다.
 export async function saveCandidateCardAsImage(cardEl, title) {
   if (typeof html2canvas !== "function") {
     showToast("이미지 저장 기능을 불러오지 못했습니다.", "error");
@@ -25,7 +25,9 @@ export async function saveCandidateCardAsImage(cardEl, title) {
       width: neededWidth || undefined,
       windowWidth: neededWidth || undefined,
       ignoreElements: (el) =>
-        el.classList && el.classList.contains("candidate-card-actions"),
+        el.classList &&
+        (el.classList.contains("candidate-card-actions") ||
+          el.classList.contains("reopt-row")),
       // html2canvas가 repeating-linear-gradient 배경을 그리지 못하고 흰 배경으로 남기는 문제가
       // 있어(이동 시간 블록·제외 회원 블록에 사용 중), 캡처용 복제 문서에서만 무늬를 대표하는
       // 단색으로 바꿔치기한다. 화면에 실제로 보이는 원본 요소는 건드리지 않는다.
