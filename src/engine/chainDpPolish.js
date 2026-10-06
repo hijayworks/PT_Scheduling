@@ -1,18 +1,17 @@
-import { SLOT_MIN, MAX_TRAVELS_PER_DAY } from "../constants.js";
+import { SLOT_MIN } from "../constants.js";
 import { durationToSlots } from "../utils.js";
 import { state } from "../state.js";
 import {
   memberById,
   inefficientRoundTripLocationInfo,
   soloTravelMemberIds,
-  chainBreaksSoloTravel,
 } from "../domain.js";
 import { currentExcludedIds2 } from "../selectionOverride.js";
 import {
   yieldToUI,
   checkGenerationCancelled,
   candidateLocationsForRequest,
-  dailyTravelCount,
+  dayChainViolation,
   totalTravelCount,
   dailyInefficientMoveCount,
   TRAVEL_VALUE_MINUTES,
@@ -90,19 +89,7 @@ export async function runSchedule2Pipeline(
   // (runChainDP)가 만든 체인은 DP 안에서 같은 규칙을 지킨다.
   const soloIds = soloTravelMemberIds();
   function dayChainAllowed(chain) {
-    for (let i = 1; i < chain.length; i++) {
-      const prev = chain[i - 1],
-        cur = chain[i];
-      if (
-        (cur.startSlot - prev.end) * SLOT_MIN <
-        requiredGapMin2(prev.locationId, cur.locationId)
-      )
-        return false;
-    }
-    return (
-      dailyTravelCount(chain) <= MAX_TRAVELS_PER_DAY &&
-      !chainBreaksSoloTravel(chain, soloIds)
-    );
+    return !dayChainViolation(chain, soloIds);
   }
   // 아래 다듬기 루프들(특히 담금질 기법)은 동기로 몇 초~몇십 초씩 돌면 탭이 완전히
   // 멈춰버리므로, 주기적으로 yieldToUI에 제어권을 넘겨준다. 다만 그 시간도 실제 시계

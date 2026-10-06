@@ -74,6 +74,8 @@ export {
   isUserEdited,
   keepsUserEditedSlot,
   candidatePoolEntries,
+  validateMove,
+  prepareSwap,
 } from "../../src/schedule3.js";
 export { candidateAPools, candidatePools } from "../../src/engine/greedy.js";
 

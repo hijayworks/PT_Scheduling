@@ -2,6 +2,8 @@ import {
   BLOCK_COLOR,
   SLOT_MIN,
   MAX_SESSIONS_PER_MEMBER,
+  MAX_TRAVELS_PER_DAY,
+  DAYS,
 } from "./constants.js";
 import { durationToSlots, endLabel, slotLabel, showToast } from "./utils.js";
 import {
@@ -33,7 +35,7 @@ import {
   resetCandidateSession,
   MAX_POOL_VARIANTS,
   candidateLocationsForRequest,
-  requiredGapMin,
+  dayChainViolation,
   totalTravelCount,
   totalInefficientMoveCount,
 } from "./engine/greedy.js";
@@ -240,27 +242,12 @@ export function findOccupyingAssigned(
   );
 }
 
-// 세션 하나를 (targetDay, targetStartSlot)으로 옮길 수 있는지 검사만 하고, 실제로 옮기지는
-// 않는다 — 드래그 중 실시간 유효성 표시(canMoveOrSwapTo)와 실제 커밋(moveSession) 양쪽에서
-// 똑같은 기준으로 재사용하기 위해 분리했다. ignoreIds에 담긴 배정은 "이미 자리를 비운 것"
-// 취급하여 겹침·인원 검사에서 제외한다 — 자리 맞바꾸기(prepareSwap)에서, 상대방이 내가 있던
-// 자리로 옮겨가는 중이라 그 상대방의 현재 자리는 곧 빌 것이므로 걸림돌로 치지 않기 위함이다.
-// 검증 순서: (1) 그 자리에 신청 이력이 있는지 → (2) 그 요일에 이미 이 회원의 다른 배정이
-// 없는지(1일 최대 1회) → (3) 그 자리에서 지점을 그대로 쓸 수 있는지 → (4) 앞뒤 배정과 실제로
-// 겹치지 않고 지점이 다르면 이동 시간까지 확보되는지(requiredGapMin — 단순 시간 겹침만 보면
-// 이동 시간 없이 딱 붙는 물리적으로 불가능한 배치를 허용해버린다) → (5) 이동-회원-이동 금지
-// 숨김 규칙.
-export function validateMove(
-  container,
-  req,
-  targetDay,
-  targetStartSlot,
-  ignoreIds,
-) {
+// 수동 이동 하나의 회원 단위 검사: (1) 그 자리에 신청 이력이 있는지 → (2) 그 요일에 이 회원의
+// 다른 배정이 없는지(1일 최대 1회) → (3) 그 자리에서 지점을 그대로 쓸 수 있는지. ignoreIds의
+// 배정은 "이미 자리를 비운 것"으로 친다(맞바꾸기에서 상대가 곧 비울 자리). 앞뒤 수업과의 간격 등
+// 요일 체인 규칙은 여기서 보지 않고 editedDaysViolation이 최종 결과로 검사한다.
+function planMove(container, req, targetDay, targetStartSlot, ignoreIds) {
   const ignoreSet = new Set([req.id, ...(ignoreIds || [])]);
-  if (targetDay === req.day && targetStartSlot === req.startSlot) {
-    return { ok: true, noop: true, newReq: req, locationId: req.locationId };
-  }
   const newReq = state.requests.find(
     (r) =>
       r.memberId === req.memberId &&
@@ -296,51 +283,65 @@ export function validateMove(
       message: "해당 지점에서는 이 시간을 이용할 수 없습니다",
     };
   }
-  const durSlots = durationToSlots(req.duration);
-  const dayAssigned = container.assigned
-    .filter((a) => a.day === targetDay && !ignoreSet.has(a.id))
-    .sort((a, b) => a.startSlot - b.startSlot);
-  const prevAssigned =
-    dayAssigned.filter((a) => a.startSlot < targetStartSlot).pop() || null;
-  const nextAssigned =
-    dayAssigned.find((a) => a.startSlot >= targetStartSlot) || null;
-  if (prevAssigned) {
-    const prevEnd =
-      prevAssigned.startSlot + durationToSlots(prevAssigned.duration);
-    const gapSlots =
-      requiredGapMin(prevAssigned.locationId, locationId) / SLOT_MIN;
-    if (prevEnd + gapSlots > targetStartSlot) {
-      return {
-        ok: false,
-        message: "바로 앞 수업과 시간이 겹치거나 이동 시간이 부족합니다",
-      };
-    }
-  }
-  if (nextAssigned) {
-    const gapSlots =
-      requiredGapMin(locationId, nextAssigned.locationId) / SLOT_MIN;
-    if (targetStartSlot + durSlots + gapSlots > nextAssigned.startSlot) {
-      return {
-        ok: false,
-        message: "바로 다음 수업과 시간이 겹치거나 이동 시간이 부족합니다",
-      };
-    }
-  }
-  if (
-    breaksSoloTravel(
-      req.memberId,
-      prevAssigned && prevAssigned.locationId,
-      locationId,
-      nextAssigned && nextAssigned.locationId,
-      soloTravelMemberIds(),
-    )
-  ) {
-    return {
-      ok: false,
-      message: "이 회원은 이동으로 앞뒤가 막힌 자리에는 배정할 수 없습니다",
-    };
-  }
   return { ok: true, newReq, locationId };
+}
+
+const DAY_CHAIN_VIOLATION_MESSAGES = {
+  gap: "수업 시간이 겹치거나 지점 간 이동 시간이 부족합니다",
+  dailyTravel: `하루 이동이 최대 ${MAX_TRAVELS_PER_DAY}회를 넘습니다`,
+  soloTravel: "세 지점 회원이 이동으로 앞뒤가 막힌 자리에 놓입니다",
+};
+
+// 수동 편집(removedIds 배정을 빼고 placed 배정을 넣음)을 적용한 최종 결과에서, 바뀐 요일마다
+// 하루 체인 전체를 자동 생성과 같은 하드 제약(dayChainViolation)으로 검사한다. 옮긴 수업의 앞뒤만
+// 보면 수업이 빠진 요일에서 새로 이어지는 수업(이동시간 부족, 이웃 세 지점 회원의 이동-회원-이동)
+// 이나 같은 요일 맞바꾸기에서 두 자리가 함께 만드는 위반을 놓친다. 위반이 없으면 null, 있으면 메시지.
+function editedDaysViolation(container, removedIds, placed) {
+  const days = new Set(placed.map((p) => p.day));
+  container.assigned.forEach((a) => {
+    if (removedIds.includes(a.id)) days.add(a.day);
+  });
+  const soloIds = soloTravelMemberIds();
+  for (const day of [...days].sort((x, y) => x - y)) {
+    const chain = container.assigned
+      .filter((a) => a.day === day && !removedIds.includes(a.id))
+      .concat(placed.filter((p) => p.day === day))
+      .map((a) => ({
+        ...a,
+        end: a.startSlot + durationToSlots(a.duration),
+      }))
+      .sort((x, y) => x.startSlot - y.startSlot);
+    const violation = dayChainViolation(chain, soloIds);
+    if (violation)
+      return DAYS[day] + "요일: " + DAY_CHAIN_VIOLATION_MESSAGES[violation];
+  }
+  return null;
+}
+
+// 세션 하나를 (targetDay, targetStartSlot)으로 옮길 수 있는지 검사만 하고, 실제로 옮기지는
+// 않는다 — 드래그 중 실시간 유효성 표시(canMoveOrSwapTo)와 실제 커밋(moveSession) 양쪽에서
+// 똑같은 기준으로 재사용하기 위해 분리했다. 회원 단위 검사(planMove) 뒤, 출발 요일과 도착 요일의
+// 최종 체인을 검사한다(editedDaysViolation).
+export function validateMove(container, req, targetDay, targetStartSlot) {
+  if (targetDay === req.day && targetStartSlot === req.startSlot) {
+    return { ok: true, noop: true, newReq: req, locationId: req.locationId };
+  }
+  const plan = planMove(container, req, targetDay, targetStartSlot);
+  if (!plan.ok) return plan;
+  const message = editedDaysViolation(
+    container,
+    [req.id],
+    [
+      {
+        memberId: req.memberId,
+        day: targetDay,
+        startSlot: targetStartSlot,
+        duration: req.duration,
+        locationId: plan.locationId,
+      },
+    ],
+  );
+  return message ? { ok: false, message } : plan;
 }
 
 // 배정된 세션 하나를 드래그로 다른 (day, startSlot) 자리로 옮긴다. 자리는 항상 "그 회원이
@@ -384,9 +385,10 @@ export function moveSession(
 }
 
 // 자리 맞바꾸기가 가능한지 검사만 한다(prepareSwap) — req를 occupying의 자리로, occupying을
-// req의 자리로 동시에 옮기는 것이므로 두 방향 모두 validateMove를 통과해야 한다. 서로 상대의
-// 현재 자리는 "곧 비워질 자리"라 걸림돌이 아니므로 ignoreIds로 서로를 빼고 검사한다. 길이가
-// 다르면애초에 "맞바꾼다"는 개념이 어색해지므로(한쪽만 옮기면 남는 자리가 생김) 막는다.
+// req의 자리로 동시에 옮기는 것이므로 두 방향 모두 회원 단위 검사(planMove)를 통과하고, 두
+// 이동을 함께 반영한 최종 체인이 하드 제약을 지켜야 한다. 서로 상대의 현재 자리는 "곧 비워질
+// 자리"라 회원 단위 검사에서는 ignoreIds로 서로를 뺀다. 길이가 다르면 애초에 "맞바꾼다"는
+// 개념이 어색해지므로(한쪽만 옮기면 남는 자리가 생김) 막는다.
 export function prepareSwap(container, req, occupying) {
   if (occupying.duration !== req.duration) {
     return { ok: false, message: "길이가 서로 달라 자리를 맞바꿀 수 없습니다" };
@@ -412,18 +414,35 @@ export function prepareSwap(container, req, occupying) {
         "두 회원 모두 상대방 시간에 신청한 이력이 있어야 자리를 맞바꿀 수 있습니다",
     };
   }
-  const checkA = validateMove(
-    container,
-    req,
-    occupying.day,
-    occupying.startSlot,
-    [occupying.id],
-  );
+  const checkA = planMove(container, req, occupying.day, occupying.startSlot, [
+    occupying.id,
+  ]);
   if (!checkA.ok) return { ok: false, message: checkA.message };
-  const checkB = validateMove(container, occupying, req.day, req.startSlot, [
+  const checkB = planMove(container, occupying, req.day, req.startSlot, [
     req.id,
   ]);
   if (!checkB.ok) return { ok: false, message: checkB.message };
+  // 두 이동을 모두 반영한 최종 체인으로 한 번에 검사한다 — 같은 요일 맞바꾸기에서 각 이동을
+  // 따로 보면 상대의 새 자리를 모른 채 판단하게 된다.
+  const message = editedDaysViolation(
+    container,
+    [req.id, occupying.id],
+    [
+      {
+        ...req,
+        day: occupying.day,
+        startSlot: occupying.startSlot,
+        locationId: checkA.locationId,
+      },
+      {
+        ...occupying,
+        day: req.day,
+        startSlot: req.startSlot,
+        locationId: checkB.locationId,
+      },
+    ],
+  );
+  if (message) return { ok: false, message };
   return {
     ok: true,
     reqA2,
