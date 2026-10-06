@@ -2,7 +2,6 @@ import {
   BLOCK_COLOR,
   SLOT_MIN,
   MAX_SESSIONS_PER_MEMBER,
-  BREAK_MIN,
 } from "./constants.js";
 import { durationToSlots, endLabel, slotLabel, showToast } from "./utils.js";
 import {
@@ -29,18 +28,12 @@ import { renderGrid } from "./grid.js";
 import { saveCandidateCardAsImage } from "./imageExport.js";
 import {
   generateCandidatesAsync,
-  regenerateCandidate,
-  candidateHistory,
-  candidateUndoStack,
   candidatePools,
   candidateAPools,
   resetCandidateSession,
   MAX_POOL_VARIANTS,
-  candidateSignature,
   candidateLocationsForRequest,
   requiredGapMin,
-  restorePreviousCandidate,
-  hasRegenerableEligible,
   totalTravelCount,
   totalInefficientMoveCount,
 } from "./engine/greedy.js";
@@ -54,6 +47,13 @@ import {
   schedule2TotalIdleMinutes,
 } from "./engine/chainDp.js";
 import { setIdleFirst } from "./engine/chainDpCore.js";
+import { scheduleMetrics } from "./engine/scheduleQuality.js";
+import {
+  selectCandidates,
+  layoutSignature,
+  qualityKey,
+  formatTradeoff,
+} from "./engine/candidateSelection.js";
 import {
   renderRequestList,
   setActiveScheduleMemberId,
@@ -155,11 +155,9 @@ export function eligibleSwapMembersFor(container, req) {
 
 // 드래그 이동·자리 맞바꾸기·인원 교체·확정 등 "수동 편집" 하나를 취소할 수 있도록, 편집
 // 직전의 assigned/confirmedIds 스냅샷을 후보 객체(container)별로 최대 20개까지 쌓아둔다.
-// 재생성(regenerateCandidate)이 쓰는 candidateUndoStack과는 별개다 — 그건 "다른 배정 조합
-// 통째로 되돌리기"이고 이건 "방금 한 조정 하나만 되돌리기"라 성격이 다르다. WeakMap을 써서
-// container 객체(candidateA 또는 runtime.candidates[i]) 자체를 키로 삼으므로, 재생성으로 그 자리의
+// WeakMap을 써서 container 객체(저장 슬롯의 결과) 자체를 키로 삼으므로, 다시 생성해 그 자리의
 // container 객체가 통째로 새로 만들어지면 자연스럽게 새 빈 되돌리기 이력에서 다시 시작한다.
-// candidateUndoStack과 마찬가지로 저장하지 않으므로 새로고침하면 초기화된다.
+// 저장하지 않으므로 새로고침하면 초기화된다.
 export const manualUndoStacks = new WeakMap();
 export const MANUAL_UNDO_LIMIT = 20;
 export function snapshotContainer(container) {
@@ -689,86 +687,6 @@ export function sessionSwapMenuItems(container, req, isConfirmed, onDone) {
   return items;
 }
 
-export function candidateToBlocks(candidate, onDone = renderSchedule3Result) {
-  const confirmedIds = new Set(candidate.confirmedIds || []);
-  return candidate.assigned.map((r) => {
-    const m = memberById(r.memberId);
-    const loc = locationById(r.locationId);
-    const label = m
-      ? m.name + ((m.category || "상담") === "상담" ? " (상담)" : "")
-      : "?";
-    const isConfirmed = confirmedIds.has(r.id);
-    return {
-      day: r.day,
-      startSlot: r.startSlot,
-      duration: r.duration,
-      label: label,
-      loc: loc ? loc.name : "",
-      sublabel:
-        slotLabel(r.startSlot) + "~" + endLabel(r.startSlot, r.duration),
-      color: m ? memberColor(m.id) : BLOCK_COLOR,
-      confirmed: isConfirmed,
-      contextMenuItems: () =>
-        sessionSwapMenuItems(candidate, r, isConfirmed, onDone),
-      onMove: (targetDay, targetSlot) =>
-        moveOrSwapSession(candidate, r, targetDay, targetSlot, onDone),
-      canMoveTo: (targetDay, targetSlot) =>
-        canMoveOrSwapTo(candidate, r, targetDay, targetSlot),
-    };
-  });
-}
-
-// 같은 요일 안에서 연속된 두 세션 사이, 지점이 달라 실제로 이동이 필요한 구간만 표시한다
-// (쉬는 시간 없음이 규칙이므로 같은 지점이면 표시할 것이 없다).
-export function candidateToTravelBlocks(
-  candidate,
-  onDone = renderSchedule3Result,
-) {
-  const byDay = new Map();
-  candidate.assigned.forEach((r) => {
-    if (!byDay.has(r.day)) byDay.set(r.day, []);
-    byDay.get(r.day).push(r);
-  });
-  const travelBlocks = [];
-  byDay.forEach((reqs) => {
-    const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
-    for (let i = 1; i < sorted.length; i++) {
-      const prev = sorted[i - 1],
-        cur = sorted[i];
-      const startSlot = prev.startSlot + durationToSlots(prev.duration);
-      const gapMin = (cur.startSlot - startSlot) * SLOT_MIN;
-      if (gapMin <= 0) continue;
-      const mins = travelMinutes(prev.locationId, cur.locationId);
-      if (mins > 0) {
-        travelBlocks.push({
-          day: prev.day,
-          startSlot,
-          duration: mins,
-          label: "이동 " + mins + "분",
-          type: "travel",
-          moveDurationSlots: durationToSlots(cur.duration),
-          onMove: (targetDay, targetSlot) =>
-            moveOrSwapSession(candidate, cur, targetDay, targetSlot, onDone),
-          canMoveTo: (targetDay, targetSlot) =>
-            canMoveOrSwapTo(candidate, cur, targetDay, targetSlot),
-          contextMenuItems: () => travelShiftMenuItems(candidate, cur, onDone),
-        });
-      } else if (BREAK_MIN > 0) {
-        // 지점이 같아도(또는 이동 시간이 0분이어도) 최소 BREAK_MIN만큼은 쉬는 시간으로 예약돼 있다.
-        const breakMin = Math.min(BREAK_MIN, gapMin);
-        travelBlocks.push({
-          day: prev.day,
-          startSlot,
-          duration: breakMin,
-          label: "휴식 " + breakMin + "분",
-          type: "break",
-        });
-      }
-    }
-  });
-  return travelBlocks;
-}
-
 // 분을 "150분"처럼 분 단위 배지 텍스트로 바꾼다.
 export function formatMinutesLabel(minutes) {
   return Math.round(minutes) + "분";
@@ -1019,113 +937,196 @@ export const excluded3Widget = createMemberSelectionWidget({
   onChanged: onSchedule3SelectionChanged,
 });
 
-// 생성1(그리디, generateCandidatesAsync)과 생성2(체인 DP, generateSchedule2Async)를 이 페이지의
-// "미배정 회원"/"1회 제한 회원" 목록으로 그대로 호출한다 — 두 함수의 본문은 한 줄도 건드리지
+// 후보 생성 엔진(그리디 탐색 generateCandidatesAsync, 체인 DP 다듬기 generateSchedule2Async)을 이
+// 페이지의 "미배정 회원"/"1회 제한 회원" 목록으로 차례로 호출한다 — 두 함수의 본문은 건드리지
 // 않는다. withSelectionOverride는 동기 호출만 감싸는 게 원칙이지만, 이 두 함수는 내부에
-// await(yieldToUI)가 있어 오버라이드가 그 사이에도 켜져 있다 — 그동안 다른 생성 버튼이 눌리면
-// 서로 다른 페이지의 선택 목록이 뒤섞일 수 있는데, 이건 runtime.generationInProgress 가드(세 생성
-// 버튼이 공유)로 원천 차단한다.
-// genA/genBC: 후보A 버튼·후보B·C 버튼이 각각 자신의 엔진만 켜서 호출한다(둘 다 켤 일은 없다).
-// 꺼진 쪽은 이 함수가 관여하지 않고 호출부가 이전 결과를 그대로 유지한다.
-export async function generateSchedule3Async(
-  onProgress,
-  { genA = true, genBC = true } = {},
-) {
+// await(yieldToUI)가 있어 오버라이드가 그 사이에도 켜져 있다 — 그동안 생성 버튼이 다시 눌리지
+// 않도록 runtime.generationInProgress 가드로 막는다.
+// onProgress(진행률 0~1, 단계 이름): 앞 절반은 그리디 탐색("후보 탐색"), 뒤 절반은 체인 DP 다듬기
+// ("비교·최적화")다. 사용자에게는 엔진 이름 대신 단계 이름만 보여준다.
+export async function generateSchedule3Async(onProgress) {
   const excludedIds3 = state.excludedMemberIds3;
   const onceLimitIds3 = state.onceLimitedMemberIds3;
-  let v1Built = null;
-  let v2Result = null;
-  if (genBC) {
-    const bcWeight = genA ? 0.5 : 1;
-    v1Built = await withSelectionOverride(excludedIds3, onceLimitIds3, () =>
-      generateCandidatesAsync((progress) => onProgress(progress * bcWeight)),
-    );
-  }
-  if (genA) {
-    const aStart = genBC ? 0.5 : 0;
-    const aWeight = genBC ? 0.5 : 1;
-    v2Result = await withSelectionOverride(excludedIds3, onceLimitIds3, () =>
+  const v1Built = await withSelectionOverride(excludedIds3, onceLimitIds3, () =>
+    generateCandidatesAsync((progress) =>
+      onProgress(progress * 0.5, "후보 탐색"),
+    ),
+  );
+  const v2Result = await withSelectionOverride(
+    excludedIds3,
+    onceLimitIds3,
+    () =>
       generateSchedule2Async((progress) =>
-        onProgress(aStart + progress * aWeight),
+        onProgress(0.5 + progress * 0.5, "비교·최적화"),
       ),
-    );
-  }
-  onProgress(1);
+  );
+  onProgress(1, "후보 정리");
   return {
-    candidateB: v1Built ? v1Built.built[0] || null : null, // 생성1의 후보A(전략 0, 인원 최대)
-    candidateC: v1Built ? v1Built.built[1] || null : null, // 생성1의 후보B(전략 1, 수업 횟수 최대)
-    poolsBC: v1Built ? v1Built.pools : null, // strategyIndex -> 배치 페이저용 동점 풀
-    candidateAList: v2Result ? v2Result.map((c) => c.result) : null, // 후보A-1/A-2/A-3
-    candidateAPools: v2Result ? v2Result.map((c) => c.pool) : null, // 카드 인덱스 -> 배치 페이저용 동점 풀
-    genA,
-    genBC,
+    candidateB: v1Built.built[0] || null, // 그리디 전략 0(인원 최대)
+    candidateC: v1Built.built[1] || null, // 그리디 전략 1(수업 횟수 최대)
+    poolsBC: v1Built.pools, // strategyIndex -> 동점 풀
+    candidateAList: v2Result.map((c) => c.result), // 체인 DP 탐색 그룹 3개
+    candidateAPools: v2Result.map((c) => c.pool), // 그룹 인덱스 -> 동점 풀
   };
 }
 
 export const generateHint3El = document.getElementById("generateHint3");
 export const candidates3El = document.getElementById("candidates3");
-export const generateBtnA3El = document.getElementById("generateBtnA3");
-export const generateBtnA3LabelEl =
-  document.getElementById("generateBtnA3Label");
-export const generateBtnA3CancelEl = document.getElementById(
-  "generateBtnA3Cancel",
+export const generateBtn3El = document.getElementById("generateBtn3");
+export const generateBtn3LabelEl = document.getElementById("generateBtn3Label");
+export const generateBtn3CancelEl =
+  document.getElementById("generateBtn3Cancel");
+export const generateProgressWrap3El = document.getElementById(
+  "generateProgressWrap3",
 );
-export const generateProgressWrapA3El = document.getElementById(
-  "generateProgressWrapA3",
+export const generateProgressFill3El = document.getElementById(
+  "generateProgressFill3",
 );
-export const generateProgressFillA3El = document.getElementById(
-  "generateProgressFillA3",
+export const generateProgressText3El = document.getElementById(
+  "generateProgressText3",
 );
-export const generateProgressTextA3El = document.getElementById(
-  "generateProgressTextA3",
-);
-export const generateBtnBC3El = document.getElementById("generateBtnBC3");
-export const generateBtnBC3LabelEl = document.getElementById(
-  "generateBtnBC3Label",
-);
-export const generateBtnBC3CancelEl = document.getElementById(
-  "generateBtnBC3Cancel",
-);
-export const generateProgressWrapBC3El = document.getElementById(
-  "generateProgressWrapBC3",
-);
-export const generateProgressFillBC3El = document.getElementById(
-  "generateProgressFillBC3",
-);
-export const generateProgressTextBC3El = document.getElementById(
-  "generateProgressTextBC3",
-);
+export const GENERATE3_IDLE_LABEL = "수업 스케줄 후보 생성";
 
-// 후보A(체인 DP)·후보B/C(그리디, runtime.candidates 배열) 카드를 그린다. 후보B/C는 strategyIndex(0/1)를
-// 넘겨받으면 옛 "수업 스케줄 생성1" 페이지에 있던 "↩ 이전 후보"/"↻ 다음 후보" 버튼을 그대로 붙인다
-// (regenerateCandidate/restorePreviousCandidate/candidateHistory/candidateUndoStack 로직은 무변경 —
-// 이 카드가 runtime.candidates[strategyIndex]를 직접 읽고 쓰기 때문에 그대로 재사용할 수 있다).
+// 사용자가 옮기거나 맞바꾸거나 교체·확정한 결과인지(사람의 의도가 담겼는지). 수동 편집은 모두
+// 손댄 자리를 confirmedIds에 넣으므로 이것 하나로 판단한다.
+export function isUserEdited(result) {
+  return (
+    !!result &&
+    Array.isArray(result.confirmedIds) &&
+    result.confirmedIds.length > 0
+  );
+}
+
+// 다시 생성할 때 슬롯 하나에 둘 결과: 사용자가 손댄 이전 결과는 덮어쓰지 않고 그대로 지킨다.
+export function keepsUserEditedSlot(prev) {
+  return isUserEdited(prev);
+}
+
+// 저장된 후보 슬롯(candidateAList 3개 + candidates 2개)과 세션 한정 동점 풀을 후보 선정 정책
+// (selectCandidates)의 입력으로 바꾼다. 슬롯 구조는 엔진별 저장 위치일 뿐 화면의 카드와는 무관하다.
+// 사용자가 손댄 슬롯은 fixed로 넣고, 그 슬롯의 동점 풀(손대기 전 배치들)은 넣지 않는다.
+// entry.slot.store(result): 그 배치를 원래 슬롯에 저장한다(보고 있는 배치를 편집할 수 있게).
+export function candidatePoolEntries() {
+  const slots = [];
+  runtime.schedule3Result.candidateAList.forEach((result, i) =>
+    slots.push({
+      key: "A" + (i + 1),
+      result,
+      pool: candidateAPools[i],
+      store: (r) => (runtime.schedule3Result.candidateAList[i] = r),
+    }),
+  );
+  runtime.candidates.forEach((result, i) =>
+    slots.push({
+      key: i === 0 ? "B" : "C",
+      result,
+      pool: candidatePools[i],
+      store: (r) => (runtime.candidates[i] = r),
+    }),
+  );
+  const entries = [];
+  slots.forEach((slot) => {
+    if (!slot.result) return;
+    const fixed = isUserEdited(slot.result);
+    const layouts = [slot.result].concat(
+      fixed ? [] : (slot.pool || []).filter((r) => r !== slot.result),
+    );
+    layouts.forEach((result, i) =>
+      entries.push({
+        key: i ? slot.key + "#" + i : slot.key,
+        result,
+        metrics: scheduleMetrics(result),
+        fixed,
+        slot,
+      }),
+    );
+  });
+  return entries;
+}
+
+// 카드마다 지금 보고 있는 배치(서명). 카드 키는 자동 카드면 품질 키, 수정 카드면 그 배치 서명.
+// 세션 한정 — 새로고침하면 각 카드의 첫 배치부터 다시 보인다.
+const shownVariantByCard = new Map();
+
+const CARD_DESC = {
+  recommended:
+    "미배정 → 비효율 이동 → 수업·이동·빈 시간 균형(수업 1건 = 이동 1번 = 빈 시간 60분) 순으로 가장 나은 후보입니다.",
+  edited: "직접 옮기거나 확정한 후보입니다. 다시 생성해도 지워지지 않습니다.",
+};
+
+// 후보 카드를 그린다. 카드는 저장된 후보 풀에서 매번 selectCandidates로 파생한다(역할·추천 여부·
+// trade-off 문구는 저장하지 않는다).
 export function renderSchedule3Result() {
   candidates3El.innerHTML = "";
   const gridRange = businessHoursGridRange();
+  const { cards } = selectCandidates(candidatePoolEntries());
 
-  // 후보A(체인 DP)는 왼쪽 열에, 후보B·C(그리디)는 오른쪽 열에 고정되도록 두 열을 별도
-  // 컨테이너로 분리한다 — 하나의 CSS auto-fit 그리드에 순서대로 흘려보내면 폭에 따라
-  // 후보A와 후보B·C가 같은 열에 섞여버리기 때문이다.
-  const colLeft = document.createElement("div");
-  colLeft.className = "candidates-col";
-  const colRight = document.createElement("div");
-  colRight.className = "candidates-col";
-  candidates3El.appendChild(colLeft);
-  candidates3El.appendChild(colRight);
+  if (cards.length === 0) {
+    const card = document.createElement("div");
+    card.className = "candidate-card candidate-card-placeholder";
+    const hint = document.createElement("p");
+    hint.className = "candidate-card-placeholder-hint";
+    hint.textContent =
+      "아직 후보가 없습니다. '" + GENERATE3_IDLE_LABEL + "'을 눌러주세요.";
+    card.appendChild(hint);
+    candidates3El.appendChild(card);
+    return;
+  }
 
-  function buildCard(
-    title,
-    desc,
-    result,
-    blocks,
-    travelBlocks,
-    idleMinutes,
-    strategyIndex,
-    pool,
-    onSelectPoolVariant,
-    columnEl,
-  ) {
+  let promoted = false;
+  cards.forEach((c) => {
+    const cardKey =
+      c.role === "edited"
+        ? "edited:" + layoutSignature(c.variants[0].result)
+        : qualityKey(c.metrics);
+    const shownSig = shownVariantByCard.get(cardKey);
+    const idx = Math.max(
+      0,
+      c.variants.findIndex((v) => layoutSignature(v.result) === shownSig),
+    );
+    const entry = c.variants[idx];
+    // 보고 있는 배치가 세션 한정 동점 풀에만 있으면 원래 슬롯에 저장한다 — 그래야 이 카드에서
+    // 한 편집이 저장되고 새로고침 뒤에도 남는다(같은 슬롯의 배치는 모두 같은 품질이라 같은 카드다).
+    if (entry.slot.result !== entry.result) {
+      entry.slot.store(entry.result);
+      entry.slot.result = entry.result;
+      promoted = true;
+    }
+    buildCard(c, entry.result, idx, (newIdx) => {
+      shownVariantByCard.set(
+        cardKey,
+        layoutSignature(c.variants[newIdx].result),
+      );
+      renderSchedule3Result();
+    });
+  });
+  if (promoted) saveState();
+  if (cards.filter((c) => c.role !== "edited").length === 1) {
+    const note = document.createElement("p");
+    note.className = "pool-pager-hint candidates-note";
+    note.textContent = "장단점이 다른 후보가 없어 추천 후보만 보여줍니다.";
+    candidates3El.appendChild(note);
+  }
+
+  function buildCard(c, result, variantIdx, onSelectVariant) {
+    const title = c.label;
+    const desc =
+      c.role === "recommended"
+        ? CARD_DESC.recommended
+        : c.role === "edited"
+          ? CARD_DESC.edited +
+            (c.deltas.length ? " 추천 대비 " + formatTradeoff(c.deltas) : "")
+          : "추천 대비 " + formatTradeoff(c.deltas);
+    const blocks = schedule2ToBlocks(result.assigned, {
+      result,
+      onDone: renderSchedule3Result,
+    });
+    const travelBlocks = schedule2ToTravelBlocks(
+      result,
+      renderSchedule3Result,
+    ).concat(schedule2ToIdleBlocks(result.assigned));
+    const idleMinutes = schedule2TotalIdleMinutes(result.assigned);
+
     const card = document.createElement("div");
     card.className = "candidate-card";
 
@@ -1136,118 +1137,41 @@ export function renderSchedule3Result() {
     titleEl.textContent = title;
     head.appendChild(titleEl);
 
-    {
-      const actions = document.createElement("div");
-      actions.className = "candidate-card-actions";
-
-      // 텍스트 라벨 버튼 4개를 한 줄에 나열하면 카드가 좁을 때 제목이 두 줄로 밀려버려서,
-      // 아이콘 전용 버튼(툴팁으로 설명 대체)으로 압축하고 그룹 사이에 구분선을 둔다:
-      // [편집 취소] | [이전 후보][다음 후보] | [저장]
-      function makeIconBtn(iconSvg, label, tooltip) {
-        const b = document.createElement("button");
-        b.type = "button";
-        b.className = "btn btn-ghost icon-btn regen-candidate-btn";
-        b.setAttribute("aria-label", label);
-        b.title = tooltip;
-        b.innerHTML = iconSvg;
-        return b;
-      }
-      function addDivider() {
-        const d = document.createElement("span");
-        d.className = "action-divider";
-        actions.appendChild(d);
-      }
-
-      const ICON_UNDO_MANUAL =
-        '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>';
-      // 드래그 이동·자리 맞바꾸기·인원 교체·확정 등 "방금 한 조정 하나"만 되돌린다 — 아래
-      // "이전 후보"(재생성 되돌리기)와는 별개이고, 후보A에도(strategyIndex가 없어 재생성
-      // 되돌리기 버튼이 없는) 똑같이 필요하므로 strategyIndex 유무와 무관하게 항상 넣는다.
-      const undoManualBtn = makeIconBtn(
-        ICON_UNDO_MANUAL,
-        "편집 취소",
-        "방금 드래그로 옮기거나 맞바꾸거나 교체·확정한 것을 취소합니다.",
-      );
-      undoManualBtn.disabled = !hasManualUndo(result);
-      undoManualBtn.addEventListener("click", () => {
-        undoManualEdit(result, renderSchedule3Result);
-      });
-      actions.appendChild(undoManualBtn);
-
-      if (strategyIndex != null) {
-        addDivider();
-
-        const undoStackForThis = candidateUndoStack[strategyIndex] || [];
-        const ICON_PREV_CANDIDATE =
-          '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M20 20v-7a4 4 0 0 0-4-4H4"/></svg>';
-        const undoBtn = makeIconBtn(
-          ICON_PREV_CANDIDATE,
-          "이전 후보",
-          "재생성하기 전의 후보로 되돌아갑니다.",
-        );
-        undoBtn.disabled = undoStackForThis.length === 0;
-        undoBtn.addEventListener("click", () => {
-          restorePreviousCandidate(strategyIndex, renderSchedule3Result);
-        });
-        actions.appendChild(undoBtn);
-
-        const ICON_REGEN =
-          '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M20.49 9A9 9 0 0 0 5.65 5.64L1 10m22 4-4.65 4.36A9 9 0 0 1 3.51 15"/></svg>';
-        const regenBtn = makeIconBtn(
-          ICON_REGEN,
-          "다음 후보",
-          "이 후보만 같은 전략 안에서 다시 계산합니다.",
-        );
-        const regenBtnIconHtml = regenBtn.innerHTML;
-        regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
-        regenBtn.addEventListener("click", async () => {
-          regenBtn.disabled = true;
-          undoBtn.disabled = true;
-          regenBtn.classList.add("icon-btn-loading");
-          try {
-            // 생성3 자신의 미배정/1회 제한 회원 설정(excludedMemberIds3/onceLimitedMemberIds3)이
-            // 적용되도록 반드시 withSelectionOverride로 감싼다 — 그냥 호출하면 currentExcludedIds()가
-            // (더 이상 UI가 없어 항상 비어있는) 옛 생성1 설정으로 폴백해버린다.
-            await withSelectionOverride(
-              state.excludedMemberIds3,
-              state.onceLimitedMemberIds3,
-              () =>
-                regenerateCandidate(
-                  strategyIndex,
-                  (progress) => {
-                    regenBtn.textContent = Math.round(progress * 100) + "%";
-                  },
-                  renderSchedule3Result,
-                ),
-            );
-          } finally {
-            regenBtn.classList.remove("icon-btn-loading");
-            regenBtn.innerHTML = regenBtnIconHtml;
-            regenBtn.disabled = !hasRegenerableEligible(strategyIndex);
-            undoBtn.disabled =
-              (candidateUndoStack[strategyIndex] || []).length === 0;
-          }
-        });
-        actions.appendChild(regenBtn);
-      }
-
-      addDivider();
-
-      const ICON_SAVE =
-        '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>';
-      const saveImageBtn = makeIconBtn(
-        ICON_SAVE,
-        "이미지로 저장",
-        "이 후보 카드를 이미지로 저장합니다.",
-      );
-      saveImageBtn.addEventListener("click", () => {
-        saveCandidateCardAsImage(card, title);
-      });
-      actions.appendChild(saveImageBtn);
-
-      head.appendChild(actions);
+    const actions = document.createElement("div");
+    actions.className = "candidate-card-actions";
+    function makeIconBtn(iconSvg, label, tooltip) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "btn btn-ghost icon-btn regen-candidate-btn";
+      b.setAttribute("aria-label", label);
+      b.title = tooltip;
+      b.innerHTML = iconSvg;
+      return b;
     }
-
+    // 드래그 이동·자리 맞바꾸기·인원 교체·확정 등 "방금 한 조정 하나"만 되돌린다.
+    const undoManualBtn = makeIconBtn(
+      '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>',
+      "편집 취소",
+      "방금 드래그로 옮기거나 맞바꾸거나 교체·확정한 것을 취소합니다.",
+    );
+    undoManualBtn.disabled = !hasManualUndo(result);
+    undoManualBtn.addEventListener("click", () => {
+      undoManualEdit(result, renderSchedule3Result);
+    });
+    actions.appendChild(undoManualBtn);
+    const divider = document.createElement("span");
+    divider.className = "action-divider";
+    actions.appendChild(divider);
+    const saveImageBtn = makeIconBtn(
+      '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>',
+      "이미지로 저장",
+      "이 후보 카드를 이미지로 저장합니다.",
+    );
+    saveImageBtn.addEventListener("click", () => {
+      saveCandidateCardAsImage(card, title);
+    });
+    actions.appendChild(saveImageBtn);
+    head.appendChild(actions);
     card.appendChild(head);
 
     const descEl = document.createElement("p");
@@ -1255,59 +1179,48 @@ export function renderSchedule3Result() {
     descEl.textContent = desc;
     card.appendChild(descEl);
 
-    // "배치 페이저": 미배정/수업 건수/이동 횟수(후보A는 이동 시간·빈 시간까지) 지표가 완전히
-    // 동점인 다른 배치가 있으면(pool.length > 1), 재계산 없이 그 풀 안에서 넘나들 수 있게
-    // 한다. pool.indexOf(result)가 -1이면(드래그 등 수동 편집으로 지금 화면이 풀의 어떤
-    // 항목과도 더 이상 같은 배치가 아니거나, "이전 후보"로 되돌아간 경우) 페이저를 그리지
-    // 않는다 — 별도 무효화 로직 없이 참조 동일성만으로 자연스럽게 처리된다.
-    if (pool && pool.length > 1) {
-      const poolIdx = pool.indexOf(result);
-      if (poolIdx !== -1) {
-        const pager = document.createElement("div");
-        pager.className = "candidate-pool-pager";
-
-        function selectPoolVariant(newIdx) {
-          onSelectPoolVariant(newIdx);
-          saveState();
-          renderSchedule3Result();
-        }
-
-        const prevBtn = document.createElement("button");
-        prevBtn.type = "button";
-        prevBtn.className = "btn btn-ghost icon-btn pool-pager-btn";
-        prevBtn.setAttribute("aria-label", "이전 배치");
-        prevBtn.title = "같은 조건의 다른 배치를 봅니다.";
-        prevBtn.innerHTML =
-          '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
-        prevBtn.disabled = poolIdx === 0;
-        prevBtn.addEventListener("click", () => selectPoolVariant(poolIdx - 1));
-
-        const label = document.createElement("span");
-        label.className = "pool-pager-label";
-        label.textContent = "배치 " + (poolIdx + 1) + "/" + pool.length;
-
-        const nextBtn = document.createElement("button");
-        nextBtn.type = "button";
-        nextBtn.className = "btn btn-ghost icon-btn pool-pager-btn";
-        nextBtn.setAttribute("aria-label", "다음 배치");
-        nextBtn.title = "같은 조건의 다른 배치를 봅니다.";
-        nextBtn.innerHTML =
-          '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>';
-        nextBtn.disabled = poolIdx === pool.length - 1;
-        nextBtn.addEventListener("click", () => selectPoolVariant(poolIdx + 1));
-
-        pager.appendChild(prevBtn);
-        pager.appendChild(label);
-        pager.appendChild(nextBtn);
-        card.appendChild(pager);
-
-        // 동점 풀(candidateAPools/poolsBC)은 새로고침하면 사라지는 세션 한정 기록이라
-        // (state에 저장되지 않음), 페이저가 뜬 김에 그 사실을 안내해 둔다.
-        const pagerHint = document.createElement("p");
-        pagerHint.className = "pool-pager-hint";
-        pagerHint.textContent = "새로고침하면 이 목록은 사라질 수 있어요.";
-        card.appendChild(pagerHint);
-      }
+    // 배치 페이저: 품질 지표가 같지만 회원·요일·지점 배정이 다른 배치(variant)를 넘겨 본다.
+    if (c.variants.length > 1) {
+      const pager = document.createElement("div");
+      pager.className = "candidate-pool-pager";
+      const pagerBtn = (label, points, disabled, newIdx) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "btn btn-ghost icon-btn pool-pager-btn";
+        b.setAttribute("aria-label", label);
+        b.title = "같은 품질의 다른 배치를 봅니다.";
+        b.innerHTML =
+          '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="' +
+          points +
+          '"/></svg>';
+        b.disabled = disabled;
+        b.addEventListener("click", () => onSelectVariant(newIdx));
+        return b;
+      };
+      const label = document.createElement("span");
+      label.className = "pool-pager-label";
+      label.textContent = "배치 " + (variantIdx + 1) + "/" + c.variants.length;
+      pager.append(
+        pagerBtn(
+          "이전 배치",
+          "15 18 9 12 15 6",
+          variantIdx === 0,
+          variantIdx - 1,
+        ),
+        label,
+        pagerBtn(
+          "다음 배치",
+          "9 18 15 12 9 6",
+          variantIdx === c.variants.length - 1,
+          variantIdx + 1,
+        ),
+      );
+      card.appendChild(pager);
+      // 동점 풀은 저장하지 않는 세션 한정 기록이라 새로고침하면 줄어들 수 있다.
+      const pagerHint = document.createElement("p");
+      pagerHint.className = "pool-pager-hint";
+      pagerHint.textContent = "새로고침하면 이 목록은 사라질 수 있어요.";
+      card.appendChild(pagerHint);
     }
 
     const stats = document.createElement("div");
@@ -1376,7 +1289,11 @@ export function renderSchedule3Result() {
       const title = document.createElement("b");
       title.textContent =
         "미배정 회원 (" + result.unassignedMembers.length + "명)";
-      box.append(title, " · ", result.unassignedMembers.map((m) => m.name).join(", "));
+      box.append(
+        title,
+        " · ",
+        result.unassignedMembers.map((m) => m.name).join(", "),
+      );
       card.appendChild(box);
     }
     // 회원별 배정 세션을 모아 정확히 2회 배정된 회원의 지점(세션마다 다를 수 있어 중복 제거
@@ -1428,155 +1345,17 @@ export function renderSchedule3Result() {
       card.appendChild(box);
     }
 
-    columnEl.appendChild(card);
-  }
-
-  // 아직 생성하지 않은 후보도 타이틀·설명만 담은 카드로 미리 보여준다 — 실제 배정 결과가
-  // 없으니 통계 pill·달력 그리드는 그리지 않는다.
-  function buildPlaceholderCard(title, desc, columnEl) {
-    const card = document.createElement("div");
-    card.className = "candidate-card candidate-card-placeholder";
-
-    const titleEl = document.createElement("h3");
-    titleEl.className = "candidate-title";
-    titleEl.textContent = title;
-    card.appendChild(titleEl);
-
-    const descEl = document.createElement("p");
-    descEl.className = "candidate-desc";
-    descEl.textContent = desc;
-    card.appendChild(descEl);
-
-    const hint = document.createElement("p");
-    hint.className = "candidate-card-placeholder-hint";
-    hint.textContent =
-      "아직 생성되지 않았습니다. '후보 생성하기'를 눌러주세요.";
-    card.appendChild(hint);
-
-    columnEl.appendChild(card);
-  }
-
-  // 후보A는 서로 독립적으로 탐색된 카드 3장(후보A-1/A-2/A-3)이다 — 카드끼리는 굳이
-  // 동점일 필요가 없고(서로 다른 요일 순서 시드에서 출발해 실제로 배치가 다를 수 있다),
-  // 카드 안의 배치 페이저만 그 카드 자신의 탐색에서 나온 동점을 다룬다.
-  for (let i = 0; i < SCHEDULE2_CARD_COUNT; i++) {
-    const idleFirstCard = i === IDLE_FIRST_CARD_INDEX;
-    const aTitle =
-      "후보A-" +
-      (i + 1) +
-      (idleFirstCard
-        ? " - 인원 최대 (빈 시간 최소화)"
-        : " - 인원 최대 (빈 시간 허용)");
-    const aDesc = idleFirstCard
-      ? "미배정 없음 → 비효율 이동 없음 → 수업 수·빈 시간 균형(수업 1건 = 빈 시간 60분) → 이동 횟수 최저 순으로 배정합니다."
-      : "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.";
-    const a = runtime.schedule3Result.candidateAList[i];
-    if (a) {
-      buildCard(
-        aTitle,
-        aDesc,
-        a,
-        schedule2ToBlocks(a.assigned, {
-          result: a,
-          onDone: renderSchedule3Result,
-        }),
-        schedule2ToTravelBlocks(a, renderSchedule3Result).concat(
-          schedule2ToIdleBlocks(a.assigned),
-        ),
-        schedule2TotalIdleMinutes(a.assigned),
-        null,
-        candidateAPools[i],
-        (newIdx) => {
-          runtime.schedule3Result.candidateAList[i] =
-            candidateAPools[i][newIdx];
-        },
-        colLeft,
-      );
-    } else {
-      buildPlaceholderCard(aTitle, aDesc, colLeft);
-    }
-  }
-  const b = runtime.candidates[0];
-  if (b) {
-    buildCard(
-      "후보B - 인원 최대 (빈 시간 최소화)",
-      "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",
-      b,
-      candidateToBlocks(b, renderSchedule3Result),
-      candidateToTravelBlocks(b).concat(schedule2ToIdleBlocks(b.assigned)),
-      schedule2TotalIdleMinutes(b.assigned),
-      0,
-      candidatePools[0],
-      (newIdx) => {
-        runtime.candidates[0] = candidatePools[0][newIdx];
-      },
-      colRight,
-    );
-  } else {
-    buildPlaceholderCard(
-      "후보B - 인원 최대 (빈 시간 최소화)",
-      "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",
-      colRight,
-    );
-  }
-  const c = runtime.candidates[1];
-  if (c) {
-    buildCard(
-      "후보C - 수업 횟수 최대",
-      "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.",
-      c,
-      candidateToBlocks(c, renderSchedule3Result),
-      candidateToTravelBlocks(c).concat(schedule2ToIdleBlocks(c.assigned)),
-      schedule2TotalIdleMinutes(c.assigned),
-      1,
-      candidatePools[1],
-      (newIdx) => {
-        runtime.candidates[1] = candidatePools[1][newIdx];
-      },
-      colRight,
-    );
-  } else {
-    buildPlaceholderCard(
-      "후보C - 수업 횟수 최대",
-      "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.",
-      colRight,
-    );
+    candidates3El.appendChild(card);
   }
 }
 
-// 후보A와 후보B·C는 소요 시간 차이가 커서(A는 체인 DP+담금질로 수 분, B·C는 그리디
-// 다중 시도로 INITIAL_SEARCH_ATTEMPTS 증가 후 수 분) 버튼을 따로 둔다 — A만 빠르게 다시
-// 보고 싶을 때 B·C의 느린 탐색까지 함께 기다리지 않아도 된다. 다만 두 버튼이 동시에 도는
-// 것까지는 허용하지 않는다(withSelectionOverride가 재진입을 지원하지 않으므로) —
-// runtime.generationInProgress 가드를 그대로 공유해 한쪽이 도는 동안 다른 쪽은 토스트로 안내한다.
-// 후보A 재생성 시 기존 카드에서 확정한 request가 새 후보에도 모두 남아있는지 확인한다.
-// solver에 pinned 입력을 관통시키기 전까지는 채택 경계에서 확정 세션 보존을 강제한다.
-export function candidatePreservesConfirmed(prev, candidate) {
-  const confirmedIds =
-    prev && Array.isArray(prev.confirmedIds) ? prev.confirmedIds : [];
-  if (confirmedIds.length === 0) return true;
-  const assignedIds = new Set(
-    ((candidate && candidate.assigned) || []).map((a) => a.id),
-  );
-  return confirmedIds.every((id) => assignedIds.has(id));
-}
-
-export async function runGenerate3({
-  genA,
-  genBC,
-  idleLabel,
-  btnEl,
-  labelEl,
-  cancelEl,
-  progressWrapEl,
-  progressFillEl,
-  progressTextEl,
-}) {
+// 후보 생성: 그리디 탐색과 체인 DP 다듬기를 모두 돌려 저장 슬롯(후보 풀)을 새로 채운다. 사용자가
+// 손댄 슬롯(keepsUserEditedSlot)은 덮어쓰지 않는다. 체인 DP 슬롯은 다듬기가 시간 예산제라 매번
+// 미세하게 달라지므로, 새 결과가 이전 결과보다 못하면 이전 결과를 지킨다(데이터가 그대로일 때 다시
+// 생성해도 나빠지지 않게).
+export async function runGenerate3() {
   if (runtime.generationInProgress) {
-    showToast(
-      "다른 후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.",
-      "info",
-    );
+    showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
     return;
   }
   if (state.locations.length === 0) {
@@ -1597,64 +1376,37 @@ export async function runGenerate3({
   runtime.generationInProgress = true;
   runtime.generationCancelRequested = false;
 
-  // 후보A-1/A-2/A-3(체인 DP)는 생성2와 마찬가지로 다듬기 단계가 시간 예산제라 매번 미세하게
-  // 결과가 달라질 수 있으므로, 데이터가 그대로 재생성된 경우 카드마다(자기 자신의 이전
-  // 결과와 비교해) 새 결과가 기존보다 못하면 이전 결과를 지킨다. 후보B/C(그리디)는 생성1과
-  // 마찬가지로 항상 새 결과로 덮어쓴다.
   const prevCandidateAList = runtime.schedule3Result.candidateAList;
+  const prevCandidates = runtime.candidates;
 
-  btnEl.disabled = true;
-  btnEl.classList.add("loading");
-  labelEl.textContent = "후보 생성 중...";
-  progressWrapEl.hidden = false;
-  progressFillEl.className = "generate-progress-fill progress-pct-0";
-  progressTextEl.textContent = "0%";
-  progressWrapEl.setAttribute("aria-valuenow", "0");
-  cancelEl.hidden = false;
-  cancelEl.disabled = false;
-  cancelEl.textContent = "생성 취소";
+  generateBtn3El.disabled = true;
+  generateBtn3El.classList.add("loading");
+  generateBtn3LabelEl.textContent = "후보 생성 중...";
+  generateProgressWrap3El.hidden = false;
+  generateProgressFill3El.className = "generate-progress-fill progress-pct-0";
+  generateProgressText3El.textContent = "후보 탐색 0%";
+  generateProgressWrap3El.setAttribute("aria-valuenow", "0");
+  generateBtn3CancelEl.hidden = false;
+  generateBtn3CancelEl.disabled = false;
+  generateBtn3CancelEl.textContent = "생성 취소";
 
   await acquireWakeLock();
   try {
-    const result = await generateSchedule3Async(
-      (progress) => {
-        const pct = Math.round(progress * 100);
-        progressFillEl.className =
-          "generate-progress-fill progress-pct-" + pct;
-        progressTextEl.textContent = pct + "%";
-        progressWrapEl.setAttribute("aria-valuenow", String(pct));
-      },
-      { genA, genBC },
-    );
+    const result = await generateSchedule3Async((progress, phase) => {
+      const pct = Math.round(progress * 100);
+      generateProgressFill3El.className =
+        "generate-progress-fill progress-pct-" + pct;
+      generateProgressText3El.textContent = phase + " " + pct + "%";
+      generateProgressWrap3El.setAttribute("aria-valuenow", String(pct));
+    });
     runtime.requestsChangedSinceGenerate3 = false;
-    // 카드 하나(prev/fresh)를 비교해 채택할 후보와 그 풀을 정한다: 새 결과가 실제로 더
-    // 나으면 새 후보·새 풀을 그대로 채택하고, 완전 동점(화면 깜빡임을 막기 위해 기존에
-    // 표시하던 후보를 그대로 유지하는 경우)이면 새로 찾은 동점 풀(freshPool)은 그대로
-    // 쓰되 prev와 서명이 같은 자리를 (새로 만든 시도 객체가 아니라) prev 참조로 바꿔 넣는다
-    // — 이걸 빠뜨리면 새 탐색이 진짜 동점 배치를 찾아내고도 페이저가 뜨지 않는다(실제로
-    // 이 문제로 확인됨). 새 결과가 기존보다 못하면 기존 후보·풀을 그대로 지킨다(pool: null
-    // 은 "풀을 건드리지 않는다"는 신호).
+    // 체인 DP 슬롯 하나(prev/fresh)를 비교해 채택할 결과와 그 풀을 정한다: 새 결과가 실제로 더
+    // 나으면 새 결과·새 풀을 채택하고, 완전 동점이면 새 풀을 쓰되 prev와 서명이 같은 자리를 prev
+    // 참조로 바꿔 넣는다(prev가 풀에 없으면 앞에 추가). 새 결과가 더 못하면 기존 결과·풀을
+    // 지킨다(pool: null은 "풀을 건드리지 않는다"는 신호).
     function pickCandidateASlot(prev, freshResult, freshPool) {
-      // 확정된 세션을 하나라도 잃는 새 결과는 점수와 관계없이 채택하지 않는다.
-      if (prev && !candidatePreservesConfirmed(prev, freshResult)) {
-        return { candidate: prev, pool: null };
-      }
-
-      const confirmedIds =
-        prev && Array.isArray(prev.confirmedIds) ? prev.confirmedIds : [];
-      if (confirmedIds.length > 0)
-        freshResult.confirmedIds = confirmedIds.slice();
-
-      const compatiblePool = (freshPool || []).filter((c) =>
-        candidatePreservesConfirmed(prev, c),
-      );
-      compatiblePool.forEach((c) => {
-        if (confirmedIds.length > 0) c.confirmedIds = confirmedIds.slice();
-      });
-
-      const newIsBetter = !prev || isSchedule2ResultBetter(freshResult, prev);
-      if (newIsBetter) {
-        const pool = compatiblePool;
+      const pool = (freshPool || []).slice();
+      if (!prev || isSchedule2ResultBetter(freshResult, prev)) {
         if (!pool.includes(freshResult)) {
           if (pool.length >= MAX_POOL_VARIANTS)
             pool.length = MAX_POOL_VARIANTS - 1;
@@ -1662,64 +1414,53 @@ export async function runGenerate3({
         }
         return { candidate: freshResult, pool };
       }
-      const newIsWorse = prev && isSchedule2ResultBetter(prev, freshResult);
-      if (!newIsWorse) {
+      if (!isSchedule2ResultBetter(prev, freshResult)) {
         const prevSig = schedule2Signature(prev);
-        const pool = compatiblePool.map((c) =>
+        const tiedPool = pool.map((c) =>
           schedule2Signature(c) === prevSig ? prev : c,
         );
-        // freshPool이 이번 탐색에서 찾은 "다른" 동점 배치들이라 prev와 서명이 겹치는 자리가
-        // 하나도 없을 수 있다(지표는 완전히 같지만 구체적인 배치는 다른 경우) — 그러면 위
-        // map이 아무것도 못 바꿔 pool에 prev가 참조로 들어있지 않게 되고, 페이저가
-        // pool.indexOf(prev)로 현재 위치를 못 찾아 조용히 사라진다(실제로 이 문제로
-        // 확인됨). prev를 앞에 직접 추가해 항상 pool 안에 있도록 보장한다.
-        if (!pool.includes(prev)) {
-          pool.unshift(prev);
-          if (pool.length > MAX_POOL_VARIANTS) pool.length = MAX_POOL_VARIANTS;
+        if (!tiedPool.includes(prev)) {
+          tiedPool.unshift(prev);
+          if (tiedPool.length > MAX_POOL_VARIANTS)
+            tiedPool.length = MAX_POOL_VARIANTS;
         }
-        return { candidate: prev, pool };
+        return { candidate: prev, pool: tiedPool };
       }
       return { candidate: prev, pool: null };
     }
     const candidateAList = [];
     for (let i = 0; i < SCHEDULE2_CARD_COUNT; i++) {
       const prev = prevCandidateAList[i] || null;
-      const fresh =
-        result.genA && result.candidateAList ? result.candidateAList[i] : null;
-      if (fresh) {
-        // 빈 시간 최소화 카드는 그 기준으로 이전 결과와 비교한다.
-        setIdleFirst(i === IDLE_FIRST_CARD_INDEX);
-        let picked;
-        try {
-          picked = pickCandidateASlot(
-            prev,
-            fresh,
-            result.candidateAPools && result.candidateAPools[i],
-          );
-        } finally {
-          setIdleFirst(false);
-        }
-        candidateAList.push(picked.candidate);
-        if (picked.pool !== null) candidateAPools[i] = picked.pool;
-      } else {
+      const fresh = result.candidateAList[i] || null;
+      if (!fresh || keepsUserEditedSlot(prev)) {
         candidateAList.push(prev);
+        continue;
       }
+      // 빈 시간 최소화 탐색 그룹은 그 기준으로 이전 결과와 비교한다.
+      setIdleFirst(i === IDLE_FIRST_CARD_INDEX);
+      let picked;
+      try {
+        picked = pickCandidateASlot(prev, fresh, result.candidateAPools[i]);
+      } finally {
+        setIdleFirst(false);
+      }
+      candidateAList.push(picked.candidate);
+      if (picked.pool !== null) candidateAPools[i] = picked.pool;
     }
-    if (result.genBC) {
-      runtime.candidates = [result.candidateB, result.candidateC].filter(
-        Boolean,
-      );
-      Object.keys(candidateHistory).forEach((k) => delete candidateHistory[k]);
-      Object.keys(candidateUndoStack).forEach(
-        (k) => delete candidateUndoStack[k],
-      );
-      Object.keys(candidatePools).forEach((k) => delete candidatePools[k]);
-      runtime.candidates.forEach((cand, idx) => {
-        candidateHistory[idx] = new Set([candidateSignature(cand)]);
-        if (result.poolsBC && result.poolsBC[idx])
-          candidatePools[idx] = result.poolsBC[idx];
-      });
-    }
+    const freshBC = [result.candidateB, result.candidateC];
+    const slotsBC = freshBC.map((fresh, idx) => {
+      const prev = prevCandidates[idx] || null;
+      if (keepsUserEditedSlot(prev)) return { candidate: prev, pool: null };
+      return { candidate: fresh, pool: result.poolsBC[idx] || [] };
+    });
+    // 기존 저장 형식 그대로: candidates는 [그리디 전략 0, 전략 1] 순서(빈 슬롯은 빼고), 풀도 같은 위치.
+    // 사용자가 손댄 슬롯은 선정에 동점 풀을 쓰지 않으므로 풀을 두지 않는다.
+    const keptBC = slotsBC.filter((s) => s.candidate);
+    Object.keys(candidatePools).forEach((k) => delete candidatePools[k]);
+    keptBC.forEach((s, idx) => {
+      if (s.pool) candidatePools[idx] = s.pool;
+    });
+    runtime.candidates = keptBC.map((s) => s.candidate);
     runtime.schedule3Result = { candidateAList };
     renderSchedule3Result();
     saveState();
@@ -1734,53 +1475,22 @@ export async function runGenerate3({
       showToast("후보 생성에 실패했습니다", "danger");
     }
   } finally {
-    btnEl.disabled = false;
-    btnEl.classList.remove("loading");
-    labelEl.textContent = idleLabel;
-    progressWrapEl.hidden = true;
-    cancelEl.hidden = true;
+    generateBtn3El.disabled = false;
+    generateBtn3El.classList.remove("loading");
+    generateBtn3LabelEl.textContent = GENERATE3_IDLE_LABEL;
+    generateProgressWrap3El.hidden = true;
+    generateBtn3CancelEl.hidden = true;
     runtime.generationInProgress = false;
     runtime.generationCancelRequested = false;
     releaseWakeLock();
   }
 }
 
-generateBtnA3El.addEventListener("click", () =>
-  runGenerate3({
-    genA: true,
-    genBC: false,
-    idleLabel: "후보A 생성하기",
-    btnEl: generateBtnA3El,
-    labelEl: generateBtnA3LabelEl,
-    cancelEl: generateBtnA3CancelEl,
-    progressWrapEl: generateProgressWrapA3El,
-    progressFillEl: generateProgressFillA3El,
-    progressTextEl: generateProgressTextA3El,
-  }),
-);
-generateBtnA3CancelEl.addEventListener("click", () => {
+generateBtn3El.addEventListener("click", () => runGenerate3());
+generateBtn3CancelEl.addEventListener("click", () => {
   runtime.generationCancelRequested = true;
-  generateBtnA3CancelEl.disabled = true;
-  generateBtnA3CancelEl.textContent = "취소하는 중...";
-});
-
-generateBtnBC3El.addEventListener("click", () =>
-  runGenerate3({
-    genA: false,
-    genBC: true,
-    idleLabel: "후보B·C 생성하기",
-    btnEl: generateBtnBC3El,
-    labelEl: generateBtnBC3LabelEl,
-    cancelEl: generateBtnBC3CancelEl,
-    progressWrapEl: generateProgressWrapBC3El,
-    progressFillEl: generateProgressFillBC3El,
-    progressTextEl: generateProgressTextBC3El,
-  }),
-);
-generateBtnBC3CancelEl.addEventListener("click", () => {
-  runtime.generationCancelRequested = true;
-  generateBtnBC3CancelEl.disabled = true;
-  generateBtnBC3CancelEl.textContent = "취소하는 중...";
+  generateBtn3CancelEl.disabled = true;
+  generateBtn3CancelEl.textContent = "취소하는 중...";
 });
 
 export const candidateRulesBlock3El = document.getElementById(

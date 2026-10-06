@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// index.html을 headless 브라우저로 열어 핵심 사용 흐름(데이터 로드 → 후보A/B/C 생성 →
-// 저장 → 새로고침 후 유지)이 깨지지 않았는지 확인하는 E2E 스모크 테스트.
+// index.html을 headless 브라우저로 열어 핵심 사용 흐름(데이터 로드 → 후보 생성 → 후보 카드 표시 →
+// 확정한 후보 보존 → 저장 → 새로고침 후 유지)이 깨지지 않았는지 확인하는 E2E 스모크 테스트.
 // MCP의 대화형 Playwright 브라우저와는 별개의 독립 프로세스를 띄우므로 그 브라우저가
 // 사용 중이어도 영향받지 않는다.
 //
@@ -9,8 +9,8 @@
 // 그래서 기본값으로는 chainDp.js의 window.__PT_TEST_BUDGET_SCALE__ 훅을 이용해 모든 시간
 // 예산을 비례 축소해(SMOKE_A_BUDGET_SCALE, 기본 0.005) 몇 초 안에 끝내면서도 실제 코드
 // 경로(탐색→다듬기→담금질)는 그대로 exercise한다 — 결과 품질이 아니라 "안 깨졌는지"만
-// 보는 스모크 테스트 목적에 맞다. 완전히 건너뛰려면 SMOKE_SKIP_A=1, 실제 운영 예산 그대로
-// (수 분~수십 분) 돌려 진짜 성능/품질까지 확인하려면 SMOKE_FULL_BUDGET_A=1을 쓴다.
+// 보는 스모크 테스트 목적에 맞다. 실제 운영 예산 그대로(수 분~수십 분) 돌려 진짜 성능/품질까지
+// 확인하려면 SMOKE_FULL_BUDGET_A=1을 쓴다.
 "use strict";
 
 const path = require("path");
@@ -19,7 +19,6 @@ const { chromium } = require("playwright");
 const ROOT = path.resolve(__dirname, "..");
 const INDEX_URL = "file://" + path.join(ROOT, "index.html");
 const STORAGE_KEY = "pt_schedule_state_v3";
-const SKIP_A = process.env.SMOKE_SKIP_A === "1";
 const FULL_BUDGET_A = process.env.SMOKE_FULL_BUDGET_A === "1";
 const A_BUDGET_SCALE = Number(process.env.SMOKE_A_BUDGET_SCALE || "0.005");
 
@@ -96,11 +95,15 @@ async function main() {
       };
     });
 
+    // 처음 열 때만 시드를 넣는다 — 매번 넣으면 새로고침 때 저장된 생성 결과까지 덮어써서
+    // "새로고침 후 유지"를 검증할 수 없다.
     await page.addInitScript(
-      ({ key, data }) => localStorage.setItem(key, JSON.stringify(data)),
+      ({ key, data }) => {
+        if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(data));
+      },
       { key: STORAGE_KEY, data: buildSeedState() }
     );
-    if (!SKIP_A && !FULL_BUDGET_A) {
+    if (!FULL_BUDGET_A) {
       await page.addInitScript(
         (scale) => {
           window.__PT_TEST_BUDGET_SCALE__ = scale;
@@ -112,44 +115,54 @@ async function main() {
     await page.goto(INDEX_URL);
     await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
 
-    // 후보B·C(그리디) 생성 — 보통 수 초 안에 끝남, 상태 로드/렌더링/저장 경로를 빠르게 확인
-    await clickGenerateAndWait(page, "#generateBtnBC3", 60 * 1000);
+    // 후보 생성(그리디 탐색 + 체인 DP 다듬기). 기본값은 위에서 주입한 __PT_TEST_BUDGET_SCALE__로
+    // 체인 DP의 시간 예산을 축소해 몇 초 안에 끝난다. SMOKE_FULL_BUDGET_A=1이면 실제 운영 예산
+    // 그대로 돌린다(트리비얼한 입력도 몇 분~수십 분).
+    const generateTimeout = FULL_BUDGET_A ? 45 * 60 * 1000 : 2 * 60 * 1000;
+    await clickGenerateAndWait(page, "#generateBtn3", generateTimeout);
     let state = await readState(page);
     assert(
       state && Array.isArray(state.candidates) && state.candidates.length > 0,
-      "후보B·C 생성 결과가 비어있음 (그리디 엔진 회귀 의심)"
+      "그리디 후보 슬롯이 비어있음 (그리디 엔진 회귀 의심)"
     );
-    const workerMessagesAfterBC = await page.evaluate(() => window.__PT_WORKER_MESSAGES__);
     assert(
-      workerMessagesAfterBC > 0,
-      "후보B·C 그리디 탐색이 Web Worker를 쓰지 않음 (워커 생성·CSP·번들 회귀 의심)"
+      state && state.schedule3Result && state.schedule3Result.candidateAList
+        && state.schedule3Result.candidateAList.some(Boolean),
+      "체인 DP 후보 슬롯이 비어있음 (체인DP 엔진 회귀 의심)"
     );
+    const workerMessages = await page.evaluate(() => window.__PT_WORKER_MESSAGES__);
+    assert(
+      workerMessages > 0,
+      "후보 생성이 Web Worker를 쓰지 않음 (워커 생성·CSP·번들 회귀 의심)"
+    );
+    const cardTitles = () => page.locator("#candidates3 .candidate-title").allTextContents();
+    let titles = await cardTitles();
+    assert(
+      titles.length === 1 && titles[0] === "추천",
+      "후보 카드가 '추천' 한 장이 아님 (실제: " + JSON.stringify(titles) + ")"
+    );
+    const pageText = await page.locator("#pageSchedule3").innerText();
+    assert(!/후보\s?[ABC]/.test(pageText), "화면에 엔진 이름(후보A/B/C)이 노출됨");
 
-    if (SKIP_A) {
-      console.log("SMOKE_SKIP_A=1 — 후보A(체인DP) 검증은 건너뜀");
-    } else {
-      // 후보A(체인DP) 생성. 기본값은 위에서 주입한 __PT_TEST_BUDGET_SCALE__로 모든 시간
-      // 예산을 축소해 몇 초 안에 끝난다. SMOKE_FULL_BUDGET_A=1이면 실제 운영 예산(카드 3장 ×
-      // 그룹당 최대 7분) 그대로 돌린다 — 회원 1명짜리 트리비얼한 입력도 실측 몇 분~수십 분이
-      // 걸릴 수 있으므로(시간 비율 기반 담금질이라 데이터 크기와 무관), 그만큼 타임아웃도
-      // 늘어난다.
-      await clickGenerateAndWait(
-        page,
-        "#generateBtnA3",
-        FULL_BUDGET_A ? 45 * 60 * 1000 : 60 * 1000
-      );
-      state = await readState(page);
-      assert(
-        state && state.schedule3Result && state.schedule3Result.candidateAList
-          && state.schedule3Result.candidateAList.some(Boolean),
-        "후보A 생성 결과가 비어있음 (체인DP 엔진 회귀 의심)"
-      );
-      const workerMessages = await page.evaluate(() => window.__PT_WORKER_MESSAGES__);
-      assert(
-        workerMessages > workerMessagesAfterBC,
-        "후보A 다듬기가 Web Worker를 쓰지 않음 (워커 생성·CSP·번들 회귀 의심)"
-      );
-    }
+    // 수업 블록을 눌러 확정하면 그 후보는 '내가 수정한 후보'가 되고, 다시 생성해도 지워지지 않는다.
+    // 블록은 드래그 가능해서 Playwright의 포인터 클릭이 드래그 처리와 엉킨다(메뉴가 열렸다가
+    // 다시 그려짐). 메뉴 동작만 확인하면 되므로 DOM click 이벤트로 연다.
+    await page.locator("#candidates3 .cal-block.clickable").first().evaluate((el) => el.click());
+    await page
+      .locator(".block-context-menu-item", { hasText: "확정" })
+      .first()
+      .evaluate((el) => el.click());
+    titles = await cardTitles();
+    assert(
+      titles.includes("내가 수정한 후보") && !titles.includes("추천"),
+      "확정한 후보가 '내가 수정한 후보'로 바뀌지 않음 (실제: " + JSON.stringify(titles) + ")"
+    );
+    await clickGenerateAndWait(page, "#generateBtn3", generateTimeout);
+    titles = await cardTitles();
+    assert(
+      titles.includes("내가 수정한 후보"),
+      "다시 생성한 뒤 '내가 수정한 후보'가 사라짐 (실제: " + JSON.stringify(titles) + ")"
+    );
 
     // strict style CSP에서 html2canvas 캡처 경로도 실제로 동작하는지 확인한다.
     // 후보 생성 직후 첫 카드의 이미지 저장 버튼을 눌러 다운로드 완료까지 기다린다.
@@ -172,6 +185,11 @@ async function main() {
       return raw ? JSON.parse(raw).members.length : -1;
     });
     assert(reloadedMemberCount === 1, "새로고침 후 회원 데이터가 유지되지 않음");
+    titles = await cardTitles();
+    assert(
+      titles.includes("내가 수정한 후보"),
+      "새로고침 후 '내가 수정한 후보'가 유지되지 않음 (실제: " + JSON.stringify(titles) + ")"
+    );
 
     // 회원관리 페이지가 정상적으로 회원 1명을 렌더링하는지(페이지 전환 + 렌더링 회귀 확인)
     await page.click('.nav-item[data-page="members"]');
@@ -194,13 +212,9 @@ async function main() {
     failures.forEach((f) => console.error("  - " + f));
     process.exit(1);
   }
-  const aNote = SKIP_A
-    ? "후보A 생략"
-    : FULL_BUDGET_A
-      ? "후보A 실제 운영 예산으로 검증"
-      : "후보A 예산 축소 검증";
+  const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보B/C 생성, 새로고침 유지, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 회원 목록 렌더링 확인됨)"
   );
 }
 

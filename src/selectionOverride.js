@@ -26,8 +26,8 @@ export async function withSelectionOverride(
 }
 
 // 엔진 함수들은 생성 계산 자체는 항상 withSelectionOverride로 감싼 호출 안에서 실행되지만,
-// renderSchedule3Result()의 "재생성 가능" 표시(hasRegenerableEligible → isEligibleRequest)는
-// 계산이 끝나 override가 풀린 뒤에도 호출된다 — 그 시점엔 생성3 페이지의 현재 선택값
+// renderSchedule3Result()의 후보 지표 계산(scheduleMetrics 등)은 계산이 끝나 override가 풀린
+// 뒤에도 호출된다 — 그 시점엔 생성3 페이지의 현재 선택값
 // (state.excludedMemberIds3/onceLimitedMemberIds3)으로 대체한다.
 export function currentExcludedIds() {
   return selectionOverride

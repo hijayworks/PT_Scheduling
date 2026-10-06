@@ -43,13 +43,11 @@ export let state = {
 // 속성 대입(runtime.candidates = ...)으로 바꾸게 한다.
 export const runtime = {
   availableCells: new Set(),
-  // "수업 스케줄 생성3"의 후보B(전략0, 인원 최대)·후보C(전략1, 수업 횟수 최대) 저장소.
-  // 옛 "수업 스케줄 생성1" 페이지가 쓰던 배열을 그대로 재사용한다 — regenerateCandidate/
-  // restorePreviousCandidate/candidateHistory/candidateUndoStack이 이 배열과 strategyIndex를
-  // 그대로 참조하므로, 생성1의 "재생성"·"이전 후보 다시보기" 기능을 생성3에 그대로 이식할 수 있다.
+  // 후보 풀 저장소(원본 슬롯). 화면의 카드·역할은 여기서 매번 파생한다(schedule3.js의
+  // candidatePoolEntries → candidateSelection.js의 selectCandidates) — 카드 구조는 저장하지 않는다.
+  // candidates: 그리디 전략 0(인원 최대)·전략 1(수업 횟수 최대)의 결과.
   candidates: [],
-  // "수업 스케줄 생성3"의 후보A-1/A-2/A-3(체인 DP, 서로 독립적으로 탐색된 별도 카드 3장).
-  // 후보B/C는 candidates 배열 참고. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.
+  // candidateAList: 체인 DP 탐색 그룹 3개의 결과. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.
   schedule3Result: { candidateAList: [null, null, null] },
   // 회원 스케줄 추가(신청 시간 추가/삭제) 등 신청 데이터가 바뀌면 true로 표시해둔다.
   // "수업 스케줄 생성" 메뉴로 들어올 때 이 값이 true면, 최신 신청과 맞지 않는 옛 후보를 자동으로 비운다.

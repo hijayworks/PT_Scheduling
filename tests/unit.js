@@ -966,24 +966,6 @@ test("runtime 후보 전체 초기화: 후보A/B/C가 함께 제거됨", () => {
   assertEqual(lib.runtime.schedule3Result.candidateAList, [null, null, null]);
 });
 
-test("후보A 재생성: 확정 request가 빠진 새 후보는 보존 조건을 통과하지 못함", () => {
-  const prev = {
-    assigned: [{ id: "r1" }, { id: "r2" }],
-    confirmedIds: ["r1"],
-  };
-  assert(
-    lib.candidatePreservesConfirmed(prev, {
-      assigned: [{ id: "r1" }, { id: "r3" }],
-    }),
-    "확정 request가 남아 있으면 통과해야 함",
-  );
-  assert(
-    !lib.candidatePreservesConfirmed(prev, {
-      assigned: [{ id: "r2" }, { id: "r3" }],
-    }),
-    "확정 request가 빠진 새 후보는 거부해야 함",
-  );
-});
 
 /* ---------------- polishWorkerPool.js: 후보A 다듬기 Web Worker 병렬화 ---------------- */
 // 브라우저 Worker와 같은 모양(postMessage/onmessage/onerror/terminate)의 가짜 워커.
@@ -1173,9 +1155,30 @@ test("후보 선정: 같은 배치는 하나로 합치고, 시작 시각만 다�
   const shifted = selEntry("shifted", [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 1, 1, "L1"], ["C", 1, 10, "L3"]]);
   const daysSwapped = selEntry("swapped", [["A", 1, 0, "L1"], ["B", 1, 6, "L1"], ["S", 0, 0, "L1"], ["C", 0, 9, "L3"]]);
   const sel = lib.selectCandidates([base, dup, shifted, daysSwapped]);
-  assertEqual(sel.cards.map((c) => [c.label, c.variants.map((v) => v.key)]), [["추천", ["base", "swapped"]]]);
+  assertEqual(sel.cards.map((c) => c.label), ["추천"]);
+  const keys = sel.cards[0].variants.map((v) => v.key);
+  assertEqual([keys.length, keys.includes("swapped"), keys.includes("base") !== keys.includes("shifted")], [2, true, true], "시작 시각만 다른 둘 중 하나만");
   const st = sel.stats;
   assertEqual([st.exactDuplicates, st.qualityGroups, st.similarRemoved], [1, 1, 1]);
+});
+test("후보 선정: 결과는 후보 풀의 입력 순서와 무관하다", () => {
+  qualityFixture();
+  const list = [
+    selEntry("base", SEL_BASE),
+    selEntry("swapped", [["A", 1, 0, "L1"], ["B", 1, 6, "L1"], ["S", 0, 0, "L1"], ["C", 0, 9, "L3"]]),
+    selEntry("more", SEL_BASE.concat([["A", 1, 15, "L1"]])),
+  ];
+  const view = (sel) => sel.cards.map((c) => [c.label, c.variants.map((v) => v.key)]);
+  assertEqual(view(lib.selectCandidates(list)), view(lib.selectCandidates(list.slice().reverse())));
+});
+test("후보 선정: variant가 넘치면 이미 고른 배치와 회원·요일·지점 배정이 더 많이 다른 배치를 먼저 고른다", () => {
+  const layout = (key, days) => ({ key, result: { assigned: days.map((day, i) => ({ memberId: "m" + i, day, startSlot: 0, locationId: "L1" })) } });
+  const rep = layout("rep", [0, 0, 0, 0]);
+  const near1 = layout("near1", [1, 0, 0, 0]);
+  const near2 = layout("near2", [0, 1, 0, 0]);
+  const far = layout("far", [1, 1, 1, 1]);
+  const { kept, similar, overLimit } = lib.pickVariants([rep, near1, near2, far]);
+  assertEqual([kept.map((e) => e.key), similar, overLimit], [["rep", "far", "near1"], 0, 1]);
 });
 test("후보 선정: 같은 품질 배치는 회원·요일 배정이 달라도 카드 하나에 최대 3개 variant만 둔다", () => {
   qualityFixture();
@@ -1195,29 +1198,66 @@ test("후보 선정: 모든 축에서 같거나 못한 후보는 지우고, 추�
   const base = selEntry("base", SEL_BASE);
   const worse = selEntry("worse", [["A", 0, 0, "L1"], ["B", 0, 9, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]]);
   const more = selEntry("more", SEL_BASE.concat([["A", 1, 15, "L1"]]));
-  const lessTravel = selEntry("less", [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 0, 12, "L1"]], [{ id: "C" }]);
-  const sel = lib.selectCandidates([worse, more, base, lessTravel]);
+  const sel = lib.selectCandidates([worse, more, base]);
   assertEqual(
     sel.cards.map((c) => [c.label, c.variants[0].key, lib.formatTradeoff(c.deltas)]),
     [
       ["추천", "base", ""],
       ["수업 우선", "more", "수업 +1 / 비효율 이동 +1 / 이동 +1 / 이동 시간 +30분"],
-      ["이동 최소", "less", "미배정 +1명 / 수업 -1 / 이동 -1 / 이동 시간 -30분"],
     ],
-    "공강 최소는 추천안보다 빈 시간이 적은 후보가 없어 만들지 않는다",
+    "이동 최소·공강 최소는 추천안보다 나은 후보가 없어 만들지 않는다",
   );
   assertEqual([sel.stats.dominatedGroups, sel.stats.dominatedLayouts, sel.hidden.length], [1, 1, 0]);
 });
-test("후보 선정: 어느 역할에도 맞지 않는 Pareto 후보는 버리지 않고 unlabeled로 따로 보고한다", () => {
+test("후보 선정: 미배정이 추천안보다 많은 대안은 Pareto여도 카드로 보이지 않고 gate 사유로 보고한다", () => {
   qualityFixture();
-  // 추천: 마포→상암→마포 왕복(비효율 1), 이동 2. 대안: 미배정 1이지만 비효율 이동 없음(마포↔여의도 왕복).
-  const rec = selEntry("rec", [["A", 0, 0, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"], ["B", 1, 15, "L1"]]);
-  const noIneff = selEntry("alt", [["A", 0, 0, "L1"], ["B", 0, 9, "L2"], ["S", 0, 18, "L1"]], [{ id: "C" }]);
-  const sel = lib.selectCandidates([rec, noIneff]);
+  const base = selEntry("base", SEL_BASE);
+  const lessTravel = selEntry("less", [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 0, 12, "L1"]], [{ id: "C" }]);
+  const sel = lib.selectCandidates([base, lessTravel]);
   assertEqual(sel.cards.map((c) => c.label), ["추천"]);
   assertEqual(sel.hidden.map((h) => [h.reason, h.variants[0].key, lib.formatTradeoff(h.deltas)]), [
-    ["unlabeled", "alt", "미배정 +1명 / 수업 -1 / 비효율 이동 -1"],
+    ["unassigned-gate", "less", "미배정 +1명 / 수업 -1 / 이동 -1 / 이동 시간 -30분"],
   ]);
+  assertEqual([sel.stats.gatedGroups, sel.stats.gatedLayouts], [1, 1]);
+});
+test("후보 선정: 사용자가 수정한 후보는 지배당해도 지우지 않고, 추천 역할 없이 따로 보여준다", () => {
+  qualityFixture();
+  const base = selEntry("base", SEL_BASE);
+  const edited = { ...selEntry("edited", [["A", 0, 0, "L1"], ["B", 0, 9, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]]), fixed: true };
+  const sel = lib.selectCandidates([edited, base]);
+  assertEqual(
+    sel.cards.map((c) => [c.role, c.label, c.variants[0].key, lib.formatTradeoff(c.deltas)]),
+    [
+      ["recommended", "추천", "base", ""],
+      ["edited", "내가 수정한 후보", "edited", "빈 시간 +30분"],
+    ],
+  );
+});
+test("후보 선정: 자동 배치가 사용자 수정 후보와 완전히 같으면 수정 후보 하나로 합치고 추천은 나머지에서 고른다", () => {
+  qualityFixture();
+  const edited = { ...selEntry("edited", SEL_BASE), fixed: true };
+  const sameAuto = selEntry("auto", SEL_BASE);
+  const other = selEntry("other", [["A", 0, 0, "L1"], ["B", 0, 9, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]]);
+  const sel = lib.selectCandidates([edited, sameAuto, other]);
+  assertEqual(sel.cards.map((c) => [c.label, c.variants[0].key]), [["추천", "other"], ["내가 수정한 후보", "edited"]]);
+  assertEqual([sel.stats.mergedIntoFixed, sel.stats.exactDuplicates], [1, 0]);
+});
+
+test("후보 풀: 사용자가 손댄 슬롯은 수정 후보로 넣고, 그 슬롯의 동점 풀은 넣지 않는다", () => {
+  qualityFixture();
+  const edited = { ...selEntry("e", SEL_BASE).result, confirmedIds: ["A0_0"] };
+  const auto = selEntry("a", SEL_BASE).result;
+  const autoTie = selEntry("t", [["A", 1, 0, "L1"], ["B", 1, 6, "L1"], ["S", 0, 0, "L1"], ["C", 0, 9, "L3"]]).result;
+  lib.runtime.schedule3Result = { candidateAList: [edited, auto, null] };
+  lib.runtime.candidates = [];
+  lib.candidateAPools[0] = [edited, autoTie];
+  lib.candidateAPools[1] = [auto, autoTie];
+  const entries = lib.candidatePoolEntries();
+  assertEqual(entries.map((e) => [e.key, e.fixed]), [["A1", true], ["A2", false], ["A2#1", false]]);
+  assert(lib.keepsUserEditedSlot(edited) && !lib.keepsUserEditedSlot(auto), "손댄 슬롯만 다시 생성에서 지킨다");
+  delete lib.candidateAPools[0];
+  delete lib.candidateAPools[1];
+  lib.runtime.schedule3Result = { candidateAList: [null, null, null] };
 });
 
 /* ---------------- goldenFloors.js: 골든 품질 하한 래칫 ---------------- */
