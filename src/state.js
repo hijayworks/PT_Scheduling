@@ -49,9 +49,6 @@ export const runtime = {
   candidates: [],
   // candidateAList: 체인 DP 탐색 그룹 3개의 결과. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.
   schedule3Result: { candidateAList: [null, null, null] },
-  // 회원 스케줄 추가(신청 시간 추가/삭제) 등 신청 데이터가 바뀌면 true로 표시해둔다.
-  // "수업 스케줄 생성" 메뉴로 들어올 때 이 값이 true면, 최신 신청과 맞지 않는 옛 후보를 자동으로 비운다.
-  requestsChangedSinceGenerate3: false,
   // 세 생성 버튼 중 하나라도 계산 중이면 true — 동시에 두 계산이 겹치면 selectionOverride가
   // 서로 다른 페이지의 회원 선택 목록을 잘못 참조할 수 있어(withSelectionOverride 참고), 이 플래그로 막는다.
   generationInProgress: false,
@@ -159,6 +156,42 @@ function clearParsedScheduleCandidates(parsed) {
   parsed.schedule3Result = { candidateAList: [null, null, null] };
 }
 
+// 후보 유효성에 영향을 주는 입력(신청, 회원 정보, 지점, 이동시간, 근무 가능 시간, 제외/1회 제한)의
+// 지문. 생성할 때 schedule3Result.inputKey로 함께 저장하고, 현재 입력과 다르면 후보를 사용자가 수정한
+// 것까지 모두 버린다(schedule3.js의 dropStaleCandidates). 배열 순서는 의미가 없으므로 정렬해서 만든다.
+export function candidateInputKey() {
+  const sortedJson = (list) =>
+    (list || [])
+      .map((x) => JSON.stringify(x))
+      .sort()
+      .join("\n");
+  const text = [
+    sortedJson(state.requests),
+    // 이름·메모는 배정에 쓰이지 않는다. (지점 이름은 세 지점·비효율 이동 규칙이 읽으므로 넣는다.)
+    sortedJson(
+      state.members.map((m) => ({
+        id: m.id,
+        locationIds: m.locationIds,
+        category: m.category,
+      })),
+    ),
+    sortedJson(state.locations),
+    JSON.stringify(Object.entries(state.travelTimes || {}).sort()),
+    Array.from(runtime.availableCells).sort().join(","),
+    (state.excludedMemberIds3 || []).slice().sort().join(","),
+    (state.onceLimitedMemberIds3 || []).slice().sort().join(","),
+  ].join("\u0001");
+  // 32비트 곱셈 해시 두 개(FNV-1a 계열) — 암호용이 아니라 입력이 바뀌었는지만 본다.
+  let h1 = 0x811c9dc5,
+    h2 = 0x01000193 ^ text.length;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = Math.imul(h2 ^ c, 0x5bd1e995);
+  }
+  return (h1 >>> 0).toString(36) + "-" + (h2 >>> 0).toString(36);
+}
+
 export function clearRuntimeScheduleCandidates() {
   runtime.candidates = [];
   runtime.schedule3Result = { candidateAList: [null, null, null] };
@@ -260,6 +293,9 @@ export function loadState() {
         const list = parsed.schedule3Result.candidateAList.slice(0, 3);
         while (list.length < 3) list.push(null);
         runtime.schedule3Result = { candidateAList: list };
+        // inputKey가 없으면(이 정책 이전 저장분) "모름"으로 두고 dropStaleCandidates가 처리한다.
+        if (typeof parsed.schedule3Result.inputKey === "string")
+          runtime.schedule3Result.inputKey = parsed.schedule3Result.inputKey;
       } else {
         const legacyCandidateA =
           (parsed.schedule3Result && parsed.schedule3Result.candidateA) || null;

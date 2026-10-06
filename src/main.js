@@ -16,7 +16,11 @@ import {
 } from "./pages/memberSchedule.js";
 import "./engine/greedy.js";
 import "./engine/chainDp.js";
-import { renderSchedule3Result, goToPage } from "./schedule3.js";
+import {
+  renderSchedule3Result,
+  goToPage,
+  dropStaleCandidates,
+} from "./schedule3.js";
 import "./backup.js";
 
 /* ---------------- Storage status ---------------- */
@@ -38,6 +42,7 @@ function init() {
   renderMemberTable();
   renderAvailabilityList();
   renderRequestList();
+  dropStaleCandidates();
   renderSchedule3Result();
   goToPage(runtime.currentPage);
   renderStorageStatus();

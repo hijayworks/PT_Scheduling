@@ -67,6 +67,8 @@ export { withSelectionOverride } from "../../src/selectionOverride.js";
 export {
   migrateStartMinShift,
   clearRuntimeScheduleCandidates,
+  candidateInputKey,
+  loadState,
   runtime,
   GenerationCancelledError,
 } from "../../src/state.js";
@@ -74,6 +76,7 @@ export {
   isUserEdited,
   keepsUserEditedSlot,
   candidatePoolEntries,
+  dropStaleCandidates,
   validateMove,
   prepareSwap,
 } from "../../src/schedule3.js";

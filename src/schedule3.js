@@ -13,6 +13,8 @@ import {
   GenerationCancelledError,
   acquireWakeLock,
   releaseWakeLock,
+  candidateInputKey,
+  clearRuntimeScheduleCandidates,
 } from "./state.js";
 import {
   memberById,
@@ -49,7 +51,10 @@ import {
   schedule2TotalIdleMinutes,
 } from "./engine/chainDp.js";
 import { setIdleFirst } from "./engine/chainDpCore.js";
-import { scheduleMetrics } from "./engine/scheduleQuality.js";
+import {
+  scheduleMetrics,
+  scheduleViolations,
+} from "./engine/scheduleQuality.js";
 import {
   selectCandidates,
   layoutSignature,
@@ -735,23 +740,7 @@ export function goToPage(pageId) {
     setActiveScheduleMemberId(null);
     renderRequestList();
   }
-  // 회원 스케줄 추가 등에서 신청 데이터가 바뀐 뒤 이 메뉴로 들어오면, 옛 신청 기준으로
-  // 계산된 후보는 더 이상 맞지 않으므로 자동으로 비워서 다시 생성하도록 안내한다.
-  if (pageId === "schedule3" && runtime.requestsChangedSinceGenerate3) {
-    runtime.requestsChangedSinceGenerate3 = false;
-    if (
-      runtime.candidates.length > 0 ||
-      runtime.schedule3Result.candidateAList.some(Boolean)
-    ) {
-      runtime.candidates = [];
-      runtime.schedule3Result = { candidateAList: [null, null, null] };
-      resetCandidateSession();
-      renderSchedule3Result();
-      saveState();
-      generateHint3El.textContent =
-        "신청 시간이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-    }
-  }
+  if (pageId === "schedule3") dropStaleCandidates();
   saveState();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
@@ -916,8 +905,6 @@ export function onSchedule3SelectionChanged() {
     renderSchedule3Result();
     generateHint3El.textContent =
       "회원 선택이 변경되어 기존 후보가 초기화되었습니다. 후보를 다시 생성해주세요.";
-  } else {
-    runtime.requestsChangedSinceGenerate3 = true;
   }
 }
 
@@ -1016,7 +1003,37 @@ export function isUserEdited(result) {
   );
 }
 
+// 후보는 생성 당시 입력(schedule3Result.inputKey)과 현재 입력(candidateInputKey)이 같을 때만 유효하다.
+// 다르면 사용자가 수정한 후보까지 모두 비운다 — 사람이 손댔다고 해서 더 이상 맞지 않는 스케줄을 남기지
+// 않는다. inputKey가 없는 저장분(이 정책 이전 데이터)은 현재 입력으로 하드 제약을 다시 검사해 모두
+// 통과하면 현재 입력 기준으로 인정하고, 하나라도 위반하면 비운다. 비웠으면 true.
+export function dropStaleCandidates() {
+  const slots = runtime.schedule3Result.candidateAList
+    .concat(runtime.candidates)
+    .filter(Boolean);
+  if (slots.length === 0) return false;
+  const key = candidateInputKey();
+  const saved = runtime.schedule3Result.inputKey;
+  if (saved === key) return false;
+  if (
+    saved === undefined &&
+    slots.every((r) => scheduleViolations(r).length === 0)
+  ) {
+    runtime.schedule3Result.inputKey = key;
+    saveState();
+    return false;
+  }
+  clearRuntimeScheduleCandidates();
+  resetCandidateSession();
+  renderSchedule3Result();
+  saveState();
+  generateHint3El.textContent =
+    "회원·신청·설정이 변경되어 기존 후보(내가 수정한 후보 포함)가 초기화되었습니다. 후보를 다시 생성해주세요.";
+  return true;
+}
+
 // 다시 생성할 때 슬롯 하나에 둘 결과: 사용자가 손댄 이전 결과는 덮어쓰지 않고 그대로 지킨다.
+// (입력이 바뀌었으면 runGenerate3가 먼저 dropStaleCandidates로 비우므로 여기까지 오지 않는다.)
 export function keepsUserEditedSlot(prev) {
   return isUserEdited(prev);
 }
@@ -1391,9 +1408,11 @@ export async function runGenerate3() {
       "먼저 회원 스케줄 추가 페이지에서 가능 시간을 등록해주세요.";
     return;
   }
+  dropStaleCandidates();
   generateHint3El.textContent = "";
   runtime.generationInProgress = true;
   runtime.generationCancelRequested = false;
+  const inputKey = candidateInputKey();
 
   const prevCandidateAList = runtime.schedule3Result.candidateAList;
   const prevCandidates = runtime.candidates;
@@ -1418,7 +1437,6 @@ export async function runGenerate3() {
       generateProgressText3El.textContent = phase + " " + pct + "%";
       generateProgressWrap3El.setAttribute("aria-valuenow", String(pct));
     });
-    runtime.requestsChangedSinceGenerate3 = false;
     // 체인 DP 슬롯 하나(prev/fresh)를 비교해 채택할 결과와 그 풀을 정한다: 새 결과가 실제로 더
     // 나으면 새 결과·새 풀을 채택하고, 완전 동점이면 새 풀을 쓰되 prev와 서명이 같은 자리를 prev
     // 참조로 바꿔 넣는다(prev가 풀에 없으면 앞에 추가). 새 결과가 더 못하면 기존 결과·풀을
@@ -1480,7 +1498,9 @@ export async function runGenerate3() {
       if (s.pool) candidatePools[idx] = s.pool;
     });
     runtime.candidates = keptBC.map((s) => s.candidate);
-    runtime.schedule3Result = { candidateAList };
+    runtime.schedule3Result = { candidateAList, inputKey };
+    // 생성하는 동안 입력이 바뀌었으면 방금 결과도 맞지 않는다.
+    if (dropStaleCandidates()) return;
     renderSchedule3Result();
     saveState();
     showToast("후보가 생성되었습니다", "success");
