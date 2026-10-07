@@ -73,22 +73,26 @@ function createCaseRunner({ aScale = 0.01, realClock = false } = {}) {
 
   // 반환: { B|C|A1|A2|A3: { result, pool, ms } }. withA면 후보A 안의 그리디 기준선은
   // aAttempts회(생략하면 attempts회)만 돈다. pins: 재최적화의 고정 세션(engine/pins.js).
+  // aBudgetScale: 후보A 호출 단위 예산 배율(chainDp.groupBudgets, 생략하면 aScale 그대로).
+  // withBC: false면 후보B·C를 만들지 않는다(같은 입력·고정이면 결과가 같아 측정에서 재사용할 때).
   async function generate(
     c,
-    { attempts, withA, aAttempts = attempts, pins = [] },
+    { attempts, withA, aAttempts = attempts, pins = [], aBudgetScale, withBC = true },
   ) {
     const out = {};
     let t = Date.now();
-    const bc = await lib.withSelectionOverride(...selection(c), () =>
-      lib.generateCandidatesAsync(
-        () => {},
-        { workerCount: 0, attempts },
-        pins,
-      ),
-    );
-    const bcMs = Date.now() - t;
-    out.B = { result: bc.built[0], pool: bc.pools[0], ms: bcMs };
-    out.C = { result: bc.built[1], pool: bc.pools[1], ms: bcMs };
+    if (withBC) {
+      const bc = await lib.withSelectionOverride(...selection(c), () =>
+        lib.generateCandidatesAsync(
+          () => {},
+          { workerCount: 0, attempts },
+          pins,
+        ),
+      );
+      const bcMs = Date.now() - t;
+      out.B = { result: bc.built[0], pool: bc.pools[0], ms: bcMs };
+      out.C = { result: bc.built[1], pool: bc.pools[1], ms: bcMs };
+    }
     if (withA) {
       t = Date.now();
       const cards = await withClock(() =>
@@ -96,6 +100,7 @@ function createCaseRunner({ aScale = 0.01, realClock = false } = {}) {
           lib.generateSchedule2Async(() => {}, {
             greedyAttempts: aAttempts,
             pins,
+            budgetScale: aBudgetScale,
           }),
         ),
       );

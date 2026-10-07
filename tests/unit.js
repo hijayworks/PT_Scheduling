@@ -1815,6 +1815,109 @@ test("재최적화 제안: 품질·고정·하드 제약을 지키면서 지금 
   assertEqual(lib.layoutSignature(lib.revertUnneededChanges(current, f.pins, kept)), lib.layoutSignature(kept));
 });
 
+// 국소 재최적화(5b-2a) 영향 범위. 세션 id = 회원+요일. 월: A0 B0 C0(seed, 옮겨 온 자리) D0 E0(확정만),
+// 화: B1 G1, 수: G2 H2 I2, 목: C3. C는 원래 수요일 6에 있었다(그 자리는 비어 있다).
+function impactFixture() {
+  const s = (memberId, day, startSlot) => ({ id: memberId + day, memberId, day, startSlot, duration: 60, locationId: "L1" });
+  const current = {
+    assigned: [s("A", 0, 0), s("B", 0, 6), s("C", 0, 12), s("D", 0, 18), s("E", 0, 24), s("B", 1, 0), s("G", 1, 12), s("G", 2, 0), s("H", 2, 12), s("I", 2, 24), s("C", 3, 0)],
+    unassignedMembers: [],
+  };
+  const userPins = [s("C", 0, 12), s("E", 0, 24)];
+  return { current, userPins, origins: [{ day: 2, startSlot: 6 }] };
+}
+const movableIds = (region) => region.movable.map((a) => a.id).sort();
+test("영향 범위: L1은 고정한 세션 바로 앞·뒤 1개씩, 원래 위치를 알면 원래 요일 빈자리 앞·뒤 1개씩만 움직일 수 있다", () => {
+  const f = impactFixture();
+  assertEqual(movableIds(lib.impactRegion(f.current, f.userPins, "L1")), ["B0", "D0"]);
+  assertEqual(movableIds(lib.impactRegion(f.current, f.userPins, "L1", f.origins)), ["B0", "D0", "G2", "H2"]);
+});
+test("영향 범위: L2는 고정한 요일 전체와 원래 요일 전체, L3는 그 회원들의 다른 요일 세션까지, 전체는 사용자 고정만 남긴다", () => {
+  const f = impactFixture();
+  const ids = (level, origins) => movableIds(lib.impactRegion(f.current, f.userPins, level, origins));
+  assertEqual(ids("L2"), ["A0", "B0", "D0"]);
+  assertEqual(ids("L2", f.origins), ["A0", "B0", "D0", "G2", "H2", "I2"]);
+  assertEqual(ids("L3"), ["A0", "B0", "B1", "C3", "D0"]); // C3: 고정한 회원 C의 다른 요일
+  assertEqual(ids("L3", f.origins), ["A0", "B0", "B1", "C3", "D0", "G1", "G2", "H2", "I2"]);
+  assertEqual(ids("full"), ["A0", "B0", "B1", "C3", "D0", "G1", "G2", "H2", "I2"]);
+});
+test("영향 범위: 사용자 고정은 어느 Level에서도 움직이지 않고, 범위 밖 세션은 모두 임시 고정되며, Level이 오를수록 범위가 줄지 않는다", () => {
+  const f = impactFixture();
+  let prev = [];
+  for (const origins of [[], f.origins]) {
+    prev = [];
+    for (const level of lib.IMPACT_LEVELS) {
+      const r = lib.impactRegion(f.current, f.userPins, level, origins);
+      const pinned = new Set(r.pins.map(lib.pinKey));
+      assert(f.userPins.every((p) => pinned.has(lib.pinKey(p))), level + ": 사용자 고정 유지");
+      assert(r.movable.every((a) => !pinned.has(lib.pinKey(a))), level + ": 움직일 세션은 고정에 없음");
+      assertEqual(r.pins.length + r.movable.length, r.total, level + ": 고정 + 움직임 = 전체");
+      assertEqual([r.userPinned, r.tempPinned], [2, r.total - 2 - r.movable.length], level);
+      assert(prev.every((id) => movableIds(r).includes(id)), level + ": 앞 Level 범위 포함");
+      prev = movableIds(r);
+    }
+  }
+  let threw = false;
+  try {
+    lib.impactRegion(f.current, f.userPins, "L4");
+  } catch {
+    threw = true;
+  }
+  assert(threw, "알 수 없는 Level은 거부");
+});
+testAsync("Level 진행: 움직일 세션이 없거나 앞 Level과 범위가 같으면 다시 생성하지 않는다", async () => {
+  const s = (memberId, day, startSlot) => ({ id: memberId + day, memberId, day, startSlot, duration: 60, locationId: "L1" });
+  // 월: C(고정) X, 화: Y — L1·L2·L3는 모두 {X}, 전체는 {X, Y}.
+  const current = { assigned: [s("C", 0, 0), s("X", 0, 6), s("Y", 1, 0)], unassignedMembers: [] };
+  const calls = [];
+  const out = await lib.runImpactLevels(current, [s("C", 0, 0)], [], async (pins, level) => (calls.push([level, pins.length]), level));
+  assertEqual(calls, [["L1", 2], ["full", 1]]);
+  assertEqual(out.map((e) => [e.level, e.outcome, e.sameAs || null]), [["L1", "L1", null], ["L2", "L1", "L1"], ["L3", "L1", "L1"], ["full", "full", null]]);
+  const lonely = { assigned: [s("C", 0, 0), s("Y", 1, 0)], unassignedMembers: [] };
+  const out2 = await lib.runImpactLevels(lonely, [s("C", 0, 0)], [], async (pins, level) => level);
+  assertEqual(out2.map((e) => e.skipped || e.outcome), ["empty", "empty", "empty", "full"]);
+});
+testAsync("Level 진행: 취소나 엔진 오류는 다음 Level·전체로 넘어가지 않고 그대로 실패한다", async () => {
+  const f = impactFixture();
+  for (const err of [new lib.GenerationCancelledError(), new Error("엔진 오류")]) {
+    const calls = [];
+    let caught = null;
+    try {
+      await lib.runImpactLevels(f.current, f.userPins, [], async (pins, level) => {
+        calls.push(level);
+        throw err;
+      });
+    } catch (e) {
+      caught = e;
+    }
+    assert(caught === err, "같은 오류가 올라와야 함");
+    assertEqual(calls, ["L1"]);
+  }
+});
+test("후보A 예산 배율: 생략하거나 1이면 운영 예산 그대로이고, 0 이하·숫자 아님은 거부한다", () => {
+  const ops = {
+    search: lib.PER_GROUP_SEARCH_DEADLINE_MS,
+    targetExtra: lib.TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS,
+    altBase: lib.TARGET_MATCH_ALT_BASE_BUDGET_MS,
+    polishTotal: lib.PER_GROUP_TOTAL_POLISH_BUDGET_MS,
+    minPolish: lib.MIN_POLISH_BUDGET_MS,
+  };
+  assert(Object.values(ops).every((x) => x > 0), "상수를 내보냈는지 확인");
+  assertEqual(lib.groupBudgets(), ops);
+  assertEqual(lib.groupBudgets(undefined), ops);
+  assertEqual(lib.groupBudgets(1), ops);
+  assertEqual(lib.groupBudgets(0.5).polishTotal, Math.round(ops.polishTotal / 2));
+  for (const bad of [0, -1, NaN, Infinity, "0.5", null]) {
+    let threw = false;
+    try {
+      lib.groupBudgets(bad);
+    } catch {
+      threw = true;
+    }
+    assert(threw, "거부해야 함: " + bad);
+  }
+});
+
 function fakeWorkerFactory(reply) {
   const created = [];
   return {
