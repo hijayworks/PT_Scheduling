@@ -2842,9 +2842,14 @@
       members,
       counts: {
         changedMembers: members.length,
+        changedSessions: all.length,
         dayChanges: countOf((c) => c.dayChanged),
         startChanges: countOf((c) => c.startChanged),
         locationChanges: countOf((c) => c.locationChanged),
+        // 같은 요일·지점에서 시작 시각만 바뀐 세션 수.
+        startOnlyChanges: countOf(
+          (c) => c.startChanged && !c.dayChanged && !c.locationChanged
+        ),
         newlyAssigned: members.filter((m) => m.status === "assigned").length,
         newlyUnassigned: members.filter((m) => m.status === "unassigned").length,
         sessionsAdded: countOf((c) => !c.from),
@@ -5096,6 +5101,45 @@
   function keepsSessions(current, result) {
     return result.unassignedMembers.length <= current.unassignedMembers.length && result.assigned.length >= current.assigned.length;
   }
+  var STABILITY_KEYS = [
+    "changedMembers",
+    "changedSessions",
+    "dayChanges",
+    "locationChanges",
+    "startOnlyChanges"
+  ];
+  function byStability(current) {
+    const cache = /* @__PURE__ */ new Map();
+    const counts = (e) => {
+      if (!cache.has(e.result))
+        cache.set(e.result, assignmentDiff(current, e.result).counts);
+      return cache.get(e.result);
+    };
+    return (x, y) => {
+      for (const k of STABILITY_KEYS) {
+        const d = counts(x)[k] - counts(y)[k];
+        if (d) return d;
+      }
+      return 0;
+    };
+  }
+  function revertUnneededChanges(current, pins, base) {
+    let result = base;
+    for (let progress = true; progress; ) {
+      progress = false;
+      for (const { memberId } of assignmentDiff(current, result).members) {
+        const cand = {
+          assigned: result.assigned.filter((a) => a.memberId !== memberId).concat(current.assigned.filter((a) => a.memberId === memberId)),
+          unassignedMembers: result.unassignedMembers.filter((m) => m.id !== memberId).concat(current.unassignedMembers.filter((m) => m.id === memberId))
+        };
+        if (missingPins(cand.assigned, pins).length || scheduleViolations(cand).length || !keepsSessions(current, cand) || isSchedule2ResultBetter(base, cand))
+          continue;
+        result = cand;
+        progress = true;
+      }
+    }
+    return result;
+  }
   function selectReoptimization(current, results, pins) {
     const stats = { results: results.length, missingPins: 0, hardViolations: 0, fewerSessions: 0 };
     const passed = results.filter((r) => {
@@ -5122,8 +5166,18 @@
       const sig = layoutSignature(r);
       return !seen.has(sig) && seen.add(sig);
     }).map((result) => ({ result, metrics: scheduleMetrics(result) }));
-    const group = improving.filter((e) => !isSchedule2ResultBetter(best, e.result)).sort(byTravelThenSignature);
-    const { kept } = pickVariants(group);
+    const stable = byStability(current);
+    const byStableThenSignature = (x, y) => stable(x, y) || byTravelThenSignature(x, y);
+    const group = improving.filter((e) => !isSchedule2ResultBetter(best, e.result)).sort(byStableThenSignature);
+    const revSeen = /* @__PURE__ */ new Set();
+    const reverted = pickVariants(group).kept.map((e) => revertUnneededChanges(current, pins, e.result)).filter((r) => {
+      const sig = layoutSignature(r);
+      return !revSeen.has(sig) && revSeen.add(sig);
+    }).map((result) => ({ result, metrics: scheduleMetrics(result) }));
+    const top = bestIn(reverted.map((e) => e.result));
+    const { kept } = pickVariants(
+      reverted.filter((e) => !isSchedule2ResultBetter(top, e.result)).sort(byStableThenSignature)
+    );
     return { status: "improved", reason: null, proposal: kept[0], variants: kept, improving, stats };
   }
 

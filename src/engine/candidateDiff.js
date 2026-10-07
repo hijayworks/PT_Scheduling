@@ -154,9 +154,14 @@ export function assignmentDiff(base, other) {
     members,
     counts: {
       changedMembers: members.length,
+      changedSessions: all.length,
       dayChanges: countOf((c) => c.dayChanged),
       startChanges: countOf((c) => c.startChanged),
       locationChanges: countOf((c) => c.locationChanged),
+      // 같은 요일·지점에서 시작 시각만 바뀐 세션 수.
+      startOnlyChanges: countOf(
+        (c) => c.startChanged && !c.dayChanged && !c.locationChanged,
+      ),
       newlyAssigned: members.filter((m) => m.status === "assigned").length,
       newlyUnassigned: members.filter((m) => m.status === "unassigned").length,
       sessionsAdded: countOf((c) => !c.from),

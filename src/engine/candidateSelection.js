@@ -1,5 +1,5 @@
 import { isSchedule2ResultBetter } from "./scheduleCompare.js";
-import { formatDelta } from "./candidateDiff.js";
+import { formatDelta, assignmentDiff } from "./candidateDiff.js";
 import { scheduleMetrics, scheduleViolations } from "./scheduleQuality.js";
 import { missingPins } from "./pins.js";
 
@@ -257,7 +257,7 @@ export function selectCandidates(entries) {
   };
 }
 
-// 재최적화(5a) 제안 고르기: 고정 세션(pins)을 넘겨 다시 생성한 결과들(results, 후보A·B·C와 동점 풀)
+// 재최적화(5a·5b-1) 제안 고르기: 고정 세션(pins)을 넘겨 다시 생성한 결과들(results, 후보A·B·C와 동점 풀)
 // 중에서 지금 수정 카드(current)보다 나은 것을 고른다. 사용자 기대는 "고정한 수업을 유지하면서 나머지를
 // 더 잘 정리"이므로 제안 자격(업무 정책)은 다음 순서로 본다.
 //   1) 최종 gate: 고정 세션을 하나라도 같은 자리에 두지 않았거나(missingPins) 하드 제약을 어긴 결과는
@@ -266,14 +266,18 @@ export function selectCandidates(entries) {
 //      — 기존 비교 기준은 수업 1건을 빈 시간 SESSION_VALUE_MINUTES분과 바꿔 주므로, 수업을 빼고 공강을
 //      크게 줄인 결과도 "더 낫다"가 된다. 회원 간 재배분(A -1회, B +1회)은 총수가 유지되면 허용한다
 //      (사용자 결정 2026-10-07). 재배분 정도는 assignmentDiff counts(membersFewer 등)로 측정한다.
-//   3) 남은 결과 중 기존 추천 비교 기준(isSchedule2ResultBetter)으로 current보다 엄격히 나은 최선만
-//      제안한다. 같은 품질의 다른 배치는 개선이 아니다. 개별 지표는 나빠질 수 있다 — 예를 들어 수업
+//   3) 남은 결과 중 기존 추천 비교 기준(isSchedule2ResultBetter)으로 current보다 엄격히 나은 최선의 품질
+//      그룹(비교 기준으로 완전히 같은 결과들)만 제안 대상이다. 개별 지표는 나빠질 수 있다 — 예를 들어 수업
 //      1건이 늘면 빈 시간이 20분 늘어도 더 나은 결과다.
-// variants: 제안과 비교 기준으로 완전히 같은 품질의 다른 배치(pickVariants, 제안이 첫 번째).
+//   4) 안정성(5b-1, 사용자 결정 2026-10-07 "Q·S1 + R"): 그 품질 그룹 안에서만 지금 카드와 가장 비슷한
+//      배치를 앞에 둔다(STABILITY_KEYS). 품질이 더 낮은 결과를 안정성 때문에 고르지 않는다.
+//   5) 고른 배치들에 되돌리기 패스(revertUnneededChanges)를 적용해, 품질·고정·하드 제약·수업 유지를
+//      지키면서 원래 자리로 돌릴 수 있는 회원은 돌린다.
+// variants: 제안과 비교 기준으로 완전히 같은 품질의 다른 배치(pickVariants, 안정성 순, 제안이 첫 번째).
 // state(회원·선택 상태)를 읽으므로 생성 때와 같은 선택 상태에서, 빈 시간 최소화 모드를 끈 채 호출한다.
 // 반환 { status: "improved" | "no-better", reason, proposal, variants, improving, stats }
-//   improving: 자격을 통과하고 current보다 엄격히 나은 서로 다른 배치 전부({result, metrics}, 순서 무관).
-//   지금은 측정(tests/reoptimize.js의 안정성 정렬 비교)만 쓴다.
+//   improving: 자격을 통과하고 current보다 엄격히 나은 서로 다른 배치 전부({result, metrics}, 순서 무관,
+//   되돌리기 전). 측정(tests/reoptimize.js의 안정성 비교)과 퍼즈 불변조건 검사가 쓴다.
 //   reason(no-better): "fewer-sessions"(비교 기준으로 더 나은 결과는 있었지만 모두 수업이 줄거나 미배정이
 //   늘었음) | "same-layout"(current와 같은 배치를 다시 찾음) | "equal-quality"(다른 배치지만 비교 기준으로
 //   동점) | "worse"(자격을 통과한 결과가 모두 더 나쁨) | "none"(gate 통과 결과 없음)
@@ -284,6 +288,63 @@ export function keepsSessions(current, result) {
     result.unassignedMembers.length <= current.unassignedMembers.length &&
     result.assigned.length >= current.assigned.length
   );
+}
+
+// 업무 정책값(5b-1): 품질이 완전히 같은 재최적화 결과 사이의 순서. 지금 카드 대비 assignmentDiff counts를
+// 이 순서로 비교해 작을수록 앞이다(변경 회원 → 변경 세션 → 요일 변경 → 지점 변경 → 시작 시각만 변경).
+export const STABILITY_KEYS = [
+  "changedMembers",
+  "changedSessions",
+  "dayChanges",
+  "locationChanges",
+  "startOnlyChanges",
+];
+// entry({result}) 비교 함수: current와 더 비슷한 쪽이 앞(음수). 품질은 보지 않는다.
+export function byStability(current) {
+  const cache = new Map();
+  const counts = (e) => {
+    if (!cache.has(e.result))
+      cache.set(e.result, assignmentDiff(current, e.result).counts);
+    return cache.get(e.result);
+  };
+  return (x, y) => {
+    for (const k of STABILITY_KEYS) {
+      const d = counts(x)[k] - counts(y)[k];
+      if (d) return d;
+    }
+    return 0;
+  };
+}
+
+// 되돌리기 패스(R): base에서 바뀐 회원을 한 명씩 current의 배치(세션 전부, 미배정 여부 포함)로 되돌려 보고,
+// 고정 유지·하드 제약·수업 유지(keepsSessions)를 지키며 비교 기준으로 base보다 나빠지지 않을 때만 되돌린
+// 채로 둔다. 되돌린 회원이 없을 때까지 반복한다. 처리 순서가 결과를 바꿀 수 있어 member id 오름차순
+// (assignmentDiff members 순서)으로 고정한다. 되돌릴 때마다 바뀐 회원이 한 명 줄어 반드시 끝난다.
+export function revertUnneededChanges(current, pins, base) {
+  let result = base;
+  for (let progress = true; progress; ) {
+    progress = false;
+    for (const { memberId } of assignmentDiff(current, result).members) {
+      const cand = {
+        assigned: result.assigned
+          .filter((a) => a.memberId !== memberId)
+          .concat(current.assigned.filter((a) => a.memberId === memberId)),
+        unassignedMembers: result.unassignedMembers
+          .filter((m) => m.id !== memberId)
+          .concat(current.unassignedMembers.filter((m) => m.id === memberId)),
+      };
+      if (
+        missingPins(cand.assigned, pins).length ||
+        scheduleViolations(cand).length ||
+        !keepsSessions(current, cand) ||
+        isSchedule2ResultBetter(base, cand)
+      )
+        continue;
+      result = cand;
+      progress = true;
+    }
+  }
+  return result;
 }
 
 export function selectReoptimization(current, results, pins) {
@@ -315,7 +376,22 @@ export function selectReoptimization(current, results, pins) {
       return !seen.has(sig) && seen.add(sig);
     })
     .map((result) => ({ result, metrics: scheduleMetrics(result) }));
-  const group = improving.filter((e) => !isSchedule2ResultBetter(best, e.result)).sort(byTravelThenSignature);
-  const { kept } = pickVariants(group);
+  const stable = byStability(current);
+  const byStableThenSignature = (x, y) => stable(x, y) || byTravelThenSignature(x, y);
+  const group = improving.filter((e) => !isSchedule2ResultBetter(best, e.result)).sort(byStableThenSignature);
+  // 되돌리기는 고른 variant에만 적용하고(최대 MAX_CARD_VARIANTS개), 되돌린 뒤 같은 배치는 합친다.
+  // 되돌리기는 품질을 낮추지 않으므로 되돌린 결과 중 비교 기준 최선 그룹만 남긴다.
+  const revSeen = new Set();
+  const reverted = pickVariants(group)
+    .kept.map((e) => revertUnneededChanges(current, pins, e.result))
+    .filter((r) => {
+      const sig = layoutSignature(r);
+      return !revSeen.has(sig) && revSeen.add(sig);
+    })
+    .map((result) => ({ result, metrics: scheduleMetrics(result) }));
+  const top = bestIn(reverted.map((e) => e.result));
+  const { kept } = pickVariants(
+    reverted.filter((e) => !isSchedule2ResultBetter(top, e.result)).sort(byStableThenSignature),
+  );
   return { status: "improved", reason: null, proposal: kept[0], variants: kept, improving, stats };
 }

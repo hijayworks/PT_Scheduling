@@ -73,7 +73,8 @@ const STABILITY_ORDERS = {
   ],
 };
 // Q·S1/Q·S2(참고): 품질은 Q와 같은 동률 그룹 안에서만 안정성 정렬로 고른다(품질 희생 0).
-const POLICIES = ["Q", "S1", "S2", "S1+R", "S2+R", "Q+R", "Q·S1", "Q·S2"];
+// 앱: 실제 selectReoptimization 제안(5b-1 정책 Q·S1+R — variant마다 되돌린 뒤 가장 안정한 것).
+const POLICIES = ["Q", "S1", "S2", "S1+R", "S2+R", "Q+R", "Q·S1", "Q·S2", "Q·S1+R", "앱"];
 const CHANGE_COLUMNS = [
   ["members", "변경 회원"],
   ["sessions", "변경 세션"],
@@ -370,7 +371,7 @@ function summarizeStability(runs) {
   console.log(
     `기준\t1명 이상 되돌린 실행\t되돌린 회원 수\t줄어든 변경 세션\t순서 민감도: 결과가 순서마다 다른 실행\t순서 간 변경 회원 수 최대 차이(평균/최대)`,
   );
-  ["S1", "S2", "Q"].forEach((p) => {
+  ["S1", "S2", "Q", "Q·S1"].forEach((p) => {
     const rv = list.map((r) => r.stab.revert[p]);
     console.log(
       [
@@ -491,17 +492,13 @@ function editedCard(recommended, sc, rand) {
 // 지금 카드 → 결과의 변경량(5b-1 안정성 지표). 짝짓기는 candidateDiff.assignmentDiff 그대로다.
 function changeOf(current, result) {
   const d = lib.assignmentDiff(current, result);
-  const changes = d.members.flatMap((m) => m.changes);
   return {
     members: d.counts.changedMembers,
-    sessions: changes.length,
+    sessions: d.counts.changedSessions,
     statusChanges: d.counts.newlyAssigned + d.counts.newlyUnassigned,
     dayChanges: d.counts.dayChanges,
     locationChanges: d.counts.locationChanges,
-    startOnly: changes.filter(
-      (x) =>
-        x.from && x.to && x.startChanged && !x.dayChanged && !x.locationChanged,
-    ).length,
+    startOnly: d.counts.startOnlyChanges,
     newlyAssigned: d.counts.newlyAssigned,
     added: d.counts.sessionsAdded,
     removed: d.counts.sessionsRemoved,
@@ -569,9 +566,13 @@ function stabilityMeasure(card, pins, out, rand) {
     change: changeOf(card, result),
   });
   const pool = out.improving.map((e) => entryOf(e.result));
+  // Q: 5b-1 이전 앱 정책(품질 최선 → 이동 시간 → 배치 서명). 앱 제안은 이제 Q·S1+R이다.
   const picked = {
-    Q: entryOf(out.proposal.result),
+    Q: pool.slice().sort(byQuality)[0],
+    앱: entryOf(out.proposal.result),
   };
+  if (pool.some((e) => lib.isSchedule2ResultBetter(e.result, picked.앱.result)))
+    throw new Error("앱 제안이 품질 최선(Q)보다 낮음");
   Object.entries(STABILITY_ORDERS).forEach(([p, keys]) => {
     picked[p] = pool.slice().sort((x, y) => byStability(keys)(x, y) || byQuality(x, y))[0];
     picked["Q·" + p] = pool
@@ -594,7 +595,7 @@ function stabilityMeasure(card, pins, out, rand) {
   ];
   for (let i = 0; i < REVERT_SHUFFLES; i++) orders.push((ids) => shuffle(ids));
   const revert = {};
-  ["S1", "S2", "Q"].forEach((p) => {
+  ["S1", "S2", "Q", "Q·S1"].forEach((p) => {
     const finals = orders.map((order) => entryOf(revertPass(card, pins, picked[p].result, order)));
     const r = finals[0];
     // S+R은 S보다 어떤 변경 지표도 늘면 안 된다(되돌린 회원의 변경만 사라진다).
@@ -725,7 +726,7 @@ function dayIdle(result, day) {
                     lib.layoutSignature(r) ===
                     lib.layoutSignature(out.proposal.result),
                 ),
-              )
+              ) || "R(되돌린 배치)"
             : null;
           // 이전 정책(수업 유지 조건 없이 비교 기준만)으로도 개선이었는지 — 같은 시드의 이전 측정과 비교용.
           const gated = all.filter(
@@ -755,26 +756,7 @@ function dayIdle(result, day) {
                 )
               : null;
           // 제안이 지금 카드에서 얼마나 바뀌는지(5b "현재 스케줄과의 차이" 비용 판단용).
-          let change = null;
-          if (out.proposal) {
-            const d = lib.assignmentDiff(card, out.proposal.result);
-            const changes = d.members.flatMap((m) => m.changes);
-            change = {
-              members: d.counts.changedMembers,
-              sessions: changes.length,
-              dayChanges: d.counts.dayChanges,
-              startOnly: changes.filter(
-                (x) =>
-                  x.from &&
-                  x.to &&
-                  x.startChanged &&
-                  !x.dayChanged &&
-                  !x.locationChanged,
-              ).length,
-              added: d.counts.sessionsAdded,
-              removed: d.counts.sessionsRemoved,
-            };
-          }
+          const change = out.proposal ? changeOf(card, out.proposal.result) : null;
           const aBest = bestOf(
             ["A1", "A2", "A3"].flatMap((e) => resultsOf(pinned, e)),
           );

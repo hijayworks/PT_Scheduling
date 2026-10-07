@@ -7,7 +7,7 @@
 // 입력을 고정 세션과 함께 다시 생성하고, 그 결과 전부가 하드 제약에 더해 고정 유지(pinKept)·고정
 // 회원 횟수(pinQuota)를 지키는지 본다. 고정을 고른 결과를 "지금 카드"로 두고 selectReoptimization이
 // 내준 제안·동점 variant·개선 목록 전부가 고정 유지·하드 제약·총 수업 수와 미배정 수 유지를 지키고 지금
-// 카드보다 엄격히 나은지(reoptProposal)도 본다.
+// 카드보다 엄격히 나은지, 제안·variant가 개선 결과 중 품질 최선보다 낮지 않은지(reoptProposal, 5b-1)도 본다.
 //
 // 모든 입력은 시드 하나로 결정되고 후보A도 가짜 시계라, 같은 시드는 항상 같은 결과를 낸다.
 //
@@ -254,7 +254,7 @@ const PIN_RULES = {
   pinKept: "고정 세션은 같은 회원·요일·시작 시각·지점에 그대로 남는다",
   pinQuota: "고정 세션도 회원 최대 횟수와 하루 1회에 포함한다",
   reoptProposal:
-    "재최적화 제안은 고정·하드 제약을 지키고, 총 수업 수를 줄이거나 미배정을 늘리지 않으며, 지금 카드보다 낫다",
+    "재최적화 제안은 고정·하드 제약을 지키고, 총 수업 수를 줄이거나 미배정을 늘리지 않으며, 지금 카드보다 낫고, 개선 결과 중 품질 최선보다 낮지 않다",
 };
 const RULES = Object.keys(lib.HARD_RULES).concat(Object.keys(PIN_RULES));
 const ruleText = (r) => lib.HARD_RULES[r] || PIN_RULES[r];
@@ -328,7 +328,7 @@ async function pinQuotaCheck(input, pins, results) {
   return { bad, opp };
 }
 
-// [selectReoptimization이 내준 결과 중 규칙을 어긴 수, 기회]. 기회: 고정·하드 제약을 통과해 제안 후보가
+// [selectReoptimization이 내준 결과 중 규칙을 어긴 수(품질 최선보다 낮은 제안 포함), 기회]. 기회: 고정·하드 제약을 통과해 제안 후보가
 // 된 결과 수. "수업을 줄였지만 비교 기준으로는 더 나은" 결과는 무작위 입력에서 거의 나오지 않아(gate를
 // 빼는 변이도 여기서는 잡히지 않았다) 그 경로는 단위 테스트("수업을 줄여 공강을 줄인 결과는…")가 지킨다.
 async function reoptProposalCheck(input, current, pins, results) {
@@ -341,15 +341,19 @@ async function reoptProposalCheck(input, current, pins, results) {
     input.onceLimitedMemberIds3,
     async () => {
       const out = lib.selectReoptimization(current, results, pins);
-      const bad = out.variants
-        .concat(out.improving)
-        .filter(
-          ({ result: r }) =>
-            lib.missingPins(r.assigned, pins).length ||
-            lib.scheduleViolations(r).length ||
-            !keeps(r) ||
-            !lib.isSchedule2ResultBetter(r, current),
-        ).length;
+      // 5b-1: 제안(되돌리기 후 포함)은 품질 최선(Q)보다 낮으면 안 된다 — 안정성 때문에 품질을 희생하지 않는다.
+      const belowQ = ({ result: r }) =>
+        out.improving.some((e) => lib.isSchedule2ResultBetter(e.result, r));
+      const bad =
+        out.variants
+          .concat(out.improving)
+          .filter(
+            ({ result: r }) =>
+              lib.missingPins(r.assigned, pins).length ||
+              lib.scheduleViolations(r).length ||
+              !keeps(r) ||
+              !lib.isSchedule2ResultBetter(r, current),
+          ).length + out.variants.filter(belowQ).length;
       return { bad, opp: out.stats.passed || 0 };
     },
   );
