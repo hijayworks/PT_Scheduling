@@ -86,9 +86,9 @@ module.exports = [
     }
   },
   {
-    // tests/unit.js가 esbuild로 번들링해 요구(require)하는 진입점 — src/**/*.js처럼
-    // export/import를 쓰는 ES 모듈이라 이 파일만 sourceType을 module로 되돌린다.
-    files: ["tests/unit/entry.js"],
+    // esbuild로 번들링하는 테스트 진입점(tests/unit.js의 unit 번들, tests/opBudget.js의 브라우저 번들) —
+    // src/**/*.js처럼 export/import를 쓰는 ES 모듈이라 이 파일들만 sourceType을 module로 되돌린다.
+    files: ["tests/unit/entry.js", "tests/opBudget/entry.js"],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: "module",

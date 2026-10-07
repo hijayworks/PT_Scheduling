@@ -18,6 +18,7 @@
 //   node tests/reoptimize.js --attempts 200 --a-scale 0.02
 //   node tests/reoptimize.js --json out.json  실행 기록 전체 저장(케이스를 나눠 돌린 뒤 --merge로 합친다)
 //   node tests/reoptimize.js --merge a.json b.json ...   저장한 기록들을 합쳐 요약만 출력
+//   node tests/reoptimize.js --cards cards.json [--case ..]   손댄 카드만 내보냄(tests/opBudget.js 운영 예산 측정 입력)
 //   node tests/reoptimize.js --levels [--case CASE-03] [--scenario move1] [--json out.json]   [6] 국소 재최적화 Level 측정
 "use strict";
 
@@ -1110,6 +1111,7 @@ function dayIdle(result, day) {
     aScale: globalThis.__PT_TEST_BUDGET_SCALE__,
     runs: [],
   };
+  const cards = [];
   for (const file of files) {
     const c = JSON.parse(fs.readFileSync(path.join(GOLDEN_DIR, file), "utf8"));
     runner.loadCase(c);
@@ -1140,6 +1142,28 @@ function dayIdle(result, day) {
           continue;
         }
         const { card, pins, origins } = prep;
+        if (opt("--cards")) {
+          // 운영 예산 측정(tests/opBudget.js)용: 같은 손댄 카드와 계산된 입력 state를 내보낸다.
+          cards.push({
+            ...base,
+            state: {
+              locations: lib.state.locations,
+              travelTimes: lib.state.travelTimes,
+              members: lib.state.members,
+              requests: lib.state.requests,
+              availableCells: [...lib.runtime.availableCells],
+              excludedMemberIds3: sel[0],
+              onceLimitedMemberIds3: sel[1],
+            },
+            card: {
+              assigned: card.assigned,
+              unassignedIds: card.unassignedMembers.map((m) => m.id),
+            },
+            pins,
+            origins,
+          });
+          continue;
+        }
         if (LEVELS_MODE) {
           const rec = await levelMeasure(c, card, pins, origins, sel);
           report.runs.push({ ...base, pins: pins.length, ...rec });
@@ -1258,6 +1282,10 @@ function dayIdle(result, day) {
         );
       }
     }
+  }
+  if (opt("--cards")) {
+    fs.writeFileSync(opt("--cards"), JSON.stringify(cards) + "\n");
+    return;
   }
   if (opt("--json"))
     fs.writeFileSync(opt("--json"), JSON.stringify(report, null, 2) + "\n");
