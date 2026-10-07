@@ -1320,7 +1320,20 @@ test("배정 차이: 회원별 요일·시작 시각·지점 변경과 배정↔
       ["F", "assigned", [[null, 1, false, false, false]]],
     ],
   );
-  assertEqual(counts, { changedMembers: 5, dayChanges: 1, startChanges: 2, locationChanges: 1, newlyAssigned: 1, newlyUnassigned: 1, sessionsAdded: 2, sessionsRemoved: 1 });
+  assertEqual(counts, {
+    changedMembers: 5,
+    dayChanges: 1,
+    startChanges: 2,
+    locationChanges: 1,
+    newlyAssigned: 1,
+    newlyUnassigned: 1,
+    sessionsAdded: 2,
+    sessionsRemoved: 1,
+    // 재배분: C 1→0, D 1→2, F 0→1
+    membersFewer: 1,
+    membersMore: 2,
+    sessionCountShift: 3,
+  });
 });
 test("배정 차이: 세션 순서만 다르고 배정이 같으면 변화가 없고, 같은 요일 안의 이동은 요일 변경이 아니다", () => {
   const s = (memberId, day, startSlot, locationId) => ({ memberId, day, startSlot, locationId });
@@ -1733,6 +1746,22 @@ test("재최적화 제안: 수업을 줄여 공강을 줄인 결과는 비교 �
   // 미배정이 늘어난 결과도 같은 이유로 제안하지 않는다.
   const unassignedMore = { assigned: f.current.assigned.filter((x) => x.memberId !== "B"), unassignedMembers: [lib.memberById("B")] };
   assertEqual(lib.selectReoptimization(f.current, [unassignedMore], f.pins).reason, "worse");
+});
+
+test("재최적화 제안: 총 수업과 미배정 수가 유지되면 회원 간 수업 재배분(A -1회, B +1회)은 허용하고 재배분 정도를 센다", () => {
+  const f = reoptFixture();
+  // 지금 카드: 화요일 A(13:30) 앞에 빈 30분. A를 1회로 줄이고 B를 화요일에 넣으면 총 수업은 같고 빈 시간 0.
+  const mon = [at("A", 0, 0, "L1"), at("B", 0, 6, "L1")];
+  const current = { assigned: mon.concat([at("S", 1, 0, "L1"), at("A", 1, 9, "L1"), at("C", 1, 18, "L3")]), unassignedMembers: [] };
+  const shifted = { assigned: mon.concat([at("S", 1, 0, "L1"), at("B", 1, 6, "L1"), at("C", 1, 15, "L3")]), unassignedMembers: [] };
+  assert(lib.isSchedule2ResultBetter(shifted, current), "비교 기준으로는 더 나아야 함(픽스처 확인)");
+  assertEqual(lib.scheduleViolations(shifted), [], "위반 없음(픽스처 확인)");
+  assert(lib.keepsSessions(current, shifted));
+  const out = lib.selectReoptimization(current, [shifted], f.pins);
+  assertEqual(out.status, "improved");
+  assertEqual(out.improving.map((e) => lib.layoutSignature(e.result)), [lib.layoutSignature(shifted)]);
+  const { counts } = lib.assignmentDiff(current, shifted);
+  assertEqual([counts.membersFewer, counts.membersMore, counts.sessionCountShift, counts.newlyUnassigned], [1, 1, 2, 0]);
 });
 
 function fakeWorkerFactory(reply) {

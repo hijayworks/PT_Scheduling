@@ -35,6 +35,8 @@ export {
   formatTradeoff,
   selectCandidates,
   selectReoptimization,
+  keepsSessions,
+  byTravelThenSignature,
   MAX_CARD_VARIANTS,
   pickVariants,
 } from "../../src/engine/candidateSelection.js";
