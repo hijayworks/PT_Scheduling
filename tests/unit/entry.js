@@ -26,6 +26,16 @@ export {
   generateSchedule2Async,
 } from "../../src/engine/chainDp.js";
 export { scheduleMetrics, scheduleViolations, HARD_RULES } from "../../src/engine/scheduleQuality.js";
+export {
+  QUALITY_AXES,
+  layoutSignature,
+  qualityKey,
+  placementChanges,
+  dominates,
+  formatTradeoff,
+  selectCandidates,
+  MAX_CARD_VARIANTS,
+} from "../../src/engine/candidateSelection.js";
 export { setIdleFirst } from "../../src/engine/chainDpCore.js";
 export {
   candidateLocationsForRequest,

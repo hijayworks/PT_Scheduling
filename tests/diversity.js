@@ -13,11 +13,6 @@
 const fs = require("fs");
 const path = require("path");
 const { createCaseRunner } = require("./caseRunner.js");
-const {
-  QUALITY_KEYS,
-  signature,
-  diversitySummary,
-} = require("./candidateDiversity.js");
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => {
@@ -33,6 +28,9 @@ const attempts = Number(opt("--attempts", DIVERSITY_ATTEMPTS));
 const runner = createCaseRunner({
   aScale: Number(opt("--a-scale", DIVERSITY_A_SCALE)),
 });
+// lib(예산 전역 반영)을 caseRunner가 먼저 불러온 뒤에 불러야 한다.
+const { signature, diversitySummary } = require("./candidateDiversity.js");
+const { lib } = runner;
 
 const GOLDEN_DIR = path.join(__dirname, "golden");
 const onlyCase = opt("--case");
@@ -42,9 +40,22 @@ const files = fs
   .filter((f) => !onlyCase || f === onlyCase + ".json")
   .sort();
 const KEY_ORDER = ["A1", "A2", "A3", "B", "C"];
-const LABEL = Object.fromEntries(
-  QUALITY_KEYS.map(([k, , label]) => [k, label]),
-);
+// 표 열: Pareto 축 + tie-break(이동 시간).
+const COLUMNS = [
+  ["unassigned", "미배정"],
+  ["sessions", "수업"],
+  ["inefficientMoves", "비효율"],
+  ["travelCount", "이동"],
+  ["idleMinutes", "빈시간"],
+  ["travelMinutes", "이동분"],
+];
+const LABEL = Object.fromEntries(COLUMNS);
+const metricRow = (m) => COLUMNS.map(([k]) => m[k]).join("/");
+const HIDDEN_REASON = {
+  unlabeled: "unlabeled Pareto",
+  "role-taken": "같은 역할을 더 나은 후보가 차지",
+  "card-limit": "카드 수 상한",
+};
 const pct = (x) => Math.round(x * 100) + "%";
 const signed = (n) => (n > 0 ? "+" : "") + n;
 
@@ -65,6 +76,9 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
     paretoQualityTypes: 0,
   };
   const relationCount = {};
+  const selectionTotals = { cases: 0 };
+  const roleCount = {};
+  const hiddenAll = [];
   for (const file of files) {
     const c = JSON.parse(fs.readFileSync(path.join(GOLDEN_DIR, file), "utf8"));
     runner.loadCase(c);
@@ -81,7 +95,65 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
       });
     }
     const s = diversitySummary(cands);
+
+    // 후보 선정: 표시 카드 5장과 각 엔진의 동점 풀 전체를 하나의 후보 풀로 본다.
+    const entries = [];
+    for (const key of KEY_ORDER) {
+      if (!gen[key]) continue;
+      const { result, pool } = gen[key];
+      const layouts = [result].concat((pool || []).filter((r) => r !== result));
+      for (let i = 0; i < layouts.length; i++)
+        entries.push({
+          key: i ? `${key}#${i}` : key,
+          result: layouts[i],
+          metrics: await runner.metricsOf(c, layouts[i]),
+        });
+    }
+    const sel = await lib.withSelectionOverride(
+      c.excludedMemberIds3 || [],
+      c.onceLimitedMemberIds3 || [],
+      async () => lib.selectCandidates(entries),
+    );
+    selectionTotals.cases++;
+    Object.entries(sel.stats).forEach(
+      ([k, v]) => (selectionTotals[k] = (selectionTotals[k] || 0) + v),
+    );
+    sel.cards.forEach(
+      (cd) => (roleCount[cd.label] = (roleCount[cd.label] || 0) + 1),
+    );
+    sel.hidden.forEach((h) => hiddenAll.push({ caseId: c.id, ...h }));
+    const describe = (cd) => ({
+      role: cd.label,
+      keys: cd.variants.map((v) => v.key),
+      metrics: cd.metrics,
+      tradeoff: lib.formatTradeoff(cd.deltas),
+      // 첫 배치 대비 회원·요일·지점 배정 차이
+      variantChanges: cd.variants
+        .slice(1)
+        .map((v) => lib.placementChanges(v.result, cd.variants[0].result)),
+      // 유사도 기준 검토용: 같은 품질의 모든 고유 배치가 대표 배치와 다른 회원·요일·지점 배정 수
+      groupChanges: [
+        ...new Map(
+          entries
+            .filter(
+              (e) => lib.qualityKey(e.metrics) === lib.qualityKey(cd.metrics),
+            )
+            .map((e) => [signature(e.result), e]),
+        ).values(),
+      ]
+        .filter((e) => signature(e.result) !== signature(cd.variants[0].result))
+        .map((e) => lib.placementChanges(e.result, cd.variants[0].result))
+        .sort((a, b) => a - b),
+      reason: cd.reason,
+      qualifiesFor: cd.qualifiesFor,
+    });
+
     report.cases[c.id] = {
+      selection: {
+        stats: sel.stats,
+        cards: sel.cards.map(describe),
+        hidden: sel.hidden.map(describe),
+      },
       ...s,
       metrics: Object.fromEntries(cands.map((x) => [x.key, x.metrics])),
       ties: Object.fromEntries(cands.map((x) => [x.key, x.ties])),
@@ -97,12 +169,12 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
       `\n${c.id} — 표시 ${s.shown}, exact unique ${s.exactUnique}, 품질 유형 ${s.qualityTypes}, 지배되지 않은 후보 ${s.pareto.join(",")}(품질 유형 ${s.paretoQualityTypes})`,
     );
     console.log(
-      "  후보\t" + QUALITY_KEYS.map(([, , l]) => l).join("\t") + "\t동점배치",
+      "  후보\t" + COLUMNS.map(([, l]) => l).join("\t") + "\t동점배치",
     );
     cands.forEach((x) =>
       console.log(
         `  ${x.key}\t` +
-          QUALITY_KEYS.map(([k]) => x.metrics[k]).join("\t") +
+          COLUMNS.map(([k]) => x.metrics[k]).join("\t") +
           `\t${x.ties}`,
       ),
     );
@@ -115,7 +187,50 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
             .join(", "),
       ),
     );
+
+    const st = sel.stats;
+    console.log(
+      `  [선정] 생성 ${st.generated} → exact unique ${st.exactUnique}(중복 ${st.exactDuplicates}) → 품질 그룹 ${st.qualityGroups} → Pareto 그룹 ${st.paretoGroups}(지배 제거: 그룹 ${st.dominatedGroups}, 배치 ${st.dominatedLayouts}) → 카드 ${st.cardsShown}`,
+    );
+    console.log(
+      `         유사 variant 제거 ${st.similarRemoved}, variant 상한 초과 ${st.variantLimitRemoved}`,
+    );
+    console.log(
+      `  카드\t역할\t${COLUMNS.map(([, l]) => l).join("/")}\t추천 대비\tvariant(첫 배치 대비 배정 차이)\t출처`,
+    );
+    sel.cards.forEach((cd, i) => {
+      const d = describe(cd);
+      console.log(
+        `  ${i + 1}\t${d.role}\t${metricRow(d.metrics)}\t${d.tradeoff || "-"}\t${d.keys.length}(${d.variantChanges.join(",") || "-"})\t${d.keys.join(",")}\t그룹 배정 차이 [${d.groupChanges.join(",")}]`,
+      );
+    });
+    sel.hidden.forEach((h) => {
+      const d = describe(h);
+      console.log(
+        `  숨김\t${HIDDEN_REASON[d.reason]}${d.qualifiesFor.length ? "(" + d.qualifiesFor.join(",") + ")" : ""}\t${metricRow(d.metrics)}\t${d.tradeoff}\t${d.keys.length}\t${d.keys.join(",")}`,
+      );
+    });
   }
+  console.log(
+    `\n선정 합계(${selectionTotals.cases}개 케이스): 생성 ${selectionTotals.generated}, exact unique ${selectionTotals.exactUnique}(중복 ${selectionTotals.exactDuplicates}), 품질 그룹 ${selectionTotals.qualityGroups}, Pareto 그룹 ${selectionTotals.paretoGroups}(지배 제거 그룹 ${selectionTotals.dominatedGroups}/배치 ${selectionTotals.dominatedLayouts}), 카드 ${selectionTotals.cardsShown}, 유사 variant 제거 ${selectionTotals.similarRemoved}, variant 상한 초과 ${selectionTotals.variantLimitRemoved}`,
+  );
+  console.log(
+    "역할별 카드: " +
+      Object.entries(roleCount)
+        .map(([r, n]) => `${r} ${n}`)
+        .join(", "),
+  );
+  console.log(
+    `숨긴 Pareto 그룹 ${hiddenAll.length}개: ` +
+      (hiddenAll
+        .map(
+          (h) =>
+            `${h.caseId} ${HIDDEN_REASON[h.reason]} [${lib.formatTradeoff(h.deltas)}]`,
+        )
+        .join("; ") || "없음"),
+  );
+  report.selectionTotals = selectionTotals;
+  report.roleCount = roleCount;
   console.log(
     `\n합계(${files.length}개 케이스): 표시 ${totals.shown}, exact unique ${totals.exactUnique}, 품질 유형 ${totals.qualityTypes}, 지배되지 않은 후보 ${totals.pareto}(품질 유형 ${totals.paretoQualityTypes})`,
   );
