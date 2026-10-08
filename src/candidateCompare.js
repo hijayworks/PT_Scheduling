@@ -19,9 +19,11 @@ const UNITS = {
   travelMinutes: "분",
   idleMinutes: "분",
   workDays: "일",
+  spanMinutes: "분",
 };
+const CLOCK_KEYS = new Set(["firstStartMinute", "lastEndMinute"]);
 const formatValue = (key, v) =>
-  key === "lastEndMinute" ? (v ? minutesLabel(v) : "-") : v + UNITS[key];
+  CLOCK_KEYS.has(key) ? (v ? minutesLabel(v) : "-") : v + UNITS[key];
 
 const el = (tag, className, text) => {
   const e = document.createElement(tag);
@@ -92,7 +94,7 @@ export function renderCandidateCompare(container, base, other, onClose) {
           ? "같음"
           : (d.delta > 0 ? "+" : "") +
               d.delta +
-              (d.key === "lastEndMinute" ? "분" : UNITS[d.key]),
+              (CLOCK_KEYS.has(d.key) ? "분" : UNITS[d.key]),
       ),
     );
     tbody.appendChild(tr);

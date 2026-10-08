@@ -64,6 +64,7 @@ export function scheduleMetrics(result) {
   ).length;
   let longestIdleMinutes = 0;
   let spanMinutes = 0;
+  let firstStartMinute = 0; // 가장 이른 수업 시작 시각(자정 기준 분, 수업이 없으면 0)
   let lastEndMinute = 0; // 가장 늦은 수업 종료 시각(자정 기준 분)
   byDaySorted(assigned).forEach((reqs) => {
     for (let i = 1; i < reqs.length; i++) {
@@ -79,6 +80,10 @@ export function scheduleMetrics(result) {
       last = reqs[reqs.length - 1];
     const endMin = last.startSlot * SLOT_MIN + last.duration;
     spanMinutes += endMin - first.startSlot * SLOT_MIN;
+    const startMin = START_MIN + first.startSlot * SLOT_MIN;
+    firstStartMinute = firstStartMinute
+      ? Math.min(firstStartMinute, startMin)
+      : startMin;
     lastEndMinute = Math.max(lastEndMinute, START_MIN + endMin);
   });
   return {
@@ -94,6 +99,7 @@ export function scheduleMetrics(result) {
     longestIdleMinutes,
     workDays: new Set(assigned.map((r) => r.day)).size,
     spanMinutes,
+    firstStartMinute,
     lastEndMinute,
   };
 }

@@ -236,8 +236,8 @@ async function main() {
     await cmp.locator(".compare-candidate-btn").first().click();
     const panel = cmp.locator("#candidateCompare3");
     const panelText = (await panel.isVisible()) ? await panel.innerText() : "";
-    assert(panelText.includes("빈 시간 -60분 대신 수업 -1"), "비교 요약 문장이 다름: " + panelText.split("\n")[2]);
-    assert((await panel.locator("tbody tr").count()) === 8, "비교 지표가 8개가 아님");
+    assert(panelText.includes("빈 시간 -60분 / 체류 시간 -120분 대신 수업 -1"), "비교 요약 문장이 다름: " + panelText);
+    assert((await panel.locator("tbody tr").count()) === 10, "비교 지표가 10개가 아님");
     assert(panelText.includes("변경 회원 2명"), "배정 차이 회원 수가 다름");
     await cmp.locator(".candidate-compare-close").click();
     assert(!(await panel.isVisible()), "닫기를 눌러도 비교 패널이 남음");

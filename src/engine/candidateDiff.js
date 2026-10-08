@@ -4,8 +4,10 @@
 //   assignmentDiff(base, other): 결과 {assigned} 두 개 → 회원별 배정 변화
 //   summarizeMetricDiff(diff): "빈 시간 -60분 대신 수업 -1 / 이동 +1" 한 문장
 
-// 업무 정책값: 비교 지표와 좋은 방향(+1 클수록 좋음, -1 작을수록 좋음). 근무일은 같은 수업을 더 적은
-// 날에 몰수록, 마지막 수업 종료는 이를수록 좋다고 본다.
+// 업무 정책값: 비교 지표와 좋은 방향(+1 클수록 좋음, -1 작을수록 좋음, 0 방향 없음). 근무 부담은
+// 체류 시간(요일별 첫 수업 시작~마지막 수업 종료의 합)으로 본다. 첫 시작·마지막 종료는 일정이 통째로
+// 앞당겨지거나 밀린 것일 뿐일 수 있어 좋고 나쁨을 판정하지 않는 참고 정보다(10~20시 → 9~19시는 개선
+// 아님). 근무일 수와 체류 시간은 비교·설명용이고 후보 선정(QUALITY_AXES)에는 쓰지 않는다.
 export const COMPARE_METRICS = [
   { key: "unassigned", label: "미배정 회원", dir: -1 },
   { key: "sessions", label: "총 수업", dir: 1 },
@@ -14,7 +16,9 @@ export const COMPARE_METRICS = [
   { key: "travelMinutes", label: "이동 시간", dir: -1 },
   { key: "idleMinutes", label: "빈 시간", dir: -1 },
   { key: "workDays", label: "근무일 수", dir: -1 },
-  { key: "lastEndMinute", label: "마지막 수업 종료", dir: -1 },
+  { key: "spanMinutes", label: "체류 시간(요일 합)", dir: -1 },
+  { key: "firstStartMinute", label: "첫 수업 시작", dir: 0 },
+  { key: "lastEndMinute", label: "마지막 수업 종료", dir: 0 },
 ];
 
 // UI 표현값: 차이 한 개를 짧게 쓸 때의 이름과 단위("수업 +1", "빈 시간 -60분"). 카드의 trade-off
@@ -27,6 +31,8 @@ const DELTA_LABELS = {
   travelMinutes: ["이동 시간", "분"],
   idleMinutes: ["빈 시간", "분"],
   workDays: ["근무일", "일"],
+  spanMinutes: ["체류 시간", "분"],
+  firstStartMinute: ["첫 시작", "분"],
   lastEndMinute: ["마지막 종료", "분"],
 };
 export function formatDelta(key, delta) {
@@ -34,16 +40,25 @@ export function formatDelta(key, delta) {
   return `${label} ${delta > 0 ? "+" : ""}${delta}${unit}`;
 }
 
-// [{key, label, base, value, delta, effect: "better"|"worse"|"same"}] — COMPARE_METRICS 순서.
+// [{key, label, base, value, delta, effect: "better"|"worse"|"same"|"neutral"}] — COMPARE_METRICS 순서.
+// neutral: 값은 달라졌지만 방향이 없는 지표(dir 0).
 export function metricDiff(base, other) {
   return COMPARE_METRICS.map(({ key, label, dir }) => {
     const delta = other[key] - base[key];
-    const effect = delta === 0 ? "same" : delta * dir > 0 ? "better" : "worse";
+    const effect =
+      delta === 0
+        ? "same"
+        : dir === 0
+          ? "neutral"
+          : delta * dir > 0
+            ? "better"
+            : "worse";
     return { key, label, base: base[key], value: other[key], delta, effect };
   });
 }
 
 // 얻는 것(좋아진 지표)을 앞에, 포기하는 것(나빠진 지표)을 뒤에 둔 한 문장. 차이가 없는 지표는 뺀다.
+// 방향 없는 지표의 변화는 판정에 넣지 않고 끝에 " · 참고: …"로만 붙인다.
 export function summarizeMetricDiff(diff) {
   const list = (effect) =>
     diff
@@ -51,10 +66,13 @@ export function summarizeMetricDiff(diff) {
       .map((d) => formatDelta(d.key, d.delta))
       .join(" / ");
   const gains = list("better"),
-    losses = list("worse");
-  if (gains && losses) return `${gains} 대신 ${losses}`;
-  if (gains) return `${gains} (나빠지는 지표 없음)`;
-  if (losses) return `나아지는 지표 없이 ${losses}`;
+    losses = list("worse"),
+    neutral = list("neutral");
+  const note = neutral ? ` · 참고: ${neutral}` : "";
+  if (gains && losses) return `${gains} 대신 ${losses}${note}`;
+  if (gains) return `${gains} (나빠지는 지표 없음)${note}`;
+  if (losses) return `나아지는 지표 없이 ${losses}${note}`;
+  if (neutral) return `좋아지거나 나빠지는 지표 없음${note}`;
   return "지표는 모두 같고 배치만 다릅니다";
 }
 
