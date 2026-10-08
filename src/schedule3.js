@@ -67,6 +67,17 @@ import {
   selectReoptimization,
 } from "./engine/candidateSelection.js";
 import { pinKey, pinsFromResult } from "./engine/pins.js";
+import { assignmentDiff } from "./engine/candidateDiff.js";
+import {
+  levelPlan,
+  generateForLevel,
+  proposalSource,
+  originsFromHistory,
+  createLocalSearch,
+  nextLocalLevel,
+  continueLocalSearch,
+  addWiderProposal,
+} from "./engine/localReoptimize.js";
 import {
   renderRequestList,
   setActiveScheduleMemberId,
@@ -170,7 +181,8 @@ export function eligibleSwapMembersFor(container, req) {
 // 직전의 assigned/unassignedMembers/confirmedIds 스냅샷을 후보 객체(container)별로 최대 20개까지 쌓아둔다.
 // WeakMap을 써서 container 객체(저장 슬롯의 결과) 자체를 키로 삼으므로, 다시 생성해 그 자리의
 // container 객체가 통째로 새로 만들어지면 자연스럽게 새 빈 되돌리기 이력에서 다시 시작한다.
-// 저장하지 않으므로 새로고침하면 초기화된다.
+// 저장하지 않으므로 새로고침하면 초기화된다. 스택 배열의 truncated(한도 때문에 가장 오래된 스냅샷을 버린 적
+// 있음)와 스냅샷의 reoptApplied(재최적화 적용 직전 상태)는 원래 위치 판정(originsFromHistory)이 읽는 런타임 표시다.
 export const manualUndoStacks = new WeakMap();
 export const MANUAL_UNDO_LIMIT = 20;
 export function snapshotContainer(container) {
@@ -180,11 +192,14 @@ export function snapshotContainer(container) {
     confirmedIds: (container.confirmedIds || []).slice(),
   };
 }
-export function pushManualUndo(container) {
+export function pushManualUndo(container, mark) {
   if (!manualUndoStacks.has(container)) manualUndoStacks.set(container, []);
   const stack = manualUndoStacks.get(container);
-  stack.push(snapshotContainer(container));
-  if (stack.length > MANUAL_UNDO_LIMIT) stack.shift();
+  stack.push({ ...snapshotContainer(container), ...mark });
+  if (stack.length > MANUAL_UNDO_LIMIT) {
+    stack.shift();
+    stack.truncated = true;
+  }
 }
 export function hasManualUndo(container) {
   const stack = manualUndoStacks.get(container);
@@ -1118,7 +1133,7 @@ export function renderSchedule3Result() {
   const { cards } = selectCandidates(candidatePoolEntries());
 
   if (cards.length === 0) {
-    reoptProposal = null;
+    reoptSession = null;
     const card = document.createElement("div");
     card.className = "candidate-card candidate-card-placeholder";
     const hint = document.createElement("p");
@@ -1493,58 +1508,149 @@ function endGenerationProgress() {
   releaseWakeLock();
 }
 
-// 재최적화(5a) 제안 — 세션 한정, 저장하지 않는다. 적용하기 전까지 수정 카드(target)는 바꾸지 않는다.
-// { target, targetSig, keptCount, variants, variantIdx }. target이 화면에서 사라지거나(무효화·초기화)
-// 계산 뒤에 바뀌었으면(편집·되돌리기) 제안은 버린다.
+// 재최적화(5a·5b-2b) 세션 — 세션 한정, 저장하지 않는다. 적용하기 전까지 수정 카드(target)는 바꾸지 않는다.
+// { run, target, targetSig, keptCount, userPins, originStatus, search(localReoptimize 국소 탐색 상태), proposals,
+//   selected, widened, fullDone, localExhausted, notice }
+//   run: 계측에서 한 재최적화 세션의 Level 실행·적용·버리기를 묶는 번호. widened: "더 넓게 찾아보기"를 누른 횟수.
+//   proposals: [{ level, variants, variantIdx }] — 첫 번째가 처음 찾은 제안(국소면 "변경 최소화 제안"), 뒤는
+//   "더 넓게 찾아보기"·전체 탐색으로 찾은, 앞보다 엄격히 나은 제안(addWiderProposal). 자동으로 덮어쓰지 않는다.
+//   localExhausted: L1~L3가 모두 개선을 못 찾았다(전체 재최적화는 사용자가 고를 때만 돈다).
+// target이 화면에서 사라지거나(무효화·초기화) 계산 뒤에 바뀌었으면(편집·되돌리기) 세션은 버린다.
 export const reoptimize3El = document.getElementById("reoptimize3");
-let reoptProposal = null;
+let reoptSession = null;
+let reoptRunSeq = 0;
 const editStateSig = (r) =>
   layoutSignature(r) + "#" + (r.confirmedIds || []).slice().sort().join(",");
+// UI 표현값: Level별 범위 설명.
+const LEVEL_LABELS = {
+  L1: "고정한 수업 바로 앞뒤",
+  L2: "고정한 요일 전체",
+  L3: "관련 회원의 다른 요일까지",
+  full: "전체 일정",
+};
+// 계측(5b-2b): 세션 한정 메모리(runtime.reoptimizeLog)와 console.info에만 남긴다 — 저장 schema는 바꾸지 않는다.
+//   event "level": run·mode(first|widen)·level·실제 경과 ms·budgetScale·status·reason·source(엔진/단계)·
+//     changedMembers/changedSessions(제안이 지금 카드 대비 바꾼 회원·세션 수)·originStatus(ORIGIN_STATUS)·originCount
+//   event "abort": run·mode·reason(cancelled|stale|error) — Level 도중 중단
+//   event "apply" / "discard": run·적용한 제안 level·kind(local|full)·proposalIndex·proposalLevels·widened
+const REOPT_LOG_LIMIT = 50;
+function logReoptimize(entry) {
+  runtime.reoptimizeLog.push(entry);
+  if (runtime.reoptimizeLog.length > REOPT_LOG_LIMIT)
+    runtime.reoptimizeLog.shift();
+  console.info("[재최적화]", JSON.stringify(entry));
+}
 
 function renderReoptimizeProposal3(editedResults) {
-  const p = reoptProposal;
-  if (!p) return;
+  const s = reoptSession;
+  if (!s) return;
   if (
-    !editedResults.includes(p.target) ||
-    editStateSig(p.target) !== p.targetSig
+    !editedResults.includes(s.target) ||
+    editStateSig(s.target) !== s.targetSig
   ) {
-    reoptProposal = null;
+    reoptSession = null;
     return;
   }
+  const next = nextLocalLevel(s.search);
   const side = (result) => ({ result, metrics: scheduleMetrics(result) });
   renderReoptimizeProposal(reoptimize3El, {
-    current: side(p.target),
-    proposal: p.variants[p.variantIdx],
-    keptCount: p.keptCount,
-    variantIdx: p.variantIdx,
-    variantCount: p.variants.length,
+    current: side(s.target),
+    keptCount: s.keptCount,
+    proposals: s.proposals.map((p, i) => ({
+      label:
+        i === 0
+          ? p.level === "full"
+            ? "전체 일정 탐색 결과"
+            : "변경 최소화 제안"
+          : "더 넓은 탐색 결과",
+      scope: LEVEL_LABELS[p.level],
+      local: p.level !== "full",
+      ...p.variants[p.variantIdx],
+      variantIdx: p.variantIdx,
+      variantCount: p.variants.length,
+    })),
+    selected: s.selected,
+    notice:
+      s.localExhausted && !s.proposals.length
+        ? REOPT_LOCAL_EXHAUSTED
+        : s.notice,
+    // 다음 단계: 남은 국소 Level이 있으면 "더 넓게 찾아보기", 없으면 전체 탐색(이미 했으면 없음).
+    widen: next
+      ? {
+          label: "더 넓게 찾아보기",
+          scope: LEVEL_LABELS[next],
+          hint: "다음 범위: " + LEVEL_LABELS[next],
+        }
+      : s.fullDone
+        ? null
+        : {
+            label: "전체 일정 다시 탐색",
+            scope: LEVEL_LABELS.full,
+            hint: "전체 일정을 다시 짭니다. 시간이 오래 걸릴 수 있습니다.",
+          },
+    onSelect: (i) => {
+      s.selected = i;
+      renderSchedule3Result();
+    },
     onVariant: (idx) => {
-      p.variantIdx = idx;
+      s.proposals[s.selected].variantIdx = idx;
       renderSchedule3Result();
     },
     onApply: applyReoptimization,
     onDiscard: () => {
-      reoptProposal = null;
+      logReoptimize({
+        event: "discard",
+        run: s.run,
+        proposalLevels: s.proposals.map((p) => p.level),
+        widened: s.widened,
+      });
+      reoptSession = null;
       renderSchedule3Result();
       showToast("재최적화 제안을 버렸습니다", "info");
     },
+    onWiden: () => runReoptimizeStep(s, "widen"),
   });
+  // 더 넓게 찾는 동안에는 지금 제안을 적용·버리기·다시 넓히기 할 수 없다(취소는 진행 표시의 버튼으로).
+  if (runtime.generationInProgress)
+    reoptimize3El.querySelectorAll("button").forEach((b) => (b.disabled = true));
 }
 
-// 제안을 수정 카드에 반영한다: 이전 상태를 수동 편집 되돌리기 스택에 넣어 기존 "편집 취소"로 원복할
-// 수 있다. 유지한 수업(고정)은 제안에서도 같은 자리이므로 그 세션들을 계속 확정 상태로 둔다.
+// 제안을 반영한 수정 카드 내용. 확정(confirmedIds)은 사용자가 고정한 수업만 그대로 남긴다 — 국소 탐색의
+// 임시 고정(범위 밖 기존 세션)은 확정이 아니다.
+export function reoptimizedCard(target, chosen) {
+  const pinned = new Set(pinsFromResult(target).map(pinKey));
+  const assigned = chosen.assigned.map((a) => ({ ...a }));
+  return {
+    assigned,
+    unassignedMembers: chosen.unassignedMembers.slice(),
+    confirmedIds: assigned.filter((a) => pinned.has(pinKey(a))).map((a) => a.id),
+  };
+}
+
+// 제안을 수정 카드에 반영한다: 이전 상태를 수동 편집 되돌리기 스택에 넣어 기존 "편집 취소"로 원복할 수 있다.
+// 적용 표시(reoptApplied): 원래 위치 판정은 이 적용 이후의 편집만 본다(엔진이 옮긴 자리·이미 반영된 원점은 원점이
+// 아님). 편집 취소로 이 스냅샷을 꺼내면 표시도 함께 사라져 적용 전 기록을 다시 쓴다.
+export function applyReoptimizedCard(target, chosen) {
+  pushManualUndo(target, { reoptApplied: true });
+  Object.assign(target, reoptimizedCard(target, chosen));
+}
+
+// 고른 제안을 수정 카드에 반영한다.
 export function applyReoptimization() {
-  const p = reoptProposal;
-  if (!p) return;
-  const chosen = p.variants[p.variantIdx].result;
-  const pinned = new Set(pinsFromResult(p.target).map(pinKey));
-  pushManualUndo(p.target);
-  p.target.assigned = chosen.assigned.map((a) => ({ ...a }));
-  p.target.unassignedMembers = chosen.unassignedMembers.slice();
-  p.target.confirmedIds = p.target.assigned
-    .filter((a) => pinned.has(pinKey(a)))
-    .map((a) => a.id);
-  reoptProposal = null;
+  const s = reoptSession;
+  if (!s || !s.proposals.length) return;
+  const p = s.proposals[s.selected];
+  logReoptimize({
+    event: "apply",
+    run: s.run,
+    level: p.level,
+    kind: p.level === "full" ? "full" : "local",
+    proposalIndex: s.selected,
+    proposalLevels: s.proposals.map((x) => x.level),
+    widened: s.widened,
+  });
+  applyReoptimizedCard(s.target, p.variants[p.variantIdx].result);
+  reoptSession = null;
   saveState();
   renderSchedule3Result();
   showToast(
@@ -1558,33 +1664,68 @@ const REOPT_NO_BETTER = {
     "수업 수를 줄이지 않고는 지금보다 나은 배치를 찾지 못했습니다. 지금 카드를 그대로 둡니다.",
   default: "지금보다 나은 배치를 찾지 못했습니다. 지금 카드를 그대로 둡니다.",
 };
+const REOPT_LOCAL_EXHAUSTED =
+  "변경 범위를 제한한 탐색에서는 더 나은 일정을 찾지 못했습니다.";
 
-// 수정 카드(target)의 옮기거나 확정한 수업(pinsFromResult)은 그대로 두고 나머지를 다시 생성해,
-// selectReoptimization이 고른 제안을 미리보기로 보여준다. 다른 후보 슬롯과 target은 바꾸지 않는다.
+// 수정 카드(target)의 옮기거나 확정한 수업(pinsFromResult)은 그대로 두고, 그 주변부터 범위를 넓혀 가며(L1→L2→L3)
+// 다시 짜서 처음 찾은 개선안을 "변경 최소화 제안"으로 보여준다. 다른 후보 슬롯과 target은 바꾸지 않는다.
 export async function runReoptimize3(target) {
   if (runtime.generationInProgress) {
     showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
     return;
   }
   if (dropStaleCandidates()) return;
-  const pins = pinsFromResult(target);
+  const userPins = pinsFromResult(target);
   const sel = [state.excludedMemberIds3, state.onceLimitedMemberIds3];
   const violations = await withSelectionOverride(...sel, () =>
     scheduleViolations(target),
   );
-  if (pins.length === 0 || violations.length) {
+  if (userPins.length === 0 || violations.length) {
     generateHint3El.textContent = violations.length
       ? "이 카드에 규칙 위반이 있어 다시 최적화할 수 없습니다: " +
         violations[0].message
       : "유지할 수업이 없어 다시 최적화할 수 없습니다.";
     return;
   }
-  reoptProposal = null;
+  const { origins, status: originStatus } = originsFromHistory(
+    target,
+    userPins,
+    manualUndoStacks.get(target),
+  );
+  reoptSession = {
+    run: ++reoptRunSeq,
+    target,
+    targetSig: editStateSig(target),
+    keptCount: userPins.length,
+    userPins,
+    originStatus,
+    search: createLocalSearch(target, userPins, origins),
+    proposals: [],
+    selected: 0,
+    widened: 0,
+    fullDone: false,
+    localExhausted: false,
+    notice: null,
+  };
+  await runReoptimizeStep(reoptSession, "first");
+}
+
+// 재최적화 한 단계. mode: "first"(L1부터 처음 개선까지) | "widen"(다음 국소 Level 하나, 남은 게 없으면 전체).
+// 취소하면 이후 Level을 돌리지 않고 지금까지의 제안을 그대로 둔다(첫 단계면 세션을 버림). 엔진 오류는 다음 범위나
+// 전체로 조용히 넘어가지 않고 오류로 알린다.
+async function runReoptimizeStep(s, mode) {
+  if (runtime.generationInProgress) {
+    showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
+    return;
+  }
+  if (dropStaleCandidates()) return;
+  const sel = [state.excludedMemberIds3, state.onceLimitedMemberIds3];
+  const inputKey = candidateInputKey();
+  if (mode === "widen") s.widened++;
   generateHint3El.textContent = "";
+  s.notice = null;
   runtime.generationInProgress = true;
   runtime.generationCancelRequested = false;
-  const inputKey = candidateInputKey();
-  const targetSig = editStateSig(target);
   renderSchedule3Result();
   startGenerationProgress("나머지 일정 다시 최적화 중...", "다시 최적화 취소");
   generateProgressWrap3El.scrollIntoView({
@@ -1592,46 +1733,131 @@ export async function runReoptimize3(target) {
     block: "center",
   });
   await acquireWakeLock();
-  try {
-    const g = await generateSchedule3Async(showGenerationProgress, pins);
-    const results = [g.candidateB, g.candidateC]
-      .concat(
-        Object.values(g.poolsBC).flat(),
-        g.candidateAList,
-        g.candidateAPools.flat(),
-      )
-      .filter(Boolean);
-    if (candidateInputKey() !== inputKey) {
-      dropStaleCandidates();
-      return;
-    }
-    if (editStateSig(target) !== targetSig) {
-      generateHint3El.textContent =
-        "다시 최적화하는 동안 카드가 바뀌어 결과를 버렸습니다. 다시 시도해주세요.";
-      return;
-    }
+  const stale = () =>
+    candidateInputKey() !== inputKey || editStateSig(s.target) !== s.targetSig;
+  // 한 Level 생성 + 제안 선택 + 계측. 입력이나 카드가 바뀌었으면 그 뒤 Level은 돌리지 않는다.
+  const reoptimize = async (pins, level) => {
+    const plan = levelPlan(level);
+    const phase = LEVEL_LABELS[level] + " 범위";
+    const t0 = performance.now();
+    const gen = await generateForLevel(level, pins, {
+      bc: async (p) => {
+        const bc = await withSelectionOverride(...sel, () =>
+          generateCandidatesAsync(
+            (progress) => showGenerationProgress(progress * 0.5, "후보 탐색"),
+            {},
+            p,
+          ),
+        );
+        return bc.built.concat(bc.pools.flat()).filter(Boolean);
+      },
+      a: async (p, budgetScale) => {
+        const cards = await withSelectionOverride(...sel, () =>
+          generateSchedule2Async(
+            (progress) =>
+              plan.withBC
+                ? showGenerationProgress(0.5 + progress * 0.5, "비교·최적화")
+                : showGenerationProgress(progress, phase),
+            { pins: p, budgetScale },
+          ),
+        );
+        return cards.flatMap((c) => [c.result].concat(c.pool || []));
+      },
+    });
+    if (stale()) throw new ReoptimizeStaleError();
     const out = await withSelectionOverride(...sel, () =>
-      selectReoptimization(target, results, pins),
+      selectReoptimization(s.target, gen.bc.concat(gen.a), pins),
     );
-    if (out.status !== "improved") {
-      generateHint3El.textContent =
-        REOPT_NO_BETTER[out.reason] || REOPT_NO_BETTER.default;
-      showToast("더 나은 배치를 찾지 못했습니다", "info");
-      return;
+    const changed = out.proposal
+      ? assignmentDiff(s.target, out.proposal.result).counts
+      : null;
+    logReoptimize({
+      event: "level",
+      run: s.run,
+      mode,
+      level,
+      ms: Math.round(performance.now() - t0),
+      budgetScale: plan.budgetScale === undefined ? 1 : plan.budgetScale,
+      status: out.status,
+      reason: out.reason,
+      source: out.proposal ? proposalSource(out.proposal.result, gen) : null,
+      changedMembers: changed && changed.changedMembers,
+      changedSessions: changed && changed.changedSessions,
+      originStatus: s.originStatus,
+      originCount: s.search.origins.length,
+    });
+    return out;
+  };
+  const entryOf = (level, out) => ({ level, variants: out.variants, variantIdx: 0 });
+  try {
+    if (mode === "first") {
+      const found = await continueLocalSearch(
+        s.search,
+        reoptimize,
+        (out) => out.status === "improved",
+      );
+      if (found) {
+        s.proposals.push(entryOf(found.level, found.outcome));
+        showToast("변경 최소화 제안을 확인해주세요", "success");
+      } else {
+        s.localExhausted = true;
+        showToast("변경 범위 안에서는 더 나은 배치를 찾지 못했습니다", "info");
+      }
+    } else {
+      const local = nextLocalLevel(s.search);
+      const found = local
+        ? await continueLocalSearch(s.search, reoptimize, () => true)
+        : { level: "full", outcome: await reoptimize(s.userPins, "full") };
+      if (!local) s.fullDone = true;
+      const added =
+        found &&
+        found.outcome.status === "improved" &&
+        addWiderProposal(s.proposals, entryOf(found.level, found.outcome));
+      if (added) {
+        s.localExhausted = false;
+        showToast(
+          s.proposals.length > 1
+            ? "더 넓게 찾은 결과를 비교해 고를 수 있습니다"
+            : "재최적화 제안을 확인해주세요",
+          "success",
+        );
+      } else if (!s.proposals.length && s.fullDone) {
+        // 국소도 전체도 지금 카드보다 나은 결과가 없다.
+        generateHint3El.textContent =
+          REOPT_NO_BETTER[found.outcome.reason] || REOPT_NO_BETTER.default;
+        reoptSession = null;
+        showToast("더 나은 배치를 찾지 못했습니다", "info");
+      } else {
+        s.notice =
+          LEVEL_LABELS[found.level] +
+          " 범위까지 넓혀도 더 나은 결과를 찾지 못했습니다.";
+        showToast("더 나은 결과를 찾지 못했습니다", "info");
+      }
     }
-    reoptProposal = {
-      target,
-      targetSig,
-      keptCount: pins.length,
-      variants: out.variants,
-      variantIdx: 0,
-    };
-    showToast("재최적화 제안을 확인해주세요", "success");
   } catch (err) {
+    logReoptimize({
+      event: "abort",
+      run: s.run,
+      mode,
+      reason:
+        err instanceof GenerationCancelledError
+          ? "cancelled"
+          : err instanceof ReoptimizeStaleError
+            ? "stale"
+            : "error",
+    });
     if (err instanceof GenerationCancelledError) {
+      if (!s.proposals.length && !s.localExhausted) reoptSession = null;
       showToast("다시 최적화를 취소했습니다", "info");
+    } else if (err instanceof ReoptimizeStaleError) {
+      reoptSession = null;
+      if (candidateInputKey() !== inputKey) dropStaleCandidates();
+      else
+        generateHint3El.textContent =
+          "다시 최적화하는 동안 카드가 바뀌어 결과를 버렸습니다. 다시 시도해주세요.";
     } else {
       console.error(err);
+      if (!s.proposals.length && !s.localExhausted) reoptSession = null;
       generateHint3El.textContent =
         "다시 최적화 중 오류가 발생했습니다. 다시 시도해주세요.";
       showToast("다시 최적화에 실패했습니다", "danger");
@@ -1643,6 +1869,8 @@ export async function runReoptimize3(target) {
       reoptimize3El.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 }
+// 재최적화 도중 입력이나 수정 카드가 바뀌었음 — 이후 Level을 돌리지 않고 결과를 버린다.
+class ReoptimizeStaleError extends Error {}
 
 // 후보 생성: 그리디 탐색과 체인 DP 다듬기를 모두 돌려 저장 슬롯(후보 풀)을 새로 채운다. 사용자가
 // 손댄 슬롯(keepsUserEditedSlot)은 덮어쓰지 않는다. 체인 DP 슬롯은 다듬기가 시간 예산제라 매번

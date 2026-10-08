@@ -62,6 +62,8 @@ export const runtime = {
   // saveState()를 한 번 더 실행해 방금 덮어쓴 localStorage를 되돌리지 않도록 막는 플래그.
   suppressAutosave: false,
   storageError: null,
+  // 재최적화 실행 계측(schedule3.js logReoptimize): 세션 한정, 저장하지 않는다.
+  reoptimizeLog: [],
 };
 
 export class GenerationCancelledError extends Error {}

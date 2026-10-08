@@ -76,24 +76,74 @@ export function renderCandidateCompare(container, base, other, onClose) {
   appendAssignmentDiff(container, base, other);
 }
 
-// 재최적화 제안 패널: 지금 수정 카드(current) 대비 제안(proposal)이 무엇이 좋아지고 나빠지는지, 지표,
-// 유지되는 수업 수, 회원별 배정 차이와 [적용]/[버리기]. 배치가 여럿이면 페이저로 넘겨 본다.
-// p: { current, proposal, keptCount, variantIdx, variantCount, onVariant(idx), onApply, onDiscard }
+// 재최적화 제안 패널(5b-2b): 지금 수정 카드(current) 대비 고른 제안이 무엇이 좋아지고 나빠지는지, 지표, 유지되는
+// 수업 수, 변경 회원·세션 수, 회원별 배정 차이와 [적용]/[버리기]/[더 넓게 찾아보기 | 전체 일정 다시 탐색].
+// 국소 제안은 "변경 최소화 제안"이며 가장 좋은 일정이라는 뜻이 아님을 문구로 밝힌다. 제안이 여럿이면(더 넓게 찾은
+// 더 나은 결과) 고를 수 있게 하고, 첫 제안(변경 최소화)과 다른 제안의 차이를 지표·배정 차이로 보여준다.
+// p: { current, keptCount, proposals: [{ label, scope, local, result, metrics, variantIdx, variantCount }],
+//      selected, notice, widen: { label, scope, hint } | null, onSelect(i), onVariant(idx), onApply, onDiscard, onWiden }
 export function renderReoptimizeProposal(container, p) {
   container.innerHTML = "";
   container.hidden = false;
+  const chosen = p.proposals[p.selected];
   const head = el("div", "candidate-compare-head");
-  head.appendChild(el("h3", "candidate-compare-title", "재최적화 제안"));
+  head.appendChild(
+    el(
+      "h3",
+      "candidate-compare-title",
+      chosen ? "재최적화 — " + chosen.label : "재최적화",
+    ),
+  );
   container.appendChild(head);
-  const { counts } = assignmentDiff(p.current.result, p.proposal.result);
+  if (p.proposals.length > 1) {
+    const choices = el("div", "reopt-choices");
+    p.proposals.forEach((x, i) => {
+      const n = assignmentDiff(p.current.result, x.result).counts;
+      const b = el(
+        "button",
+        "btn btn-ghost reopt-choice",
+        `${x.label} · 회원 ${n.changedMembers}명 변경`,
+      );
+      b.type = "button";
+      b.setAttribute("aria-pressed", String(i === p.selected));
+      b.addEventListener("click", () => p.onSelect(i));
+      choices.appendChild(b);
+    });
+    container.appendChild(choices);
+  }
+  if (chosen) appendProposal(container, p, chosen);
+  if (p.notice) container.appendChild(el("p", "reopt-notice", p.notice));
+  const actions = el("div", "reopt-actions");
+  const button = (cls, label, onClick) => {
+    const b = el("button", "btn " + cls, label);
+    b.type = "button";
+    b.addEventListener("click", onClick);
+    actions.appendChild(b);
+    return b;
+  };
+  if (chosen) button("btn-primary reopt-apply", "적용", p.onApply);
+  button("btn-ghost reopt-discard", chosen ? "버리기" : "닫기", p.onDiscard);
+  if (p.widen) {
+    const w = button("btn-ghost reopt-widen", p.widen.label, p.onWiden);
+    w.title = p.widen.scope + " 범위로 다시 찾습니다";
+    actions.appendChild(el("span", "reopt-hint", p.widen.hint));
+  }
+  container.appendChild(actions);
+}
+
+function appendProposal(container, p, chosen) {
+  const { counts } = assignmentDiff(p.current.result, chosen.result);
+  const changed = `회원 ${counts.changedMembers}명(수업 ${counts.changedSessions}개)의 일정이 바뀝니다.`;
   container.appendChild(
     el(
       "p",
       "candidate-compare-summary",
-      `유지할 수업 ${p.keptCount}개는 그대로 두고 나머지 일정을 다시 짰습니다. 회원 ${counts.changedMembers}명의 일정이 바뀝니다. 적용하기 전까지 지금 카드는 바뀌지 않습니다.`,
+      chosen.local
+        ? `유지할 수업 ${p.keptCount}개는 그대로 두고 ${chosen.scope} 범위의 수업만 다시 짰습니다. ${changed} 적게 바꾸는 대신 더 큰 개선을 놓쳤을 수 있습니다(가장 좋은 일정이라는 뜻은 아닙니다). 적용하기 전까지 지금 카드는 바뀌지 않습니다.`
+        : `유지할 수업 ${p.keptCount}개는 그대로 두고 나머지 일정 전체를 다시 짰습니다. ${changed} 적용하기 전까지 지금 카드는 바뀌지 않습니다.`,
     ),
   );
-  const diff = metricDiff(p.current.metrics, p.proposal.metrics);
+  const diff = metricDiff(p.current.metrics, chosen.metrics);
   const list = (effect) =>
     diff
       .filter((d) => d.effect === effect)
@@ -104,43 +154,53 @@ export function renderReoptimizeProposal(container, p) {
   const losses = el("p", "reopt-effect reopt-worse");
   losses.append(el("b", null, "나빠지는 것 "), list("worse"));
   container.append(gains, losses);
-  if (p.variantCount > 1) {
+  if (chosen.variantCount > 1) {
     const pager = el("div", "candidate-pool-pager");
     const btn = (label, idx) => {
       const b = el("button", "btn btn-ghost reopt-variant-btn", label);
       b.type = "button";
-      b.disabled = idx < 0 || idx >= p.variantCount;
+      b.disabled = idx < 0 || idx >= chosen.variantCount;
       b.addEventListener("click", () => p.onVariant(idx));
       return b;
     };
     pager.append(
-      btn("이전 배치", p.variantIdx - 1),
+      btn("이전 배치", chosen.variantIdx - 1),
       el(
         "span",
         "pool-pager-label",
-        `같은 품질의 배치 ${p.variantIdx + 1}/${p.variantCount}`,
+        `같은 품질의 배치 ${chosen.variantIdx + 1}/${chosen.variantCount}`,
       ),
-      btn("다음 배치", p.variantIdx + 1),
+      btn("다음 배치", chosen.variantIdx + 1),
     );
     container.appendChild(pager);
   }
   appendMetricTable(
     container,
     { ...p.current, label: "지금 카드" },
-    { ...p.proposal, label: "제안" },
+    { ...chosen, label: "제안" },
     diff,
     "지금 대비",
   );
-  appendAssignmentDiff(container, p.current, p.proposal);
-  const actions = el("div", "reopt-actions");
-  const apply = el("button", "btn btn-primary reopt-apply", "적용");
-  apply.type = "button";
-  apply.addEventListener("click", p.onApply);
-  const discard = el("button", "btn btn-ghost reopt-discard", "버리기");
-  discard.type = "button";
-  discard.addEventListener("click", p.onDiscard);
-  actions.append(apply, discard);
-  container.appendChild(actions);
+  appendAssignmentDiff(container, p.current, chosen);
+  // 변경 최소화 제안과 더 넓게 찾은 제안의 차이: 고른 것이 첫 제안이면 마지막(가장 나은) 제안과 비교한다.
+  if (p.proposals.length > 1) {
+    const base = p.proposals[0];
+    const other = p.selected === 0 ? p.proposals[p.proposals.length - 1] : chosen;
+    const n = (x) => assignmentDiff(p.current.result, x.result).counts;
+    const pairDiff = metricDiff(base.metrics, other.metrics);
+    container.appendChild(
+      el("h4", "candidate-compare-subtitle", `${base.label}과 ${other.label} 비교`),
+    );
+    container.appendChild(
+      el(
+        "p",
+        "candidate-compare-summary reopt-pair",
+        `${base.label}: 회원 ${n(base).changedMembers}명 변경 / ${other.label}: 회원 ${n(other).changedMembers}명 변경. ${other.label}을 고르면 ${summarizeMetricDiff(pairDiff)}`,
+      ),
+    );
+    appendMetricTable(container, base, other, pairDiff, "차이");
+    appendAssignmentDiff(container, base, other, "두 제안의 배정 차이");
+  }
 }
 
 function appendMetricTable(container, base, other, diff, deltaHeader) {
@@ -177,9 +237,9 @@ function appendMetricTable(container, base, other, diff, deltaHeader) {
   container.appendChild(tableWrap);
 }
 
-function appendAssignmentDiff(container, base, other) {
+function appendAssignmentDiff(container, base, other, title = "배정 차이") {
   const { members, counts } = assignmentDiff(base.result, other.result);
-  container.appendChild(el("h4", "candidate-compare-subtitle", "배정 차이"));
+  container.appendChild(el("h4", "candidate-compare-subtitle", title));
   const countText = [
     `변경 회원 ${counts.changedMembers}명`,
     `요일 변경 ${counts.dayChanges}`,
