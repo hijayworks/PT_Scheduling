@@ -193,7 +193,26 @@ async function openWithSeed(page, seed, site) {
     { key: STORAGE_KEY, data: typeof seed === "string" ? seed : JSON.stringify(seed), logKey: SEED_LOG_KEY }
   );
   await page.goto(site.index);
-  await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+  try {
+    await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+  } catch (err) {
+    // 시드를 넣은 뒤 앱이 생성 페이지로 열리지 않으면 URL·origin·저장소 상태를 남기고 멈춘다(CI가 아티팩트로 올린다).
+    const dir = path.join(ARTIFACT_DIR, "open-seed");
+    fs.mkdirSync(dir, { recursive: true });
+    const name = Date.now() + "-" + new URL(site.index).protocol.replace(":", "");
+    const state = await page.evaluate((key) => ({
+      url: location.href,
+      origin: location.origin,
+      keys: Object.keys(localStorage),
+      docStart: window.__smoke_doc_start__,
+      storedBytes: (localStorage.getItem(key) || "").length,
+      activePage: (document.querySelector(".page.active") || {}).id || null,
+      body: document.body ? document.body.innerText.slice(0, 500) : null,
+    }), STORAGE_KEY).catch((e) => ({ evaluateError: String(e) }));
+    fs.writeFileSync(path.join(dir, name + ".json"), JSON.stringify({ site, injection, state }, null, 2));
+    await page.screenshot({ path: path.join(dir, name + ".png"), fullPage: true }).catch(() => {});
+    throw new Error("시드를 넣은 뒤 생성 페이지가 열리지 않음: " + JSON.stringify({ injection, state }) + "\n" + err.message);
+  }
   return injection;
 }
 
