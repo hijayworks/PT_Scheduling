@@ -241,6 +241,24 @@ async function main() {
     assert(panelText.includes("변경 회원 2명"), "배정 차이 회원 수가 다름");
     await cmp.locator(".candidate-compare-close").click();
     assert(!(await panel.isVisible()), "닫기를 눌러도 비교 패널이 남음");
+
+    // 모바일 폭에서는 긴 회원·지점명이나 넓은 표가 있어도 페이지 전체가 가로로 스크롤되지 않는다
+    // (넓은 시간표·비교 표는 각자의 래퍼 안에서만 스크롤).
+    const longState = JSON.parse(fixture);
+    longState.members.forEach((m) => (m.name = "아주긴회원이름".repeat(6) + m.name));
+    longState.locations.forEach((l) => (l.name = "아주긴지점이름ABCDEFGHIJKLMNOP".repeat(2) + l.name));
+    for (const width of [320, 360, 390]) {
+      const mob = await browser.newPage({ viewport: { width, height: 800 } });
+      await mob.addInitScript((d) => {
+        if (!localStorage.getItem("pt_schedule_state_v3")) localStorage.setItem("pt_schedule_state_v3", d);
+      }, JSON.stringify(longState));
+      await mob.goto(INDEX_URL);
+      await mob.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+      await mob.locator(".compare-candidate-btn").first().click();
+      const scrollWidth = await mob.evaluate(() => document.documentElement.scrollWidth);
+      assert(scrollWidth <= width, `${width}px 화면에서 페이지가 가로로 스크롤됨 (scrollWidth ${scrollWidth})`);
+      await mob.close();
+    }
   } finally {
     await browser.close();
   }
@@ -252,7 +270,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 
