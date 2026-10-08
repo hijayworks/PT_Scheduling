@@ -1050,25 +1050,25 @@ test("하드 제약 검사: 정상 스케줄은 위반이 없다", () => {
 // 골든 데이터셋의 "위반 0건"도 의미가 없어진다.
 test("하드 제약 검사: 규칙마다 위반을 잡아낸다", () => {
   const cases = [
-    ["신청하지 않은 시간에 배정", (r) => (r.assigned[0] = { ...r.assigned[0], startSlot: 35 })],
-    ["제외 회원 배정", (r) => r.assigned.push(at("X", 1, 20, "L1"))],
-    ["허용되지 않은 지점", (r) => (r.assigned[3] = at("C", 1, 12, "L1"))],
-    ["근무 불가 시간에 배정", () => lib.runtime.availableCells.delete("0-2")],
-    ["최대 횟수 초과", (r) => {
+    ["notRequested", (r) => (r.assigned[0] = { ...r.assigned[0], startSlot: 35 })],
+    ["excluded", (r) => r.assigned.push(at("X", 1, 20, "L1"))],
+    ["location", (r) => (r.assigned[3] = at("C", 1, 12, "L1"))],
+    ["availability", () => lib.runtime.availableCells.delete("0-2")],
+    ["maxSessions", (r) => {
       lib.state.onceLimitedMemberIds3 = ["B"];
       r.assigned.push(at("B", 1, 20, "L1"));
     }],
-    ["같은 날 2회 배정", (r) => r.assigned.push(at("A", 0, 20, "L1"))],
-    ["겹침 또는 이동시간 부족", (r) => (r.assigned[1] = at("B", 0, 3, "L1"))],
-    ["겹침 또는 이동시간 부족", (r) => (r.assigned[1] = at("B", 0, 6, "L2"))],
+    ["sameDay", (r) => r.assigned.push(at("A", 0, 20, "L1"))],
+    ["gap", (r) => (r.assigned[1] = at("B", 0, 3, "L1"))],
+    ["gap", (r) => (r.assigned[1] = at("B", 0, 6, "L2"))],
     // 상암 → 여의도 이동시간 누락: 간격이 아무리 넓어도 연속 배정하면 안 된다.
-    ["겹침 또는 이동시간 부족", (r) => r.assigned.push(at("B", 1, 30, "L2"))],
-    ["하루 이동 2회 초과", (r) => r.assigned.push(at("A", 1, 18, "L1"), at("B", 1, 27, "L2"))],
+    ["gap", (r) => r.assigned.push(at("B", 1, 30, "L2"))],
+    ["dailyTravel", (r) => r.assigned.push(at("A", 1, 18, "L1"), at("B", 1, 27, "L2"))],
     // 월: A(마포) → 이동 → S(상암) → 이동 → B(마포). S는 앞뒤가 모두 이동이다.
-    ["세 지점 회원의 이동-회원-이동 배정", (r) => {
+    ["soloTravel", (r) => {
       r.assigned = [at("A", 0, 0, "L1"), at("S", 0, 9, "L3"), at("B", 0, 18, "L1"), at("C", 1, 12, "L3")];
     }],
-    ["미배정 목록 불일치", (r) => r.assigned.shift()],
+    ["unassigned", (r) => r.assigned.shift()],
   ];
   cases.forEach(([expected, mutate]) => {
     qualityFixture();
@@ -1076,10 +1076,36 @@ test("하드 제약 검사: 규칙마다 위반을 잡아낸다", () => {
     mutate(r);
     const violations = lib.scheduleViolations(r);
     assert(
-      violations.some((v) => v.startsWith(expected)),
+      violations.some((v) => v.rule === expected),
       expected + " 위반을 잡지 못함: " + JSON.stringify(violations),
     );
   });
+});
+
+test("하드 제약 검사: 격자에 안 맞는 이동시간(15분)도 실제 이동시간 기준으로 판정한다", () => {
+  qualityFixture();
+  lib.state.travelTimes[lib.pairKey("L1", "L2")] = 15;
+  const withB = (slot) => ({
+    assigned: [at("A", 0, 0, "L1"), at("B", 0, slot, "L2"), at("S", 1, 0, "L1"), at("C", 1, 12, "L3")],
+    unassignedMembers: [],
+  });
+  assert(lib.scheduleViolations(withB(7)).some((v) => v.rule === "gap"), "간격 10분 < 이동 15분은 위반");
+  assertEqual(lib.scheduleViolations(withB(8)), [], "간격 20분 ≥ 이동 15분은 정상");
+});
+
+// 확정 세션 앞을 채울 때: 월요일 S(세 지점 회원, 상암 12:30)가 확정돼 있고 바로 뒤 B(마포)로
+// 이동해 떠난다. 그 앞에 A(마포 12:00)를 붙이면 S가 이동-회원-이동에 끼므로 붙이면 안 된다.
+test("세 지점 회원 앞에 확정 세션 이전 체인을 붙여 이동-회원-이동을 만들지 않는다", () => {
+  qualityFixture();
+  const pinned = [at("S", 0, 9, "L3"), at("B", 0, 18, "L1")];
+  const eligible = lib.state.requests.filter((r) => r.memberId === "A" && r.day === 0);
+  const assigned = lib.greedyAssign(eligible, {}, pinned);
+  const result = { assigned, unassignedMembers: [] };
+  assertEqual(
+    lib.scheduleViolations(result).filter((v) => v.rule === "soloTravel"),
+    [],
+    JSON.stringify(assigned.map((a) => [a.memberId, a.startSlot, a.locationId])),
+  );
 });
 
 /* ---------------- goldenFloors.js: 골든 품질 하한 래칫 ---------------- */

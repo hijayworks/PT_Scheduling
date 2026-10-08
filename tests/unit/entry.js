@@ -10,6 +10,8 @@ export {
   roundTripOriginLoc,
   memberById,
   knownLocationIdSet,
+  maxSessionsFor,
+  soloTravelMemberIds,
 } from "../../src/domain.js";
 export { state } from "../../src/state.js";
 export {
@@ -22,7 +24,7 @@ export {
   runChainDP,
   generateSchedule2Async,
 } from "../../src/engine/chainDp.js";
-export { scheduleMetrics, scheduleViolations } from "../../src/engine/scheduleQuality.js";
+export { scheduleMetrics, scheduleViolations, HARD_RULES } from "../../src/engine/scheduleQuality.js";
 export { setIdleFirst } from "../../src/engine/chainDpCore.js";
 export {
   candidateLocationsForRequest,

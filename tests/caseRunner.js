@@ -98,7 +98,7 @@ function createCaseRunner({ aScale = 0.01, realClock = false } = {}) {
   }
 
   // 화면에 고를 수 있게 보여주는 동점 배치(pool)까지 모두 검사한다.
-  // 반환: [{ key, tie, violation }] — tie는 0이면 표시 후보, n이면 동점 배치 n번.
+  // 반환: [{ key, tie, violation: {rule, message} }] — tie는 0이면 표시 후보, n이면 동점 배치 n번.
   // withSelectionOverride는 끝난 뒤 마이크로태스크에서 이전 값을 되돌리므로, 겹쳐 부르면 오래된
   // 선택이 남을 수 있다 — 동기 본문이라도 반드시 await한다.
   async function violationsOf(c, generated) {
