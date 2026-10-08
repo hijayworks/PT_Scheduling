@@ -427,7 +427,9 @@ export async function runSchedule2RestartGroup(
 // 여러 요일 순서를 다 시도해보는 동안(특히 회원·신청이 많으면 한 조합에도 시간이 좀
 // 걸릴 수 있어) 화면이 멈춘 것처럼 보이지 않도록, onProgress가 있으면 조합 하나를 끝낼
 // 때마다 진행률을 알리고 화면을 다시 그릴 틈(yieldToUI)을 준다.
-export async function generateSchedule2Async(onProgress) {
+// options.greedyAttempts: 아래 그리디 기준선의 시도 횟수(생략하면 운영값). 테스트 하네스가
+// 후보A의 하드 제약 스모크를 짧게 돌릴 때만 넘긴다.
+export async function generateSchedule2Async(onProgress, options = {}) {
   const eligibleReqs = state.requests.filter(isEligibleRequest2);
 
   // 아래 "카드 간 품질 하한 공유"가 후보A 버튼만 단독으로 눌러도(후보B·C를 따로 생성해두지
@@ -438,9 +440,12 @@ export async function generateSchedule2Async(onProgress) {
   // 잡은 사례로 확인됨 — runtime.candidates는 후보B·C를 먼저 생성해둔 적이 있을 때만 채워져
   // 있다). 그리디는 담금질보다 훨씬 빨라(수 초~수십 초) 전체 대기 시간에 크게 보태지 않는다.
   const GREEDY_BASELINE_PROGRESS_SHARE = 0.08;
-  const greedyBaseline = await generateCandidatesAsync((p) => {
-    if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
-  });
+  const greedyBaseline = await generateCandidatesAsync(
+    (p) => {
+      if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
+    },
+    { attempts: options.greedyAttempts },
+  );
   const cardProgressShare = 1 - GREEDY_BASELINE_PROGRESS_SHARE;
 
   // 후보A-1/A-2/A-3 카드마다 독립적으로 탐색한다(서로 다른 시드 → 서로 다른 골격에서

@@ -9,48 +9,9 @@
 "use strict";
 
 const path = require("path");
-const Module = require("module");
 const esbuild = require("esbuild");
 
-// pages/memberSchedule.js처럼 임포트 시점에 DOM 요소를 찾고 이벤트를 거는 모듈도 불러올 수
-// 있도록, 정의하지 않은 속성은 무엇이든 "아무것도 안 하는 함수 겸 객체"를 돌려주게 한다.
-function domStub(base = {}) {
-  return new Proxy(Object.assign(function () {}, base), {
-    get: (t, k) =>
-      k in base ? base[k] : k === Symbol.toPrimitive ? () => "" : domStub(),
-    apply: () => domStub(),
-    construct: () => domStub(),
-    set: () => true,
-  });
-}
-globalThis.document = globalThis.document || domStub({ hidden: false });
-globalThis.window = globalThis.window || globalThis;
-globalThis.addEventListener = globalThis.addEventListener || (() => {});
-// navigator·performance는 Node 22부터 이미 전역으로 존재해(단, wakeLock 등은 없음) 여기서
-// 굳이 덮어쓰지 않는다 — 다시 대입하면 getter 전용이라 TypeError가 난다. 테스트 대상
-// 함수들은 애초에 navigator를 쓰지 않는다.
-globalThis.localStorage = globalThis.localStorage || {
-  getItem() {
-    return null;
-  },
-  setItem() {},
-  removeItem() {},
-};
-
-const ENTRY = path.join(__dirname, "unit", "entry.js");
-const built = esbuild.buildSync({
-  entryPoints: [ENTRY],
-  bundle: true,
-  format: "cjs",
-  platform: "node",
-  write: false,
-  logLevel: "silent",
-});
-const mod = new Module(ENTRY);
-mod.filename = ENTRY;
-mod.paths = Module._nodeModulePaths(path.dirname(ENTRY));
-mod._compile(built.outputFiles[0].text, ENTRY);
-const lib = mod.exports;
+const lib = require("./loadLib.js");
 
 let pass = 0;
 let fail = 0;
@@ -1027,6 +988,120 @@ test("후보A 재생성: 확정 request가 빠진 새 후보는 보존 조건을
 /* ---------------- polishWorkerPool.js: 후보A 다듬기 Web Worker 병렬화 ---------------- */
 // 브라우저 Worker와 같은 모양(postMessage/onmessage/onerror/terminate)의 가짜 워커.
 // reply(worker, msg)가 "run" 메시지마다 응답을 정한다.
+/* ---------------- scheduleQuality.js: 품질 지표·하드 제약 검사 ---------------- */
+// 여의도↔상암 이동시간은 일부러 등록하지 않는다(누락). S는 세 지점을 모두 다니는 회원, X는 제외 회원.
+function qualityFixture() {
+  lib.state.locations = [
+    { id: "L1", name: "마포점" },
+    { id: "L2", name: "여의도점" },
+    { id: "L3", name: "상암점" },
+  ];
+  lib.state.travelTimes = { [lib.pairKey("L1", "L2")]: 30, [lib.pairKey("L1", "L3")]: 30 };
+  lib.state.members = [
+    { id: "A", name: "a", locationIds: ["L1"], category: "등록" },
+    { id: "B", name: "b", locationIds: ["L1", "L2"], category: "등록" },
+    { id: "S", name: "s", locationIds: ["L1", "L2", "L3"], category: "등록" },
+    { id: "X", name: "x", locationIds: ["L1"], category: "등록" },
+    { id: "C", name: "c", locationIds: ["L3"], category: "상담" },
+  ];
+  lib.state.excludedMemberIds3 = ["X"];
+  lib.state.onceLimitedMemberIds3 = [];
+  lib.runtime.availableCells = new Set();
+  lib.state.requests = [];
+  [0, 1].forEach((day) => {
+    for (let s = 0; s <= 40; s++) lib.runtime.availableCells.add(day + "-" + s);
+    lib.state.members.forEach((m) => {
+      for (let s = 0; s <= 30; s++)
+        lib.state.requests.push({ id: m.id + day + "_" + s, memberId: m.id, day, startSlot: s, duration: m.category === "상담" ? 30 : 60 });
+    });
+  });
+}
+function at(memberId, day, startSlot, locationId) {
+  const req = lib.state.requests.find((r) => r.id === memberId + day + "_" + startSlot);
+  return { ...req, locationId };
+}
+// 월: A(마포 12:00) → B(마포 13:00). 화: S(마포 12:00) → 이동 30분 → 빈 30분 → C(상암 14:00, 상담 30분).
+function validQualityResult() {
+  return {
+    assigned: [at("A", 0, 0, "L1"), at("B", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 12, "L3")],
+    unassignedMembers: [],
+  };
+}
+
+test("품질 지표: 수업·이동·빈 시간·근무 시간을 계산한다", () => {
+  qualityFixture();
+  const m = lib.scheduleMetrics(validQualityResult());
+  assertEqual(
+    [m.targetMembers, m.assignedMembers, m.unassigned, m.sessions, m.onceOnly],
+    [4, 4, 0, 4, 3],
+    "제외 회원은 대상에서 빠지고, 상담 회원은 1회만 받아도 '1회만'이 아님",
+  );
+  assertEqual([m.travelCount, m.travelMinutes, m.inefficientMoves], [1, 30, 0]);
+  assertEqual([m.idleMinutes, m.longestIdleMinutes], [30, 30], "이동에 쓴 30분은 빈 시간이 아님");
+  assertEqual([m.workDays, m.spanMinutes, m.lastEndMinute], [2, 120 + 150, 12 * 60 + 150]);
+});
+
+test("하드 제약 검사: 정상 스케줄은 위반이 없다", () => {
+  qualityFixture();
+  assertEqual(lib.scheduleViolations(validQualityResult()), []);
+});
+
+// 검사기가 실제로 각 위반을 잡아내는지 하나씩 깨뜨려 본다 — 검사기가 조용히 통과시키면
+// 골든 데이터셋의 "위반 0건"도 의미가 없어진다.
+test("하드 제약 검사: 규칙마다 위반을 잡아낸다", () => {
+  const cases = [
+    ["신청하지 않은 시간에 배정", (r) => (r.assigned[0] = { ...r.assigned[0], startSlot: 35 })],
+    ["제외 회원 배정", (r) => r.assigned.push(at("X", 1, 20, "L1"))],
+    ["허용되지 않은 지점", (r) => (r.assigned[3] = at("C", 1, 12, "L1"))],
+    ["근무 불가 시간에 배정", () => lib.runtime.availableCells.delete("0-2")],
+    ["최대 횟수 초과", (r) => {
+      lib.state.onceLimitedMemberIds3 = ["B"];
+      r.assigned.push(at("B", 1, 20, "L1"));
+    }],
+    ["같은 날 2회 배정", (r) => r.assigned.push(at("A", 0, 20, "L1"))],
+    ["겹침 또는 이동시간 부족", (r) => (r.assigned[1] = at("B", 0, 3, "L1"))],
+    ["겹침 또는 이동시간 부족", (r) => (r.assigned[1] = at("B", 0, 6, "L2"))],
+    // 상암 → 여의도 이동시간 누락: 간격이 아무리 넓어도 연속 배정하면 안 된다.
+    ["겹침 또는 이동시간 부족", (r) => r.assigned.push(at("B", 1, 30, "L2"))],
+    ["하루 이동 2회 초과", (r) => r.assigned.push(at("A", 1, 18, "L1"), at("B", 1, 27, "L2"))],
+    // 월: A(마포) → 이동 → S(상암) → 이동 → B(마포). S는 앞뒤가 모두 이동이다.
+    ["세 지점 회원의 이동-회원-이동 배정", (r) => {
+      r.assigned = [at("A", 0, 0, "L1"), at("S", 0, 9, "L3"), at("B", 0, 18, "L1"), at("C", 1, 12, "L3")];
+    }],
+    ["미배정 목록 불일치", (r) => r.assigned.shift()],
+  ];
+  cases.forEach(([expected, mutate]) => {
+    qualityFixture();
+    const r = validQualityResult();
+    mutate(r);
+    const violations = lib.scheduleViolations(r);
+    assert(
+      violations.some((v) => v.startsWith(expected)),
+      expected + " 위반을 잡지 못함: " + JSON.stringify(violations),
+    );
+  });
+});
+
+/* ---------------- goldenFloors.js: 골든 품질 하한 래칫 ---------------- */
+const goldenFloors = require("./goldenFloors.js");
+function floorSet(sessions, travel) {
+  const f = { maxUnassigned: 0, minSessions: sessions, maxInefficientMoves: 0, maxTravelCount: travel, maxIdleMinutes: 0 };
+  return { attempts: 20, B: f, C: f };
+}
+test("골든 하한은 좋아지는 방향으로만 기록된다", () => {
+  const prev = floorSet(16, 2);
+  assertEqual(goldenFloors.floorRegressions("X", prev, floorSet(17, 1)), [], "수업↑·이동↓는 허용");
+  assertEqual(goldenFloors.floorRegressions("X", prev, floorSet(16, 2)), [], "그대로도 허용");
+  assertEqual(goldenFloors.floorRegressions("X", null, floorSet(1, 9)), [], "처음 기록은 비교 대상 없음");
+  const worse = goldenFloors.floorRegressions("X", prev, floorSet(15, 3));
+  assertEqual(worse.length, 4, "B·C 각각 수업↓·이동↑ 모두 거부: " + JSON.stringify(worse));
+});
+test("골든 하한의 기준 시도 횟수가 바뀌면 기록을 거부한다", () => {
+  const next = floorSet(16, 2);
+  next.attempts = 5;
+  assertEqual(goldenFloors.floorRegressions("X", floorSet(16, 2), next).length, 1);
+});
+
 function fakeWorkerFactory(reply) {
   const created = [];
   return {
