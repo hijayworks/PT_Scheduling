@@ -5334,11 +5334,43 @@
     }
     return out;
   }
-  function originsFromUndo(current, userPins, oldestSnapshot) {
-    if (!oldestSnapshot) return [];
-    const members = new Set(userPins.map((p) => p.memberId));
-    const now = new Set(current.assigned.map(pinKey));
-    return oldestSnapshot.assigned.filter((a) => members.has(a.memberId) && !now.has(pinKey(a))).map((a) => ({ day: a.day, startSlot: a.startSlot }));
+  var ORIGIN_STATUS = {
+    known: "known",
+    // 원래 위치를 믿을 수 있게 앎(origins 1개 이상)
+    noMove: "no-move",
+    // 생성 이후 기록이 온전하고, 고정한 수업 중 옮겨서 자리를 비운 것이 없음
+    afterApply: "after-apply",
+    // 마지막 재최적화 적용 이후 옮긴 고정 수업 없음(적용 이전 기록은 무시)
+    noHistory: "no-history",
+    // 되돌리기 기록 없음(새로고침 등)
+    truncated: "truncated",
+    // 되돌리기 기록이 한도를 넘어 잘림 — 기준 상태를 모름
+    ambiguous: "ambiguous"
+    // 비운 자리와 옮긴 고정 수업을 짝지을 수 없음
+  };
+  function originsFromHistory(current, userPins, stack) {
+    const none = (status) => ({ origins: [], status });
+    const snaps = stack || [];
+    let applied = -1;
+    for (let i = snaps.length - 1; i >= 0 && applied < 0; i--)
+      if (snaps[i].reoptApplied) applied = i;
+    if (applied < 0 && stack && stack.truncated) return none(ORIGIN_STATUS.truncated);
+    if (!snaps.length) return none(ORIGIN_STATUS.noHistory);
+    const base = applied < 0 ? snaps[0] : snaps[applied + 1] || current;
+    const baseKeys = new Set(base.assigned.map(pinKey));
+    const nowKeys = new Set(current.assigned.map(pinKey));
+    const pinKeys = new Set(userPins.map(pinKey));
+    const origins = [];
+    for (const memberId of new Set(userPins.map((p) => p.memberId))) {
+      const vacated = base.assigned.filter((a) => a.memberId === memberId && !nowKeys.has(pinKey(a)));
+      const added = current.assigned.filter((a) => a.memberId === memberId && !baseKeys.has(pinKey(a)));
+      const p = added.filter((a) => pinKeys.has(pinKey(a))).length;
+      if (p === 0) continue;
+      if (added.length > p || vacated.length > p) return none(ORIGIN_STATUS.ambiguous);
+      for (const a of vacated) origins.push({ day: a.day, startSlot: a.startSlot });
+    }
+    if (origins.length) return { origins, status: ORIGIN_STATUS.known };
+    return none(applied < 0 ? ORIGIN_STATUS.noMove : ORIGIN_STATUS.afterApply);
   }
   var regionKey = (r) => r.movable.map(pinKey).sort().join(",");
   function createLocalSearch(current, userPins, origins = []) {
@@ -7280,11 +7312,14 @@
       confirmedIds: (container.confirmedIds || []).slice()
     };
   }
-  function pushManualUndo(container) {
+  function pushManualUndo(container, mark) {
     if (!manualUndoStacks.has(container)) manualUndoStacks.set(container, []);
     const stack = manualUndoStacks.get(container);
-    stack.push(snapshotContainer(container));
-    if (stack.length > MANUAL_UNDO_LIMIT) stack.shift();
+    stack.push({ ...snapshotContainer(container), ...mark });
+    if (stack.length > MANUAL_UNDO_LIMIT) {
+      stack.shift();
+      stack.truncated = true;
+    }
   }
   function hasManualUndo(container) {
     const stack = manualUndoStacks.get(container);
@@ -8317,6 +8352,7 @@
   }
   var reoptimize3El = document.getElementById("reoptimize3");
   var reoptSession = null;
+  var reoptRunSeq = 0;
   var editStateSig = (r) => layoutSignature(r) + "#" + (r.confirmedIds || []).slice().sort().join(",");
   var LEVEL_LABELS = {
     L1: "고정한 수업 바로 앞뒤",
@@ -8373,6 +8409,12 @@
       },
       onApply: applyReoptimization,
       onDiscard: () => {
+        logReoptimize({
+          event: "discard",
+          run: s.run,
+          proposalLevels: s.proposals.map((p) => p.level),
+          widened: s.widened
+        });
         reoptSession = null;
         renderSchedule3Result();
         showToast("재최적화 제안을 버렸습니다", "info");
@@ -8391,15 +8433,24 @@
       confirmedIds: assigned.filter((a) => pinned.has(pinKey(a))).map((a) => a.id)
     };
   }
+  function applyReoptimizedCard(target, chosen) {
+    pushManualUndo(target, { reoptApplied: true });
+    Object.assign(target, reoptimizedCard(target, chosen));
+  }
   function applyReoptimization() {
     const s = reoptSession;
     if (!s || !s.proposals.length) return;
     const p = s.proposals[s.selected];
-    pushManualUndo(s.target);
-    Object.assign(
-      s.target,
-      reoptimizedCard(s.target, p.variants[p.variantIdx].result)
-    );
+    logReoptimize({
+      event: "apply",
+      run: s.run,
+      level: p.level,
+      kind: p.level === "full" ? "full" : "local",
+      proposalIndex: s.selected,
+      proposalLevels: s.proposals.map((x) => x.level),
+      widened: s.widened
+    });
+    applyReoptimizedCard(s.target, p.variants[p.variantIdx].result);
     reoptSession = null;
     saveState();
     renderSchedule3Result();
@@ -8429,16 +8480,22 @@
       generateHint3El.textContent = violations.length ? "이 카드에 규칙 위반이 있어 다시 최적화할 수 없습니다: " + violations[0].message : "유지할 수업이 없어 다시 최적화할 수 없습니다.";
       return;
     }
-    const undo = manualUndoStacks.get(target);
-    const origins = originsFromUndo(target, userPins, undo && undo[0]);
+    const { origins, status: originStatus } = originsFromHistory(
+      target,
+      userPins,
+      manualUndoStacks.get(target)
+    );
     reoptSession = {
+      run: ++reoptRunSeq,
       target,
       targetSig: editStateSig(target),
       keptCount: userPins.length,
       userPins,
+      originStatus,
       search: createLocalSearch(target, userPins, origins),
       proposals: [],
       selected: 0,
+      widened: 0,
       fullDone: false,
       localExhausted: false,
       notice: null
@@ -8453,7 +8510,7 @@
     if (dropStaleCandidates()) return;
     const sel = [state.excludedMemberIds3, state.onceLimitedMemberIds3];
     const inputKey = candidateInputKey();
-    const originKnown = s.search.origins.length > 0;
+    if (mode === "widen") s.widened++;
     generateHint3El.textContent = "";
     s.notice = null;
     runtime.generationInProgress = true;
@@ -8498,14 +8555,21 @@
         ...sel,
         () => selectReoptimization(s.target, gen.bc.concat(gen.a), pins)
       );
+      const changed = out.proposal ? assignmentDiff(s.target, out.proposal.result).counts : null;
       logReoptimize({
+        event: "level",
+        run: s.run,
+        mode,
         level,
         ms: Math.round(performance.now() - t0),
         budgetScale: plan.budgetScale === void 0 ? 1 : plan.budgetScale,
         status: out.status,
         reason: out.reason,
         source: out.proposal ? proposalSource(out.proposal.result, gen) : null,
-        originKnown
+        changedMembers: changed && changed.changedMembers,
+        changedSessions: changed && changed.changedSessions,
+        originStatus: s.originStatus,
+        originCount: s.search.origins.length
       });
       return out;
     };
@@ -8545,6 +8609,12 @@
         }
       }
     } catch (err) {
+      logReoptimize({
+        event: "abort",
+        run: s.run,
+        mode,
+        reason: err instanceof GenerationCancelledError ? "cancelled" : err instanceof ReoptimizeStaleError ? "stale" : "error"
+      });
       if (err instanceof GenerationCancelledError) {
         if (!s.proposals.length && !s.localExhausted) reoptSession = null;
         showToast("다시 최적화를 취소했습니다", "info");

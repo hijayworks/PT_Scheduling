@@ -326,11 +326,13 @@ async function main() {
     assert(hintText.includes("유지할 수업 1개"), "유지할 수업 수 안내가 다름: " + hintText);
     const waitIdle = (page = ro) =>
       page.waitForFunction(() => !document.querySelector("#generateBtn3").disabled, null, { timeout: generateTimeout });
-    const levelsRun = (log) => log.map((e) => e.level + "×" + e.budgetScale).join(",");
+    const levelsRun = (log) => log.filter((e) => e.event === "level").map((e) => e.level + "×" + e.budgetScale).join(",");
+    const eventOf = (log, event) => log.find((e) => e.event === event);
 
     await reoptBtn.click();
     await ro.click("#generateBtn3Cancel");
     await waitIdle();
+    assert(eventOf(reoptLog, "abort")?.reason === "cancelled", "취소가 계측에 남지 않음: " + JSON.stringify(reoptLog));
     assert(!(await reoptPanel.isVisible()), "재최적화를 취소했는데 제안이 나타남");
     assert((await editedIds()) === seedJson, "재최적화 취소 뒤 카드가 바뀜");
 
@@ -340,6 +342,13 @@ async function main() {
     const proposalText = (await reoptPanel.isVisible()) ? await reoptPanel.innerText() : "";
     assert(proposalText.includes("변경 최소화 제안"), "변경 최소화 제안 패널이 나타나지 않음: " + (await ro.locator("#generateHint3").innerText()) + " / " + levelsRun(reoptLog));
     assert(levelsRun(reoptLog) === "L1×0.1", "L1에서 개선을 찾았으면 그 Level에서 멈춰야 함(전체 자동 실행 금지): " + levelsRun(reoptLog));
+    // 시드는 저장 데이터로 넣었으므로 되돌리기 기록이 없다 — "이동 없음"이 아니라 "기록 없음"으로 남아야 한다.
+    const l1 = eventOf(reoptLog, "level");
+    assert(
+      l1.mode === "first" && l1.status === "improved" && l1.changedMembers === 1 && l1.changedSessions === 1 &&
+        l1.originStatus === "no-history" && l1.originCount === 0 && typeof l1.ms === "number" && l1.source,
+      "L1 계측(mode·변경 회원/세션·원래 위치 상태·시간·엔진)이 다름: " + JSON.stringify(l1)
+    );
     assert(proposalText.includes("유지할 수업 1개") && proposalText.includes("고정한 수업 바로 앞뒤 범위"), "제안에 유지할 수업 수·범위가 없음");
     assert(proposalText.includes("가장 좋은 일정이라는 뜻은 아닙니다"), "변경 최소화 제안이 최선이 아님을 알리지 않음");
     assert(/좋아지는 것\s*빈 시간 -\d+분/.test(proposalText), "제안 요약에 빈 시간 개선이 없음: " + proposalText);
@@ -361,6 +370,7 @@ async function main() {
     }
     await ro.setViewportSize({ width: 1280, height: 720 });
     await ro.click("#reoptimize3 .reopt-discard");
+    assert(eventOf(reoptLog, "discard")?.widened === 0, "버리기가 계측에 남지 않음: " + JSON.stringify(reoptLog));
     assert(!(await reoptPanel.isVisible()), "버리기 뒤에도 제안 패널이 남음");
     assert((await editedIds()) === seedJson, "버리기 뒤 카드가 바뀜");
 
@@ -380,6 +390,13 @@ async function main() {
     if (process.env.SMOKE_SHOT_DIR) await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-compare.png") });
     await choices.nth(1).click();
     await ro.click("#reoptimize3 .reopt-apply");
+    const applyEvent = eventOf(reoptLog, "apply");
+    assert(
+      reoptLog.filter((e) => e.event === "level").map((e) => e.mode).join(",") === "first,widen" &&
+        JSON.stringify(applyEvent && [applyEvent.level, applyEvent.kind, applyEvent.proposalIndex, applyEvent.proposalLevels, applyEvent.widened]) ===
+          JSON.stringify(["full", "full", 1, ["L1", "full"], 1]),
+      "적용 계측(넓히기 사용·적용한 제안 종류·제안 목록)이 다름: " + JSON.stringify(reoptLog)
+    );
     let applied = await editedCard();
     assert((await editedIds()) !== seedJson, "적용했는데 카드가 그대로임");
     assert(

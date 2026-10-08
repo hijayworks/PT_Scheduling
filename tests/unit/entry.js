@@ -90,6 +90,13 @@ export {
   validateMove,
   prepareSwap,
   reoptimizedCard,
+  applyReoptimizedCard,
+  moveSession,
+  confirmSession,
+  unconfirmSession,
+  undoManualEdit,
+  manualUndoStacks,
+  MANUAL_UNDO_LIMIT,
 } from "../../src/schedule3.js";
 export { candidateAPools, candidatePools } from "../../src/engine/greedy.js";
 export {
@@ -128,7 +135,8 @@ export {
   levelPlan,
   generateForLevel,
   proposalSource,
-  originsFromUndo,
+  originsFromHistory,
+  ORIGIN_STATUS,
   createLocalSearch,
   nextLocalLevel,
   continueLocalSearch,

@@ -2047,8 +2047,9 @@ test("재최적화 적용: 확정(confirmedIds)에는 사용자가 고정한 수
 });
 testAsync("원래 위치를 모르면(되돌리기 기록 없음) 현재 위치만으로 국소 탐색이 정상 동작한다", async () => {
   const f = impactFixture();
-  assertEqual(lib.originsFromUndo(f.current, f.userPins, undefined), []);
-  const search = lib.createLocalSearch(f.current, f.userPins, lib.originsFromUndo(f.current, f.userPins, undefined));
+  const none = lib.originsFromHistory(f.current, f.userPins, undefined);
+  assertEqual(none, { origins: [], status: "no-history" });
+  const search = lib.createLocalSearch(f.current, f.userPins, none.origins);
   const seen = [];
   const found = await lib.continueLocalSearch(
     search,
@@ -2057,13 +2058,101 @@ testAsync("원래 위치를 모르면(되돌리기 기록 없음) 현재 위치�
   );
   assertEqual([found.level, found.region.movable.map((a) => a.id).sort(), seen], ["L1", ["B0", "D0"], [2]]);
 });
-test("원래 위치: 되돌리기 기록의 가장 오래된 상태에서 고정한 회원이 비운 자리만 꺼낸다", () => {
-  const f = impactFixture();
-  const s = (memberId, day, startSlot) => ({ id: memberId + day, memberId, day, startSlot, duration: 60, locationId: "L1" });
-  // 편집 전: C는 수요일 6, A는 화요일 0(A는 고정 회원이 아니라 원래 위치로 보지 않는다).
-  const snapshot = { assigned: f.current.assigned.filter((a) => a.id !== "C0" && a.id !== "A0").concat([s("C", 2, 6), s("A", 1, 0)]) };
-  assertEqual(lib.originsFromUndo(f.current, f.userPins, snapshot), [{ day: 2, startSlot: 6 }]);
-});
+// 원래 위치 판정(originsFromHistory)은 실제 편집 함수(moveSession·confirm/unconfirm·편집 취소·재최적화 적용)가 쌓은
+// 되돌리기 스택으로 검사한다. 월: A(마포 12:00) B(마포 13:00), 화: S(마포 12:00) A(마포 14:00).
+function originFlow() {
+  qualityFixture();
+  lib.state.excludedMemberIds3 = [];
+  const card = { assigned: [at("A", 0, 0, "L1"), at("B", 0, 6, "L1"), at("S", 1, 0, "L1"), at("A", 1, 12, "L1")], unassignedMembers: [], confirmedIds: [] };
+  const noop = () => {};
+  const find = (memberId, day) => card.assigned.find((a) => a.memberId === memberId && a.day === day);
+  const realRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = () => {}; // showToast
+  return {
+    card,
+    move: (memberId, day, toDay, toSlot) => {
+      const before = JSON.stringify(card.assigned);
+      lib.moveSession(card, find(memberId, day), toDay, toSlot, noop);
+      assert(JSON.stringify(card.assigned) !== before, "픽스처 확인: " + memberId + " 이동이 막힘");
+    },
+    confirm: (memberId, day) => lib.confirmSession(card, find(memberId, day).id, noop),
+    unconfirm: (memberId, day) => lib.unconfirmSession(card, find(memberId, day).id, noop),
+    undo: () => lib.undoManualEdit(card, noop),
+    origin: () => lib.originsFromHistory(card, lib.pinsFromResult(card), lib.manualUndoStacks.get(card)),
+    done: () => (globalThis.requestAnimationFrame = realRaf),
+  };
+}
+const originCase = (fn) => () => {
+  const f = originFlow();
+  try {
+    fn(f);
+  } finally {
+    f.done();
+  }
+};
+test("원래 위치: 고정 수업을 옮기면 처음 자리만 원점이고, 연속으로 옮겨도 중간 자리는 원점이 아니다", originCase((f) => {
+  f.move("A", 0, 0, 18);
+  assertEqual(f.origin(), { origins: [{ day: 0, startSlot: 0 }], status: "known" });
+  f.move("A", 0, 0, 24);
+  assertEqual(f.origin(), { origins: [{ day: 0, startSlot: 0 }], status: "known" });
+}));
+test("원래 위치: 옮겼다 제자리로 돌려놓거나 확정만 했으면 원점이 없다(이동 없음)", originCase((f) => {
+  f.move("A", 0, 0, 18);
+  f.move("A", 0, 0, 0);
+  assertEqual(f.origin(), { origins: [], status: "no-move" });
+  f.confirm("B", 0);
+  assertEqual(f.origin(), { origins: [], status: "no-move" });
+}));
+test("원래 위치: 편집 취소로 이동을 되돌리면 그 이동의 원점도 사라진다", originCase((f) => {
+  f.move("A", 0, 0, 18);
+  f.confirm("B", 0);
+  f.undo();
+  f.undo();
+  assertEqual(f.origin(), { origins: [], status: "no-history" }, "기록이 비면 현재 위치만");
+}));
+test("원래 위치: 새로고침으로 되돌리기 기록이 없으면 이동이 없었다고 보지 않고 '기록 없음'으로 구분한다", originCase((f) => {
+  f.move("A", 0, 0, 18);
+  lib.manualUndoStacks.delete(f.card);
+  assertEqual(f.origin(), { origins: [], status: "no-history" });
+}));
+test("원래 위치: 재최적화를 적용한 뒤 새 편집 없이 다시 재최적화하면 적용 전 이동·엔진이 옮긴 자리를 원점으로 쓰지 않는다", originCase((f) => {
+  f.move("A", 0, 0, 18);
+  // 제안: B가 A의 원래 자리(월 12:00)를 메우고, 엔진이 고정 회원 A의 고정 아닌 화요일 수업을 14:00 → 15:00으로 옮겼다.
+  const proposal = { assigned: [f.card.assigned[0], at("B", 0, 0, "L1"), at("S", 1, 0, "L1"), at("A", 1, 18, "L1")], unassignedMembers: [] };
+  lib.applyReoptimizedCard(f.card, proposal);
+  assertEqual(f.origin(), { origins: [], status: "after-apply" });
+  // 적용 뒤 새로 옮긴 고정 수업의 원점만 쓴다.
+  f.move("A", 0, 0, 24);
+  assertEqual(f.origin(), { origins: [{ day: 0, startSlot: 18 }], status: "known" });
+  // 새 이동과 적용을 편집 취소하면 적용 표시도 함께 꺼져 적용 전 기록(첫 이동의 원점)을 다시 쓴다.
+  f.undo();
+  f.undo();
+  assertEqual(f.origin(), { origins: [{ day: 0, startSlot: 0 }], status: "known" });
+}));
+test("원래 위치: 편집이 되돌리기 한도(20개)를 넘으면 남은 가장 오래된 상태(중간 위치)를 원점으로 쓰지 않는다", originCase((f) => {
+  f.move("A", 0, 0, 18);
+  for (let i = 0; i < 19; i++) (i % 2 ? f.unconfirm : f.confirm)("B", 0);
+  f.move("A", 0, 0, 24); // 21번째 편집: 가장 오래된 스냅샷은 A가 중간 위치(월 15:00)에 있던 상태
+  assertEqual(lib.manualUndoStacks.get(f.card).length, lib.MANUAL_UNDO_LIMIT);
+  assertEqual(f.origin(), { origins: [], status: "truncated" });
+  // 잘린 뒤라도 재최적화를 적용하면 그 이후 기록은 온전하다.
+  lib.applyReoptimizedCard(f.card, { assigned: f.card.assigned, unassignedMembers: [] });
+  assertEqual(f.origin().status, "after-apply");
+}));
+test("원래 위치: 옮긴 수업의 확정만 취소하면 같은 회원의 다른 확정 수업이 남아 있어도 옛 자리를 원점으로 쓰지 않는다", originCase((f) => {
+  f.confirm("A", 1);
+  f.move("A", 0, 0, 18);
+  f.unconfirm("A", 0);
+  assertEqual(lib.pinsFromResult(f.card).map((p) => p.day), [1], "픽스처 확인: A 화요일만 고정");
+  assertEqual(f.origin(), { origins: [], status: "no-move" });
+}));
+test("원래 위치: 한 회원의 두 수업을 옮기고 하나만 확정 취소하면 어느 빈 자리가 원점인지 몰라 현재 위치만 쓴다", originCase((f) => {
+  f.move("A", 0, 0, 18);
+  f.move("A", 1, 1, 24);
+  assertEqual(f.origin(), { origins: [{ day: 0, startSlot: 0 }, { day: 1, startSlot: 12 }], status: "known" });
+  f.unconfirm("A", 1);
+  assertEqual(f.origin(), { origins: [], status: "ambiguous" });
+}));
 test("계측: 제안 배치를 만든 엔진(후보A / B·C / 둘 다 / 되돌리기)을 구분한다", () => {
   const f = reoptFixture();
   assertEqual(lib.proposalSource(f.better, { a: [f.better], bc: [] }), "A");

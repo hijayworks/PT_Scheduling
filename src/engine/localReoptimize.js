@@ -135,15 +135,47 @@ export async function runImpactLevels(
   return out;
 }
 
-// 수동 편집 되돌리기 기록(가장 오래된 스냅샷)에서 원래 위치를 꺼낸다: 사용자가 고정한 회원의 세션 중 스냅샷에는
-// 있었지만 지금 카드에는 없는 자리(옮겨서 비운 자리). 기록이 없으면(새로고침 등) [] — 현재 위치만 쓴다.
-export function originsFromUndo(current, userPins, oldestSnapshot) {
-  if (!oldestSnapshot) return [];
-  const members = new Set(userPins.map((p) => p.memberId));
-  const now = new Set(current.assigned.map(pinKey));
-  return oldestSnapshot.assigned
-    .filter((a) => members.has(a.memberId) && !now.has(pinKey(a)))
-    .map((a) => ({ day: a.day, startSlot: a.startSlot }));
+// 원래 위치(origin) 판정 결과. 원점은 국소 범위를 잡는 힌트일 뿐(하드 제약·품질 판정에 쓰지 않음)이라, 확실할
+// 때만 쓰고 조금이라도 애매하면 버리고 현재 위치만 쓴다. 계측에서 "이동이 없었다"와 "있었지만 모른다"를 구분한다.
+export const ORIGIN_STATUS = {
+  known: "known", // 원래 위치를 믿을 수 있게 앎(origins 1개 이상)
+  noMove: "no-move", // 생성 이후 기록이 온전하고, 고정한 수업 중 옮겨서 자리를 비운 것이 없음
+  afterApply: "after-apply", // 마지막 재최적화 적용 이후 옮긴 고정 수업 없음(적용 이전 기록은 무시)
+  noHistory: "no-history", // 되돌리기 기록 없음(새로고침 등)
+  truncated: "truncated", // 되돌리기 기록이 한도를 넘어 잘림 — 기준 상태를 모름
+  ambiguous: "ambiguous", // 비운 자리와 옮긴 고정 수업을 짝지을 수 없음
+};
+
+// 수동 편집 되돌리기 스택(schedule3.js manualUndoStacks의 배열)에서 원래 위치를 꺼낸다. 반환 { origins, status }.
+// 기준 상태: 마지막 재최적화 적용 스냅샷(reoptApplied) 다음 상태(없으면 지금 카드), 적용 표시가 없으면 스택의 가장
+// 오래된 스냅샷(생성 직후). 적용 표시 없이 스택이 잘렸으면(stack.truncated) 기준을 모른다.
+// 회원마다 기준 → 지금 비교: 비운 자리 V(기준에만 있음), 새 고정 P(지금 고정 중 기준에 없음), 새 비고정 U.
+//   P = 0 → 이 회원은 고정한 이동이 없음(확정 취소된 이동·엔진 이동은 원점이 아님).
+//   U = 0 && V ≤ P → V 전부가 원점(옮긴 고정 수업의 이전 자리).
+//   그 밖(U > 0이거나 V > P) → 어느 빈 자리가 고정 이동의 원점인지 모름 → 전체를 ambiguous로 버린다.
+export function originsFromHistory(current, userPins, stack) {
+  const none = (status) => ({ origins: [], status });
+  const snaps = stack || [];
+  let applied = -1;
+  for (let i = snaps.length - 1; i >= 0 && applied < 0; i--)
+    if (snaps[i].reoptApplied) applied = i;
+  if (applied < 0 && stack && stack.truncated) return none(ORIGIN_STATUS.truncated);
+  if (!snaps.length) return none(ORIGIN_STATUS.noHistory);
+  const base = applied < 0 ? snaps[0] : snaps[applied + 1] || current;
+  const baseKeys = new Set(base.assigned.map(pinKey));
+  const nowKeys = new Set(current.assigned.map(pinKey));
+  const pinKeys = new Set(userPins.map(pinKey));
+  const origins = [];
+  for (const memberId of new Set(userPins.map((p) => p.memberId))) {
+    const vacated = base.assigned.filter((a) => a.memberId === memberId && !nowKeys.has(pinKey(a)));
+    const added = current.assigned.filter((a) => a.memberId === memberId && !baseKeys.has(pinKey(a)));
+    const p = added.filter((a) => pinKeys.has(pinKey(a))).length;
+    if (p === 0) continue;
+    if (added.length > p || vacated.length > p) return none(ORIGIN_STATUS.ambiguous);
+    for (const a of vacated) origins.push({ day: a.day, startSlot: a.startSlot });
+  }
+  if (origins.length) return { origins, status: ORIGIN_STATUS.known };
+  return none(applied < 0 ? ORIGIN_STATUS.noMove : ORIGIN_STATUS.afterApply);
 }
 
 // 앱의 국소 탐색 진행 상태. next: 다음에 볼 LOCAL_LEVELS 번호, lastKey: 마지막으로 본(비지 않은) 범위.
