@@ -1322,9 +1322,11 @@ test("배정 차이: 회원별 요일·시작 시각·지점 변경과 배정↔
   );
   assertEqual(counts, {
     changedMembers: 5,
+    changedSessions: 5,
     dayChanges: 1,
     startChanges: 2,
     locationChanges: 1,
+    startOnlyChanges: 1, // B만(A는 요일·지점도 바뀜)
     newlyAssigned: 1,
     newlyUnassigned: 1,
     sessionsAdded: 2,
@@ -1762,6 +1764,55 @@ test("재최적화 제안: 총 수업과 미배정 수가 유지되면 회원 �
   assertEqual(out.improving.map((e) => lib.layoutSignature(e.result)), [lib.layoutSignature(shifted)]);
   const { counts } = lib.assignmentDiff(current, shifted);
   assertEqual([counts.membersFewer, counts.membersMore, counts.sessionCountShift, counts.newlyUnassigned], [1, 1, 2, 0]);
+});
+
+test("재최적화 제안: 지금 카드와 더 비슷해도 품질이 낮은 결과는 고르지 않는다", () => {
+  const f = reoptFixture();
+  // 덜 바뀜: C만 10으로(빈 시간 30 → 10분). 더 나음: C를 9로 + 월요일 S 추가(수업 +1, 빈 시간 0) — 회원 2명 변경.
+  const fewerChanges = { assigned: [at("A", 0, 0, "L1"), at("B", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 10, "L3")], unassignedMembers: [] };
+  const best = { assigned: f.better.assigned.concat([at("S", 0, 12, "L1")]), unassignedMembers: [] };
+  assert(lib.isSchedule2ResultBetter(fewerChanges, f.current) && lib.isSchedule2ResultBetter(best, fewerChanges), "픽스처 확인");
+  assertEqual(
+    [lib.assignmentDiff(f.current, fewerChanges).counts.changedMembers, lib.assignmentDiff(f.current, best).counts.changedMembers],
+    [1, 2],
+    "픽스처 확인",
+  );
+  for (const results of [[fewerChanges, best], [best, fewerChanges]]) {
+    const out = lib.selectReoptimization(f.current, results, f.pins);
+    assertEqual(lib.layoutSignature(out.proposal.result), lib.layoutSignature(best));
+    assertEqual(out.variants.length, 1, "품질이 낮은 결과는 variant로도 주지 않음");
+  }
+});
+test("재최적화 제안: 품질이 완전히 같으면 지금 카드와 가장 비슷한 배치(변경 회원이 적은 쪽)를 먼저 제안한다", () => {
+  const f = reoptFixture();
+  // 지금 카드: 월요일 B → A 순서. 두 결과 모두 화요일 C를 9로 당겨 품질이 같다.
+  // keepsOrder는 C만 바뀌고, restoresOrder는 월요일 A·B도 맞바꿔 3명이 바뀐다(한 명씩 되돌리면 겹쳐서 되돌리기로는 못 줄인다).
+  const current = { assigned: [at("B", 0, 0, "L1"), at("A", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 12, "L3")], unassignedMembers: [] };
+  const keepsOrder = { assigned: [at("B", 0, 0, "L1"), at("A", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 9, "L3")], unassignedMembers: [] };
+  const restoresOrder = f.better;
+  assert(!lib.isSchedule2ResultBetter(keepsOrder, restoresOrder) && !lib.isSchedule2ResultBetter(restoresOrder, keepsOrder), "픽스처 확인: 동점");
+  assert(lib.layoutSignature(restoresOrder) < lib.layoutSignature(keepsOrder), "픽스처 확인: 서명 순서로는 restoresOrder가 앞");
+  for (const results of [[restoresOrder, keepsOrder], [keepsOrder, restoresOrder]]) {
+    const out = lib.selectReoptimization(current, results, f.pins);
+    // 둘은 시작 시각만 달라(같은 회원·요일·지점) 유사 배치로 합쳐지고 제안 하나만 남는다.
+    assertEqual(out.variants.map((v) => lib.layoutSignature(v.result)), [lib.layoutSignature(keepsOrder)]);
+  }
+});
+test("재최적화 제안: 품질·고정·하드 제약을 지키면서 지금 자리로 되돌릴 수 있는 회원은 되돌린다", () => {
+  const f = reoptFixture();
+  // 수요일에 혼자 수업하는 D: 시작 시각을 바꿔도 품질이 같으므로 바꿀 이유가 없다.
+  lib.state.members.push({ id: "D", name: "d", locationIds: ["L1"], category: "등록" });
+  for (let s = 0; s <= 40; s++) lib.runtime.availableCells.add("2-" + s);
+  for (let s = 0; s <= 30; s++) lib.state.requests.push({ id: "D2_" + s, memberId: "D", day: 2, startSlot: s, duration: 60 });
+  const current = { assigned: f.current.assigned.concat([at("D", 2, 0, "L1")]), unassignedMembers: [] };
+  const kept = { assigned: f.better.assigned.concat([at("D", 2, 0, "L1")]), unassignedMembers: [] };
+  const moved = { assigned: f.better.assigned.concat([at("D", 2, 3, "L1")]), unassignedMembers: [] };
+  assertEqual(lib.scheduleViolations(moved), [], "픽스처 확인");
+  const out = lib.selectReoptimization(current, [moved], f.pins);
+  assertEqual(lib.layoutSignature(out.proposal.result), lib.layoutSignature(kept));
+  assertEqual(lib.assignmentDiff(current, out.proposal.result).members.map((m) => m.memberId), ["C"]);
+  // 품질을 낮추는 되돌리기(C를 원래 12로)는 하지 않는다.
+  assertEqual(lib.layoutSignature(lib.revertUnneededChanges(current, f.pins, kept)), lib.layoutSignature(kept));
 });
 
 function fakeWorkerFactory(reply) {

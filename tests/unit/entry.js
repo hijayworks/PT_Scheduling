@@ -36,6 +36,7 @@ export {
   selectCandidates,
   selectReoptimization,
   keepsSessions,
+  revertUnneededChanges,
   byTravelThenSignature,
   MAX_CARD_VARIANTS,
   pickVariants,
