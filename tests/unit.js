@@ -1471,6 +1471,252 @@ test("골든 하한의 기준 시도 횟수가 바뀌면 기록을 거부한다"
   assertEqual(goldenFloors.floorRegressions("X", floorSet(16, 2), next).length, 1);
 });
 
+/* ---------------- 고정 세션(5a 재최적화): 엔진 불변조건 ---------------- */
+// 지점 하나, 월~목 고정 4개. P(상담, 최대 1회)는 수요일 고정 + 월요일 신청, R(등록, 최대 2회)은
+// 목요일 고정 + 월·화·목 신청. 월·화 고정 앞 빈 시간에 P·R이 정확히 맞물려 들어갈 수 있다.
+function pinQuotaFixture() {
+  lib.state.locations = [{ id: "L1", name: "1" }];
+  lib.state.travelTimes = {};
+  lib.state.onceLimitedMemberIds3 = [];
+  lib.state.excludedMemberIds3 = [];
+  lib.state.members = [
+    { id: "Q1", locationIds: ["L1"], category: "등록" },
+    { id: "Q2", locationIds: ["L1"], category: "등록" },
+    { id: "P", locationIds: ["L1"], category: "상담" },
+    { id: "R", locationIds: ["L1"], category: "등록" },
+  ];
+  const req = (id, memberId, day, startSlot, duration) => ({ id, memberId, day, startSlot, duration });
+  const reqs = [
+    req("q1", "Q1", 0, 30, 60),
+    req("q2", "Q2", 1, 30, 60),
+    req("pWed", "P", 2, 30, 30),
+    req("pMon", "P", 0, 27, 30), // 월 27~30, Q1 고정(30) 바로 앞
+    req("rThu", "R", 3, 30, 60),
+    req("rMon", "R", 0, 21, 60), // 월 21~27, P(27) 앞
+    req("rTue", "R", 1, 24, 60), // 화 24~30, Q2 고정(30) 바로 앞
+    req("rThu2", "R", 3, 24, 60), // 목 24~30, 자기 고정 바로 앞(같은 날)
+  ];
+  const byId = new Map(reqs.map((r) => [r.id, r]));
+  const pin = (id) => Object.assign({ locationId: "L1" }, byId.get(id));
+  // 월·화 고정이 먼저 처리되도록 순서를 둔다(뒤 요일 고정 회원의 횟수가 아직 안 잡힌 상태).
+  return { reqs, pins: ["q1", "q2", "pWed", "rThu"].map(pin) };
+}
+function sessionsPerMember(assigned) {
+  const n = {};
+  assigned.forEach((r) => (n[r.memberId] = (n[r.memberId] || 0) + 1));
+  return n;
+}
+function assertPinInvariants(assigned, pins, label) {
+  assertEqual(lib.missingPins(assigned, pins), [], label + ": 고정 세션은 같은 자리에 남아야 함");
+  const perDay = new Set();
+  assigned.forEach((r) => {
+    const k = r.memberId + "|" + r.day;
+    assert(!perDay.has(k), label + ": " + r.memberId + "가 같은 날 두 번 배정됨");
+    perDay.add(k);
+  });
+  const n = sessionsPerMember(assigned);
+  Object.keys(n).forEach((id) =>
+    assert(n[id] <= lib.maxSessionsFor(lib.memberById(id)), label + ": " + id + " " + n[id] + "회 > 최대"),
+  );
+}
+test("고정 세션: 그리디는 고정 세션을 회원 최대 횟수에 이미 사용된 수업으로 센다", () => {
+  const { reqs, pins } = pinQuotaFixture();
+  const assigned = lib.greedyAssign(reqs, {}, pins);
+  assertPinInvariants(assigned, pins, "그리디");
+  const n = sessionsPerMember(assigned);
+  assertEqual(n.P, 1, "1회 회원이 이미 1회 고정됐으면 추가 배정하지 않음");
+  assertEqual(n.R, 2, "2회 회원이 1회 고정됐으면 남은 탐색에서 1회만 추가");
+});
+test("고정 세션: 1회 제한 회원이 고정되면 그리디는 다른 요일에 추가 배정하지 않는다", () => {
+  const { reqs, pins } = pinQuotaFixture();
+  lib.state.onceLimitedMemberIds3 = ["R"];
+  try {
+    const assigned = lib.greedyAssign(reqs, {}, pins);
+    assertPinInvariants(assigned, pins, "그리디 1회 제한");
+    assertEqual(sessionsPerMember(assigned).R, 1);
+  } finally {
+    lib.state.onceLimitedMemberIds3 = [];
+  }
+});
+test("고정 세션: 그리디 지점 우선 사전 단계도 고정 회원의 최대 횟수를 넘기지 않는다", () => {
+  const { reqs, pins } = pinQuotaFixture();
+  // 월요일 지점 우선 배정은 고정 앞 체인보다 먼저가 아니라 고정이 없는 요일에만 돈다 — 고정 없는
+  // 금요일에 P(이미 수요일 고정, 최대 1회)만 신청해 둔다.
+  const withFri = reqs.concat([{ id: "pFri", memberId: "P", day: 4, startSlot: 0, duration: 30 }]);
+  const assigned = lib.greedyAssign(withFri, { pinnedLocationDay: { day: 4, locationId: "L1" } }, pins);
+  assertPinInvariants(assigned, pins, "지점 우선 사전 단계");
+  assertEqual(sessionsPerMember(assigned).P, 1);
+});
+test("고정 세션: 그리디는 고정 앞 체인을 붙인 하루 전체로 이동 상한을 검사한다", () => {
+  // 같은 날 고정 3개(1→2→1)가 이미 이동 2회를 쓴다. X(2점)가 첫 고정 앞에 이동으로 붙으면 3회.
+  lib.state.locations = [{ id: "L1", name: "1" }, { id: "L2", name: "2" }];
+  lib.state.travelTimes = { [lib.pairKey("L1", "L2")]: 10 };
+  lib.state.onceLimitedMemberIds3 = [];
+  lib.state.members = ["P1", "P2", "P3", "X"].map((id) => ({ id, locationIds: id === "X" || id === "P2" ? ["L2"] : ["L1"], category: "상담" }));
+  const reqs = [
+    { id: "p1", memberId: "P1", day: 0, startSlot: 10, duration: 30 },
+    { id: "p2", memberId: "P2", day: 0, startSlot: 14, duration: 30 },
+    { id: "p3", memberId: "P3", day: 0, startSlot: 18, duration: 30 },
+    { id: "x", memberId: "X", day: 0, startSlot: 6, duration: 30 },
+  ];
+  const loc = { p1: "L1", p2: "L2", p3: "L1" };
+  const pins = reqs.slice(0, 3).map((r) => ({ ...r, locationId: loc[r.id] }));
+  const assigned = lib.greedyAssign(reqs, {}, pins);
+  assertPinInvariants(assigned, pins, "이동 상한");
+  assertEqual(lib.scheduleViolations({ assigned, unassignedMembers: [lib.memberById("X")] }).map((v) => v.rule).filter((r) => r === "dailyTravel"), []);
+  assert(!assigned.some((r) => r.memberId === "X"), "X를 넣으면 하루 이동이 3회가 된다");
+});
+test("고정 세션: 고정이 없으면 그리디 결과는 고정 인자 생략과 같다", () => {
+  const { reqs } = pinQuotaFixture();
+  assertEqual(lib.greedyAssign(reqs, {}, []), lib.greedyAssign(reqs, {}));
+});
+test("고정 세션: 결과에서 확정 id의 배정만 고정으로 꺼내고, 배정에 없는 옛 확정 id는 무시한다", () => {
+  const result = {
+    assigned: [
+      { id: "a", memberId: "M1", day: 0, startSlot: 3, duration: 60, locationId: "L1" },
+      { id: "b", memberId: "M2", day: 1, startSlot: 5, duration: 30, locationId: "L2" },
+    ],
+    confirmedIds: ["b", "gone"],
+  };
+  assertEqual(lib.pinsFromResult(result), [result.assigned[1]]);
+  assertEqual(lib.pinsFromResult({ assigned: result.assigned }), []);
+});
+test("고정 세션: 지점이 바뀌면 같은 시각이어도 고정이 유지되지 않은 것으로 본다", () => {
+  const pin = { id: "a", memberId: "M1", day: 0, startSlot: 3, duration: 60, locationId: "L1" };
+  assertEqual(lib.missingPins([pin], [pin]), []);
+  assertEqual(lib.missingPins([{ ...pin, locationId: "L2" }], [pin]), [pin]);
+  assertEqual(lib.missingPins([{ ...pin, startSlot: 4 }], [pin]), [pin]);
+  assertEqual(lib.missingPins([], []), []);
+});
+
+// 후보A 파이프라인(runSchedule2Pipeline) 한 번 실행: 요일 순서 하나, 다듬기 포함.
+async function runPipelineWithPins(reqs, pins, { seedOffset = 0, budgetMs = 150, order } = {}) {
+  lib.state.requests = reqs;
+  const days = [...new Set(reqs.map((r) => r.day))].sort((a, b) => a - b);
+  const reqsByDay = new Map(days.map((d) => [d, reqs.filter((r) => r.day === d)]));
+  const realRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  try {
+    return await lib.runSchedule2Pipeline(reqs, reqsByDay, days, order || days, true, true, budgetMs, seedOffset, pins);
+  } finally {
+    globalThis.requestAnimationFrame = realRaf;
+  }
+}
+testAsync("고정 세션: 후보A는 모든 단계에서 고정 세션을 회원 최대 횟수에 이미 사용된 수업으로 센다", async () => {
+  const { reqs, pins } = pinQuotaFixture();
+  const days = [0, 1, 2, 3];
+  // 요일 순서·시드를 바꿔도(고정 요일보다 다른 요일을 먼저 짜도) 같은 불변조건을 지켜야 한다.
+  for (const order of [days, days.slice().reverse()])
+    for (const seedOffset of [0, 1, 2]) {
+      const result = await runPipelineWithPins(reqs, pins, { order, seedOffset });
+      const label = "후보A order=" + order + " seed=" + seedOffset;
+      assertPinInvariants(result.assigned, pins, label);
+      assertEqual(sessionsPerMember(result.assigned).P, 1, label + ": 1회 회원 추가 배정 금지");
+      assertEqual(sessionsPerMember(result.assigned).R, 2, label + ": 2회 회원은 1회만 추가");
+    }
+});
+testAsync("고정 세션: 후보A 다듬기는 옮기면 이동이 줄어드는 고정 세션도 같은 자리에 둔다", async () => {
+  lib.state.locations = [{ id: "L1", name: "1" }, { id: "L2", name: "2" }];
+  lib.state.travelTimes = { [lib.pairKey("L1", "L2")]: 20 };
+  lib.state.onceLimitedMemberIds3 = [];
+  lib.state.excludedMemberIds3 = [];
+  lib.state.members = [
+    { id: "A", locationIds: ["L1"], category: "상담" },
+    { id: "B", locationIds: ["L1", "L2"], category: "상담" },
+    { id: "C", locationIds: ["L1"], category: "상담" },
+  ];
+  const reqs = [
+    { id: "a0", memberId: "A", day: 0, startSlot: 0, duration: 30 },
+    { id: "b3", memberId: "B", day: 0, startSlot: 3, duration: 30 },
+    { id: "b5", memberId: "B", day: 0, startSlot: 5, duration: 30 },
+    { id: "c6", memberId: "C", day: 0, startSlot: 6, duration: 30 },
+    { id: "c10", memberId: "C", day: 0, startSlot: 10, duration: 30 },
+  ];
+  // 고정 없이는 A0·B3·C6이 모두 L1에서 이동 없이 이어진다.
+  const free = await runPipelineWithPins(reqs, []);
+  assert(free.assigned.every((r) => r.locationId === "L1"), "고정 없이는 이동 없는 배치가 최선이어야 함(픽스처 확인)");
+  // B를 L2·슬롯 5에 고정하면 이동 2번이 생기지만, 고정은 그대로 남아야 한다.
+  const pin = { id: "b5", memberId: "B", day: 0, startSlot: 5, duration: 30, locationId: "L2" };
+  for (const seedOffset of [0, 1, 2]) {
+    for (const idleFirst of [false, true]) {
+      lib.setIdleFirst(idleFirst);
+      try {
+        const result = await runPipelineWithPins(reqs, [pin], { seedOffset });
+        assertPinInvariants(result.assigned, [pin], "seed=" + seedOffset + " idleFirst=" + idleFirst);
+        assertEqual(lib.scheduleViolations(result).filter((v) => v.rule !== "availability"), []);
+      } finally {
+        lib.setIdleFirst(false);
+      }
+    }
+  }
+});
+test("고정 세션: 수업 균형 빼기는 고정 세션을 빼지 않는다", () => {
+  lib.state.locations = ineffLocations();
+  lib.state.travelTimes = { [lib.pairKey("M", "Y")]: 20 };
+  const s = (memberId, startSlot, locationId) => ({ memberId, day: 0, startSlot, locationId, duration: 50 });
+  const lastA = s("A", 15, "Y");
+  const result = scheduleResult([s("A", 0, "M"), s("B", 5, "M"), lastA], 0);
+  assertEqual(lib.dropSessionsForBalance(result).assigned.length, 2, "고정이 없으면 빼는 경우(픽스처 확인)");
+  assertEqual(lib.dropSessionsForBalance(result, [lastA]).assigned.length, 3);
+});
+
+// 재최적화 제안: qualityFixture의 정상 결과(화요일 빈 시간 30분)를 지금 수정 카드로, 화요일 S를 고정으로 둔다.
+function reoptFixture() {
+  qualityFixture();
+  const current = validQualityResult();
+  const pins = [at("S", 1, 0, "L1")];
+  const r = (assigned) => ({ assigned, unassignedMembers: [] });
+  const mon = [at("A", 0, 0, "L1"), at("B", 0, 6, "L1")];
+  return {
+    current,
+    pins,
+    // 화요일 C를 9로 당겨 빈 시간 0
+    better: r(mon.concat([at("S", 1, 0, "L1"), at("C", 1, 9, "L3")])),
+    // 같은 품질의 다른 배치: A가 화요일로(요일이 바뀐 배정 1건)
+    betterVariant: r([at("B", 0, 6, "L1"), at("S", 1, 0, "L1"), at("A", 1, 6, "L1"), at("C", 1, 15, "L3")]),
+    // S(고정)를 3으로 옮겨 빈 시간 0 — 비교 기준으로는 better와 같지만 고정을 옮겼다
+    movesPin: r(mon.concat([at("S", 1, 3, "L1"), at("C", 1, 12, "L3")])),
+    // 수업 1건 추가(A 화요일 6) — 그러나 C까지 이동시간이 없다(하드 제약 위반)
+    violatesHard: r(mon.concat([at("S", 1, 0, "L1"), at("A", 1, 6, "L1"), at("C", 1, 12, "L3")])),
+  };
+}
+test("재최적화 제안: 고정을 지키고 추천 비교 기준으로 더 나은 결과를 제안하고, 같은 품질의 다른 배치를 함께 준다", () => {
+  const f = reoptFixture();
+  const out = lib.selectReoptimization(f.current, [f.betterVariant, f.better], f.pins);
+  assertEqual(out.status, "improved");
+  assert(lib.isSchedule2ResultBetter(out.proposal.result, f.current));
+  assertEqual(out.variants.length, 2);
+  assertEqual(out.variants[0], out.proposal);
+  // 결과 순서와 무관하게 같은 제안
+  const again = lib.selectReoptimization(f.current, [f.better, f.betterVariant], f.pins);
+  assertEqual(lib.layoutSignature(again.proposal.result), lib.layoutSignature(out.proposal.result));
+});
+test("재최적화 제안: 고정 세션을 옮기거나 하드 제약을 어긴 결과는 비교 기준으로 더 나아도 제안하지 않는다", () => {
+  const f = reoptFixture();
+  assert(lib.isSchedule2ResultBetter(f.movesPin, f.current) && lib.isSchedule2ResultBetter(f.violatesHard, f.current), "픽스처 확인");
+  const out = lib.selectReoptimization(f.current, [f.movesPin, f.violatesHard], f.pins);
+  assertEqual([out.status, out.reason, out.proposal], ["no-better", "none", null]);
+  assertEqual([out.stats.missingPins, out.stats.hardViolations], [1, 1]);
+  const mixed = lib.selectReoptimization(f.current, [f.violatesHard, f.movesPin, f.better], f.pins);
+  assertEqual(lib.layoutSignature(mixed.proposal.result), lib.layoutSignature(f.better));
+});
+test("재최적화 제안: 지금 카드보다 낫지 않으면 지금 카드를 유지하고 이유(같은 배치·동점·더 나쁨)를 구분한다", () => {
+  const f = reoptFixture();
+  const same = lib.selectReoptimization(f.current, [JSON.parse(JSON.stringify(f.current))], f.pins);
+  assertEqual([same.status, same.reason], ["no-better", "same-layout"]);
+  const swapped = { assigned: [at("B", 0, 0, "L1"), at("A", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 12, "L3")], unassignedMembers: [] };
+  assertEqual(lib.selectReoptimization(f.current, [swapped], f.pins).reason, "equal-quality");
+  const fewer = { assigned: f.current.assigned.filter((x) => x.memberId !== "B"), unassignedMembers: [lib.memberById("B")] };
+  assertEqual(lib.selectReoptimization(f.current, [fewer], f.pins).reason, "worse");
+});
+test("재최적화 제안: 나빠지지 않음은 개별 지표가 아니라 추천 비교 기준이다(수업 1건이 늘면 빈 시간이 늘어도 제안)", () => {
+  const f = reoptFixture();
+  const moreIdle = { assigned: f.current.assigned.concat([at("S", 0, 14, "L1")]), unassignedMembers: [] };
+  const out = lib.selectReoptimization(f.current, [moreIdle], f.pins);
+  assertEqual(out.status, "improved");
+  assert(out.proposal.metrics.idleMinutes > lib.scheduleMetrics(f.current).idleMinutes, "빈 시간은 늘었어야 함(픽스처 확인)");
+});
+
 function fakeWorkerFactory(reply) {
   const created = [];
   return {
@@ -1590,7 +1836,7 @@ function createThreadWorker(fakeClock) {
 // 같은 시도를 다듬은 결과와 같은지 확인한다 — 파이프라인이 새로 읽게 된 상태를 워커에 넘기는
 // 걸 빠뜨리면 결과가 조용히 달라지므로 그 회귀를 잡는다. 시간 예산을 결정적으로 만들기 위해
 // 양쪽 다 performance.now()를 호출마다 1ms씩 흐르는 가짜 시계로 바꾼다.
-testAsync("워커에서 다듬은 결과는 메인 스레드에서 다듬은 결과와 같다", async () => {
+function polishWorkerFixture() {
   lib.state.locations = [
     { id: "L1", name: "마포점" },
     { id: "L2", name: "여의도점" },
@@ -1619,10 +1865,44 @@ testAsync("워커에서 다듬은 결과는 메인 스레드에서 다듬은 결
     { order: daysWithReqs.slice().reverse(), seedOffset: 2 },
     { order: daysWithReqs, seedOffset: 97711 },
   ];
-  const sig = (r) => JSON.stringify([
-    r.assigned.map((a) => [a.id, a.memberId, a.day, a.startSlot, a.locationId]),
-    r.unassignedMembers.map((m) => m.id),
-  ]);
+  return { eligibleReqs, reqsByDay, daysWithReqs, attempts };
+}
+const polishSig = (r) => JSON.stringify([
+  r.assigned.map((a) => [a.id, a.memberId, a.day, a.startSlot, a.locationId]),
+  r.unassignedMembers.map((m) => m.id),
+]);
+// 같은 시도를 워커(가짜 시계)와 메인 스레드(가짜 시계)에서 다듬어 [워커 결과, 메인 결과] 쌍을 돌려준다.
+async function polishBothWays({ eligibleReqs, reqsByDay, daysWithReqs, attempts }, pins) {
+  const realNow = performance.now;
+  const realRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  try {
+    return await lib.withSelectionOverride(["M0"], ["M2"], async () => {
+      const fromWorkers = await lib.runPolishAttemptsInWorkers(
+        { eligibleReqs, reqsByDay, daysWithReqs, pins },
+        attempts,
+        400,
+        null,
+        { createWorker: () => createThreadWorker(true), workerCount: 2 },
+      );
+      const pairs = [];
+      for (let i = 0; i < attempts.length; i++) {
+        let fakeNow = 0;
+        performance.now = () => (fakeNow += 1);
+        const local = await lib.runSchedule2Pipeline(eligibleReqs, reqsByDay, daysWithReqs, attempts[i].order, true, true, 400, attempts[i].seedOffset, pins);
+        performance.now = realNow;
+        pairs.push([fromWorkers[i], local]);
+      }
+      return pairs;
+    });
+  } finally {
+    performance.now = realNow;
+    globalThis.requestAnimationFrame = realRaf;
+  }
+}
+testAsync("워커에서 다듬은 결과는 메인 스레드에서 다듬은 결과와 같다", async () => {
+  const { eligibleReqs, reqsByDay, daysWithReqs, attempts } = polishWorkerFixture();
+  const sig = polishSig;
   const realNow = performance.now;
   const realRaf = globalThis.requestAnimationFrame;
   globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
@@ -1663,6 +1943,25 @@ testAsync("워커에서 다듬은 결과는 메인 스레드에서 다듬은 결
   assert(
     localSigsByMode[0].some((s, i) => s !== localSigsByMode[1][i]),
     "테스트 데이터에서 빈 시간 최소화 모드가 결과를 바꾸지 않음 — 데이터를 조정해야 함",
+  );
+});
+
+// 고정 세션이 다듬기 워커에 전달되지 않으면 워커만 고정 없이 다듬어 결과가 조용히 달라진다.
+testAsync("고정 세션: 워커에서 다듬은 결과는 같은 고정 세션을 받아 메인 스레드와 같다", async () => {
+  const fixture = polishWorkerFixture();
+  const free = await polishBothWays(fixture, []);
+  // 시도 2의 배정 일부(유효한 결과의 부분집합이라 서로 충돌하지 않음)를 고정해 시도 0·1을 흔든다.
+  const pins = free[2][1].assigned.filter((_, i) => i % 3 === 0).map((a) => ({ ...a }));
+  assert(pins.length >= 2, "고정할 세션이 있어야 함");
+  const pinned = await polishBothWays(fixture, pins);
+  pinned.forEach(([worker, local], i) => {
+    assert(worker, "워커 결과가 비어 있음(시도 " + i + ")");
+    assertEqual(polishSig(worker), polishSig(local), "고정 시도 " + i);
+    assertEqual(lib.missingPins(local.assigned, pins), [], "고정 시도 " + i + " 고정 유지");
+  });
+  assert(
+    pinned.some(([, local], i) => polishSig(local) !== polishSig(free[i][1])),
+    "테스트 데이터에서 고정이 결과를 바꾸지 않음 — 데이터를 조정해야 함",
   );
 });
 
@@ -1737,6 +2036,18 @@ testAsync("그리디 탐색은 워커 수와 무관하게 순차 실행과 결�
     const withoutOnceLimit = snapshot(await lib.generateCandidatesAsync(() => {}, { workerCount: 0, attempts: 120 }));
     lib.state.onceLimitedMemberIds3 = ["G1"];
     assert(withoutOnceLimit !== sequential, "테스트 데이터에서 1회 제한이 결과를 바꾸지 않음 — 데이터를 조정해야 함");
+    // 고정 세션도 워커에 그대로 전달돼야 한다(빠뜨리면 워커 쪽 시도만 고정 없이 계산된다).
+    // G1(1회 제한)을 월요일 여의도점에 고정하면 G1의 수요일 배정과 월요일 G0 자리가 함께 바뀐다.
+    const pins = [{ id: "q1_0_3", memberId: "G1", day: 0, startSlot: 3, duration: 60, locationId: "L2" }];
+    const pinnedSeq = snapshot(await lib.generateCandidatesAsync(() => {}, { workerCount: 0, attempts: 120 }, pins));
+    assert(pinnedSeq !== sequential, "테스트 데이터에서 고정이 결과를 바꾸지 않음 — 데이터를 조정해야 함");
+    const pinnedPar = await lib.generateCandidatesAsync(() => {}, {
+      workerCount: 2,
+      attempts: 120,
+      createWorker: () => withScrambledReplies(createThreadWorker(false)),
+    }, pins);
+    assertEqual(snapshot(pinnedPar), pinnedSeq, "고정 세션 + 워커 2개");
+    pinnedPar.pools.flat().forEach((c) => assertEqual(lib.missingPins(c.assigned, pins), [], "고정 유지"));
     let anyUnassigned = false;
     for (const workerCount of [1, 2, 3]) {
       const parallel = await lib.generateCandidatesAsync(() => {}, {

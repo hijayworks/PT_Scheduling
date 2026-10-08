@@ -25,6 +25,7 @@ import {
   isIdleFirst,
 } from "./chainDpCore.js";
 import { mulberry32, shuffled } from "./rng.js";
+import { pinKey } from "./pins.js";
 
 // 같은 회원·요일의 더 이른 신청 중 현재 배정 지점에서도 실제로 가능한 가장 이른 신청을 찾는다.
 // 빈 시간 압축 단계에서 시간만 당기고 지점 제약을 놓치는 일을 막기 위해 별도 함수로 둔다.
@@ -68,6 +69,10 @@ export function moveNodeToRequest(node, request) {
 // 사람이 손으로 짠 배치처럼 3명 이상이 요일을 넘나들며 동시에 자리를 맞바꿔야만 나오는
 // 조합은, 그 경로를 우연히 밟은 시드로만 찾을 수 있다 — 그래서 여러 시드로 재시작해보는
 // 것이 요일 순서를 여러 개 시도하는 것만큼이나 중요하다).
+// pins: 재최적화에서 그대로 둘 고정 세션(engine/pins.js). 고정 세션은 처음부터 회원 주간 횟수에
+// 들어가 있고(commit/uncommit 대상이 아님), 어떤 단계도 고정 세션을 옮길 대상으로 고르지 않으며,
+// 하루 체인을 바꾸는 모든 경로는 그 요일 고정 세션이 같은 자리에 남는지(keepsPins) 확인한 뒤에만
+// 채택한다. 고정이 없으면([]) 이 모든 검사는 그대로 통과해 기존 결과와 같다.
 export async function runSchedule2Pipeline(
   eligibleReqs,
   reqsByDay,
@@ -77,8 +82,32 @@ export async function runSchedule2Pipeline(
   runPolish,
   polishBudgetMs,
   seedOffset,
+  pins = [],
 ) {
   seedOffset = seedOffset || 0;
+  const pinByKey = new Map(pins.map((p) => [pinKey(p), p]));
+  const pinNodesByDay = new Map();
+  pins.forEach((p) => {
+    if (!pinNodesByDay.has(p.day)) pinNodesByDay.set(p.day, []);
+    pinNodesByDay
+      .get(p.day)
+      .push({ ...p, end: p.startSlot + durationToSlots(p.duration) });
+  });
+  pinNodesByDay.forEach((list) => list.sort((a, b) => a.startSlot - b.startSlot));
+  function isPinned(node) {
+    return pinByKey.size > 0 && pinByKey.has(pinKey(node));
+  }
+  // 그 요일의 고정 세션이 모두 같은 자리로 chain에 들어 있는지 — 하루 체인 변경의 공통 검사.
+  function keepsPins(day, chain) {
+    const dayPins = pinNodesByDay.get(day);
+    if (!dayPins) return true;
+    const keys = new Set(chain.map(pinKey));
+    return dayPins.every((p) => keys.has(pinKey(p)));
+  }
+  // 하루 DP가 고정 세션 노드를 고르도록 돕는 탐색 보조 가중치(알고리즘 튜닝값) — 내부 2단계
+  // PIN_WEIGHT·4단계 REBUILD_TARGET_WEIGHT(1e6)보다 커야 그 자리들과 다툴 때 고정이 남는다. 보장은
+  // 가중치가 아니라 keepsPins 검사와 최종 gate(missingPins)가 한다.
+  const FIXED_PIN_WEIGHT = 1e9;
   // 비효율 이동(A→B→A 왕복 중 마포점↔여의도점이 아닌 것) 판정에 쓸 지점 정보 — 파이프라인
   // 실행 동안 바뀌지 않으므로 한 번만 구해 모든 runChainDP 호출에 그대로 넘긴다.
   const ineffInfo = inefficientRoundTripLocationInfo();
@@ -88,8 +117,8 @@ export async function runSchedule2Pipeline(
   // 생길 수 있으므로, 삽입한 체인뿐 아니라 남은 체인도 여기를 거친다(퍼즈로 확인됨). 체인DP
   // (runChainDP)가 만든 체인은 DP 안에서 같은 규칙을 지킨다.
   const soloIds = soloTravelMemberIds();
-  function dayChainAllowed(chain) {
-    return !dayChainViolation(chain, soloIds);
+  function dayChainAllowed(chain, day) {
+    return !dayChainViolation(chain, soloIds) && keepsPins(day, chain);
   }
   // 아래 다듬기 루프들(특히 담금질 기법)은 동기로 몇 초~몇십 초씩 돌면 탭이 완전히
   // 멈춰버리므로, 주기적으로 yieldToUI에 제어권을 넘겨준다. 다만 그 시간도 실제 시계
@@ -164,7 +193,14 @@ export async function runSchedule2Pipeline(
     return locs;
   }
   function dayNodes(dayRequests, weightFn, jitterFn) {
-    return buildDayNodes(dayRequests, weightFn, jitterFn, locationsForReq);
+    const withPins =
+      pinByKey.size === 0
+        ? weightFn
+        : (memberId, startSlot, locationId, day) =>
+            pinByKey.has(pinKey({ memberId, day, startSlot, locationId }))
+              ? FIXED_PIN_WEIGHT
+              : weightFn(memberId, startSlot, locationId, day);
+    return buildDayNodes(dayRequests, withPins, jitterFn, locationsForReq);
   }
 
   function isEligibleForDay(memberId, day) {
@@ -173,7 +209,7 @@ export async function runSchedule2Pipeline(
     const days = assignedDaysByMember.get(memberId);
     return !(days && days.has(day));
   }
-  function commit(day, node) {
+  function countSession(day, node) {
     assignedCountByMember.set(
       node.memberId,
       (assignedCountByMember.get(node.memberId) || 0) + 1,
@@ -182,7 +218,14 @@ export async function runSchedule2Pipeline(
       assignedDaysByMember.set(node.memberId, new Set());
     assignedDaysByMember.get(node.memberId).add(day);
   }
+  // 고정 세션은 아래에서 한 번만 세고 다시 빼지 않는다 — 요일을 비우고 다시 짜는 단계(6·6.5단계
+  // 등)에서도 뒤 요일에 고정된 회원이 앞 요일에 최대 횟수를 넘겨 들어가지 않게 하기 위함이다.
+  function commit(day, node) {
+    if (!isPinned(node)) countSession(day, node);
+  }
+  pinNodesByDay.forEach((list, day) => list.forEach((p) => countSession(day, p)));
   function uncommit(day, node) {
+    if (isPinned(node)) return;
     assignedCountByMember.set(
       node.memberId,
       assignedCountByMember.get(node.memberId) - 1,
@@ -229,8 +272,9 @@ export async function runSchedule2Pipeline(
       () => stage1RandomFn(),
     );
     // coveragePriority=true: "아직 한 번도 못 받은 회원만" 채우는 진짜 커버리지 단계이므로
-    // 인원(dp)을 비효율 이동보다 먼저 본다.
-    const chain = runChainDP(nodes, undefined, ineffInfo, true);
+    // 인원(dp)을 비효율 이동보다 먼저 본다. 고정 세션을 담지 못한 체인이면 고정 세션만 둔다.
+    let chain = runChainDP(nodes, undefined, ineffInfo, true);
+    if (!keepsPins(day, chain)) chain = (pinNodesByDay.get(day) || []).slice();
     chain.forEach((node) => commit(day, node));
     dayChains.set(day, chain);
   });
@@ -261,7 +305,8 @@ export async function runSchedule2Pipeline(
     );
     // coveragePriority=false지만, PIN_WEIGHT(1e6)로 고정된 자리는 dp 차이가 워낙 커서
     // runChainDP 내부의 하드 가중치 안전장치(COVERAGE_WEIGHT_GAP_THRESHOLD)가 그대로 지켜준다.
-    const chain = runChainDP(nodes, undefined, ineffInfo);
+    let chain = runChainDP(nodes, undefined, ineffInfo);
+    if (!keepsPins(day, chain)) chain = existingChain;
     chain.forEach((node) => commit(day, node));
     dayChains.set(day, chain);
   });
@@ -347,7 +392,7 @@ export async function runSchedule2Pipeline(
         };
         const newChain = chain0.slice();
         newChain.splice(insertAt, 0, newNode);
-        if (!dayChainAllowed(newChain)) continue;
+        if (!dayChainAllowed(newChain, day)) continue;
         commit(day, newNode);
         dayChains.set(day, newChain);
         return true;
@@ -396,6 +441,7 @@ export async function runSchedule2Pipeline(
           continue; // 2명 이상과 직접 겹치면 다루지 않는다
         }
         const otherNode = chain.find((n) => n.memberId === otherMemberId);
+        if (isPinned(otherNode)) continue; // 고정 세션은 내보내지 않는다
 
         const remainingChain = chain.filter(
           (n) => n.memberId !== otherMemberId,
@@ -433,7 +479,7 @@ export async function runSchedule2Pipeline(
         };
         const newChain = remainingChain.slice();
         newChain.splice(insertAt, 0, newNode);
-        if (!dayChainAllowed(newChain)) continue;
+        if (!dayChainAllowed(newChain, day)) continue;
 
         uncommit(day, otherNode);
         commit(day, newNode);
@@ -493,7 +539,10 @@ export async function runSchedule2Pipeline(
       // REBUILD_TARGET_WEIGHT(1e6)로 이 회원은 하드 가중치 안전장치가 지켜준다(coveragePriority
       // 불필요). 하루 이동 최대 MAX_TRAVELS_PER_DAY회 제한은 여기서도 그대로 지킨다
       const newChain = runChainDP(nodes, undefined, ineffInfo);
-      if (!newChain.some((n) => n.memberId === memberId)) {
+      if (
+        !newChain.some((n) => n.memberId === memberId) ||
+        !keepsPins(day, newChain)
+      ) {
         existingChain.forEach((node) => commit(day, node)); // 이 회원을 못 넣으면 의미가 없으니 되돌린다
         dayChains.set(day, existingChain);
         return false;
@@ -598,6 +647,7 @@ export async function runSchedule2Pipeline(
       // 비효율 이동이 줄면(우선순위 2) 이 요일의 수업 수가 줄어도(우선순위 3) 받아들인다 —
       // 비효율 이동이 그대로일 때만 기존처럼 수업 수 기준으로 판단한다.
       const worse =
+        !keepsPins(day, newChain) ||
         stillUnassignedIds().length > beforeUnassignedCount ||
         afterIneff > beforeIneff ||
         (afterIneff === beforeIneff &&
@@ -718,6 +768,8 @@ export async function runSchedule2Pipeline(
 
         let bestOption = null;
         attempts.forEach((opt) => {
+          if (!keepsPins(dayA, opt.chainA) || !keepsPins(dayB, opt.chainB))
+            return;
           if (opt.unassigned > beforeUnassignedCount) return;
           if (opt.pairIneff > beforePairIneff) return; // 비효율 이동이 늘면 거부(우선순위 2)
           if (opt.pairIneff === beforePairIneff) {
@@ -841,6 +893,7 @@ export async function runSchedule2Pipeline(
       // 비효율 이동이 줄면(우선순위 2) 수업 수·이동 시간이 나빠져도 받아들인다 — 비효율
       // 이동이 그대로일 때만 기존처럼 수업 수·이동 시간으로 판단한다.
       const accept =
+        daysWithReqs.every((d) => keepsPins(d, dayChains.get(d) || [])) &&
         attemptUnassigned <= bestSnapshot.unassigned &&
         (attemptIneff < bestSnapshot.ineff ||
           (attemptIneff === bestSnapshot.ineff &&
@@ -934,6 +987,7 @@ export async function runSchedule2Pipeline(
     }
 
     function tryRelocateSession(node) {
+      if (isPinned(node)) return false;
       const memberId = node.memberId;
       const currentDay = node.day;
       const currentChainWithout = (dayChains.get(currentDay) || []).filter(
@@ -957,7 +1011,7 @@ export async function runSchedule2Pipeline(
       );
       let bestMove = null; // { sameDay, targetDay, newTargetChain, deltaTravel, deltaIdle, deltaIneff }
       // 다른 요일로 옮기면 원래 요일에는 이 회원을 뺀 체인이 남는다 — 그 체인도 공통 검증을 거친다.
-      const leavingAllowed = dayChainAllowed(currentChainWithout);
+      const leavingAllowed = dayChainAllowed(currentChainWithout, currentDay);
 
       daysWithReqs.forEach((day) => {
         if (day !== currentDay) {
@@ -1024,7 +1078,7 @@ export async function runSchedule2Pipeline(
           };
           const newChain = baseChain.slice();
           newChain.splice(insertAt, 0, newNode);
-          if (!dayChainAllowed(newChain)) return;
+          if (!dayChainAllowed(newChain, day)) return;
 
           let deltaTravel, deltaIdle, deltaIneff;
           if (day === currentDay) {
@@ -1123,7 +1177,7 @@ export async function runSchedule2Pipeline(
       }
       const newChain = chainWithout.slice();
       newChain.splice(insertAt, 0, cand);
-      if (!dayChainAllowed(newChain)) return null;
+      if (!dayChainAllowed(newChain, cand.day)) return null;
       return newChain;
     }
 
@@ -1137,6 +1191,7 @@ export async function runSchedule2Pipeline(
     function tryCrossDaySwap(node1, node2) {
       if (node1.day === node2.day || node1.memberId === node2.memberId)
         return false;
+      if (isPinned(node1) || isPinned(node2)) return false;
       const day1 = node1.day,
         day2 = node2.day,
         member1 = node1.memberId,
@@ -1341,6 +1396,7 @@ export async function runSchedule2Pipeline(
           } else continue;
           if (otherMemberId === protectedMemberId) continue; // 사슬을 시작한 회원을 다시 내보내면 제자리로 돌아갈 뿐이다
           const otherNode = chain.find((n) => n.memberId === otherMemberId);
+          if (isPinned(otherNode)) continue; // 고정 세션은 내보내지 않는다
           const remaining = chain.filter((n) => n.memberId !== otherMemberId);
           const newNode = {
             id: cand.id,
@@ -1381,6 +1437,7 @@ export async function runSchedule2Pipeline(
     }
 
     function tryEjectChainMove(node, acceptFn) {
+      if (isPinned(node)) return false;
       const snap = snapshotChainState();
       const memberId = node.memberId;
       const currentDay = node.day;
@@ -1403,7 +1460,9 @@ export async function runSchedule2Pipeline(
       // 사슬 도중에 회원을 빼기만 하고 다시 채우지 않은 요일도 있으므로 건드린 요일 전부를 검증한다.
       const allowed =
         placed &&
-        [...touchedDays].every((d) => dayChainAllowed(dayChains.get(d) || []));
+        [...touchedDays].every((d) =>
+          dayChainAllowed(dayChains.get(d) || [], d),
+        );
       if (!allowed) {
         restoreChainState(snap);
         return false;
@@ -1475,6 +1534,10 @@ export async function runSchedule2Pipeline(
         return false;
       } // 안전망(정상적으로는 항상 2개)
       const removed = aNodes[Math.floor(randomFn() * aNodes.length)];
+      if (isPinned(removed.node)) {
+        restoreChainState(snap);
+        return false;
+      } // 고정 세션은 내려놓지 않는다
       uncommit(removed.day, removed.node);
       dayChains.set(
         removed.day,
@@ -1492,7 +1555,9 @@ export async function runSchedule2Pipeline(
       // 사슬 도중에 회원을 빼기만 하고 다시 채우지 않은 요일도 있으므로 건드린 요일 전부를 검증한다.
       const allowed =
         placed &&
-        [...touchedDays].every((d) => dayChainAllowed(dayChains.get(d) || []));
+        [...touchedDays].every((d) =>
+          dayChainAllowed(dayChains.get(d) || [], d),
+        );
       if (!allowed) {
         restoreChainState(snap);
         return false;
@@ -1568,8 +1633,11 @@ export async function runSchedule2Pipeline(
       // 같을 때의 동점 처리에만 쓰이게 한다.
       const SA_TRAVEL_WEIGHT = isIdleFirst() ? 0.01 : TRAVEL_VALUE_MINUTES;
 
+      // 고정 세션은 옮길 대상으로 고르지 않는다(고정이 없으면 기존과 같은 후보·같은 난수 소비).
       function pickRandomNode(randomFn) {
-        const all = Array.from(dayChains.values()).flat();
+        const all = Array.from(dayChains.values())
+          .flat()
+          .filter((n) => !isPinned(n));
         if (all.length === 0) return null;
         return all[Math.floor(randomFn() * all.length)];
       }
@@ -1596,7 +1664,10 @@ export async function runSchedule2Pipeline(
         });
         if (options.length === 0) return null;
         const picked = options[Math.floor(randomFn() * options.length)];
-        if (picked.day !== currentDay && !dayChainAllowed(currentChainWithout))
+        if (
+          picked.day !== currentDay &&
+          !dayChainAllowed(currentChainWithout, currentDay)
+        )
           return null; // 원래 요일에 남는 체인도 공통 검증을 거친다
         const locOptions = locationsForReq(picked.req);
         if (locOptions.length === 0) return null;
@@ -1946,6 +2017,7 @@ export async function runSchedule2Pipeline(
       for (let idx = 1; idx < chain.length; idx++) {
         const prev = chain[idx - 1];
         const node = chain[idx];
+        if (isPinned(node)) continue; // 고정 세션은 시각도 그대로 둔다
         const minStart =
           prev.startSlot +
           durationToSlots(prev.duration) +

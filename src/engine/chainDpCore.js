@@ -70,7 +70,7 @@ export function isEligibleRequest2(req) {
 }
 
 // 하루치 후보(신청 x 사용 가능 지점 조합)를 노드로 만든다. weightFn(memberId, startSlot,
-// locationId)이 0/false를 돌려주면 그 조합은 후보에서 아예 뺀다 — 양수를 돌려주면 그
+// locationId, day)이 0/false를 돌려주면 그 조합은 후보에서 아예 뺀다 — 양수를 돌려주면 그
 // 값이 그 노드를 골랐을 때 얻는 가중치(보통 1, 이미 확정된 자리를 그대로 유지시키고 싶을
 // 때는 아주 큰 값)가 된다.
 // jitterFn이 있으면(무작위 함수) 노드마다 작은 무작위 값을 하나씩 붙여둔다 — runChainDP가
@@ -91,7 +91,7 @@ export function buildDayNodes(
     const duration = sessionDurationFor2(member);
     const end = r.startSlot + durationToSlots(duration);
     locationsFor(r).forEach((locationId) => {
-      const weight = weightFn(r.memberId, r.startSlot, locationId);
+      const weight = weightFn(r.memberId, r.startSlot, locationId, r.day);
       if (!weight) return;
       nodes.push({
         id: r.id,

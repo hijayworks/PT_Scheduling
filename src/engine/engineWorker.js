@@ -49,6 +49,7 @@ const handlers = {
       true,
       msg.budgetMs,
       msg.seedOffset,
+      ctx.pins || [],
     );
     return {
       assigned: result.assigned,
@@ -63,7 +64,7 @@ const handlers = {
       ctx.eligibleIdSet,
       ctx.allMemberIdSet,
       input.jitter,
-      [],
+      ctx.pins || [],
       input.dayOrder,
     );
     // 키 순서를 그대로 두려고 같은 자리의 값만 id로 바꾼다(메인 스레드가 되돌린다).

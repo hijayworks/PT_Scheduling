@@ -72,12 +72,19 @@ function createCaseRunner({ aScale = 0.01, realClock = false } = {}) {
   }
 
   // 반환: { B|C|A1|A2|A3: { result, pool, ms } }. withA면 후보A 안의 그리디 기준선은
-  // aAttempts회(생략하면 attempts회)만 돈다.
-  async function generate(c, { attempts, withA, aAttempts = attempts }) {
+  // aAttempts회(생략하면 attempts회)만 돈다. pins: 재최적화의 고정 세션(engine/pins.js).
+  async function generate(
+    c,
+    { attempts, withA, aAttempts = attempts, pins = [] },
+  ) {
     const out = {};
     let t = Date.now();
     const bc = await lib.withSelectionOverride(...selection(c), () =>
-      lib.generateCandidatesAsync(() => {}, { workerCount: 0, attempts }),
+      lib.generateCandidatesAsync(
+        () => {},
+        { workerCount: 0, attempts },
+        pins,
+      ),
     );
     const bcMs = Date.now() - t;
     out.B = { result: bc.built[0], pool: bc.pools[0], ms: bcMs };
@@ -86,7 +93,10 @@ function createCaseRunner({ aScale = 0.01, realClock = false } = {}) {
       t = Date.now();
       const cards = await withClock(() =>
         lib.withSelectionOverride(...selection(c), () =>
-          lib.generateSchedule2Async(() => {}, { greedyAttempts: aAttempts }),
+          lib.generateSchedule2Async(() => {}, {
+            greedyAttempts: aAttempts,
+            pins,
+          }),
         ),
       );
       const aMs = Date.now() - t;

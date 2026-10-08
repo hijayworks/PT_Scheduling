@@ -3,6 +3,9 @@
 // 만들어 후보B·C(매 시드)와 후보A(일부 시드, 축소 예산 + 가짜 시계)를 실제 생성 진입점으로
 // 만들고, 표시 후보와 동점 배치 전부가 하드 제약(scheduleQuality.js의 HARD_RULES)을 지키는지
 // 검사한다. 특정 정답 배치가 아니라 "어떤 입력이든 규칙은 지킨다"만 본다.
+// 재최적화(5a): 시드마다 생성한 결과에서 세션 1~3개(절반은 같은 요일 2개 이상)를 고정으로 골라 같은
+// 입력을 고정 세션과 함께 다시 생성하고, 그 결과 전부가 하드 제약에 더해 고정 유지(pinKept)·고정
+// 회원 횟수(pinQuota)를 지키는지 본다.
 //
 // 모든 입력은 시드 하나로 결정되고 후보A도 가짜 시계라, 같은 시드는 항상 같은 결과를 낸다.
 //
@@ -244,7 +247,80 @@ if (flag("--dump")) {
 
 const runner = createCaseRunner({ aScale: 0.002 });
 const { lib } = runner;
-const RULES = Object.keys(lib.HARD_RULES);
+// 고정 세션과 함께 다시 생성한 결과에만 적용하는 규칙(engine/pins.js).
+const PIN_RULES = {
+  pinKept: "고정 세션은 같은 회원·요일·시작 시각·지점에 그대로 남는다",
+  pinQuota: "고정 세션도 회원 최대 횟수와 하루 1회에 포함한다",
+};
+const RULES = Object.keys(lib.HARD_RULES).concat(Object.keys(PIN_RULES));
+const ruleText = (r) => lib.HARD_RULES[r] || PIN_RULES[r];
+
+// 시드 입력에서 결정적으로 고정 세션을 고른다: 생성된 결과 하나에서 1~3개, 절반은 세션이 2개 이상인
+// 요일에서 2개를 함께 고른다(그리디가 같은 날 고정 사이를 채우지 않는 경로를 지나가게).
+function pinsFor(input, generated) {
+  let h = 0;
+  for (const ch of input.id) h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0;
+  const rand = mulberry32(h ^ 0x5bd1e995);
+  const sources = Object.keys(generated)
+    .sort()
+    .filter((k) => generated[k].result.assigned.length);
+  if (!sources.length) return [];
+  const assigned = generated[sources[Math.floor(rand() * sources.length)]].result.assigned
+    .slice()
+    .sort((a, b) => a.day - b.day || a.startSlot - b.startSlot);
+  const pick = (list) => list.splice(Math.floor(rand() * list.length), 1)[0];
+  const pins = [];
+  const busyDays = [...new Set(assigned.map((a) => a.day))].filter(
+    (d) => assigned.filter((a) => a.day === d).length >= 2,
+  );
+  const rest = assigned.slice();
+  if (busyDays.length && rand() < 0.5) {
+    const day = busyDays[Math.floor(rand() * busyDays.length)];
+    const sameDay = rest.filter((a) => a.day === day);
+    pins.push(pick(sameDay), pick(sameDay));
+  }
+  const k = 1 + Math.floor(rand() * 3);
+  while (pins.length < k) {
+    const left = rest.filter((a) => !pins.includes(a));
+    if (!left.length) break;
+    pins.push(pick(left));
+  }
+  return pins.map((a) => ({ ...a }));
+}
+
+// 고정 회원별 [최대 횟수 초과 또는 같은 날 2회인 결과 수, 횟수 압박 기회]. 기회: 고정 회원이 고정한
+// 요일 말고도 신청한 요일이 남은 횟수보다 많아 엔진이 고정을 잊으면 초과할 수 있는 경우.
+async function pinQuotaCheck(input, pins, results) {
+  let bad = 0,
+    opp = 0;
+  await lib.withSelectionOverride(
+    input.excludedMemberIds3,
+    input.onceLimitedMemberIds3,
+    async () => {
+      const members = [...new Set(pins.map((p) => p.memberId))];
+      const eligible = lib.state.requests.filter(lib.isEligibleRequest);
+      members.forEach((id) => {
+        const cap = lib.maxSessionsFor(lib.memberById(id));
+        const pinnedDays = new Set(pins.filter((p) => p.memberId === id).map((p) => p.day));
+        const otherDays = new Set(
+          eligible.filter((r) => r.memberId === id && !pinnedDays.has(r.day)).map((r) => r.day),
+        );
+        if (otherDays.size > cap - pinnedDays.size) opp++;
+      });
+      results.forEach((r) => {
+        const broke = members.some((id) => {
+          const mine = r.assigned.filter((a) => a.memberId === id);
+          return (
+            mine.length > lib.maxSessionsFor(lib.memberById(id)) ||
+            new Set(mine.map((a) => a.day)).size < mine.length
+          );
+        });
+        if (broke) bad++;
+      });
+    },
+  );
+  return { bad, opp };
+}
 
 // 프로퍼티가 헛돌지 않았는지(위반할 기회 자체가 있었는지) 규칙별로 센다 — 기회가 0이면 그
 // 규칙은 이번 실행에서 사실상 검증되지 않은 것이다.
@@ -327,22 +403,53 @@ function withoutMember(input, id) {
   };
 }
 
-// 한 시드 실행: 위반 목록과(엔진이 예외를 던지면 그것도 실패) 기회 집계를 돌려준다.
+// 한 시드 실행: 위반 목록과(엔진이 예외를 던지면 그것도 실패) 기회 집계를 돌려준다. 고정 없이 한 번,
+// 그 결과에서 고른 고정 세션과 함께 한 번 생성한다(pinned의 키는 "고정 B"처럼 붙인다).
 async function check(input, withA) {
   runner.loadCase(input);
   try {
-    const generated = await runner.generate(input, {
-      attempts,
-      withA,
-      aAttempts: FUZZ_A_GREEDY_ATTEMPTS,
-    });
-    return {
-      generated,
-      violations: await runner.violationsOf(input, generated),
-    };
+    const opts = { attempts, withA, aAttempts: FUZZ_A_GREEDY_ATTEMPTS };
+    const generated = await runner.generate(input, opts);
+    const violations = await runner.violationsOf(input, generated);
+    const pins = pinsFor(input, generated);
+    const pinOps = { pinKept: 0, pinQuota: 0 };
+    if (pins.length) {
+      const pinnedRaw = await runner.generate(input, { ...opts, pins });
+      const pinned = Object.fromEntries(
+        Object.entries(pinnedRaw).map(([k, v]) => ["고정 " + k, v]),
+      );
+      Object.assign(generated, pinned);
+      violations.push(...(await runner.violationsOf(input, pinned)));
+      const results = Object.values(pinned).flatMap((g) => [g.result].concat(g.pool || []));
+      Object.entries(pinned).forEach(([key, g]) =>
+        [g.result].concat(g.pool || []).forEach((r, tie) => {
+          const missing = lib.missingPins(r.assigned, pins);
+          if (missing.length)
+            violations.push({
+              key,
+              tie,
+              violation: {
+                rule: "pinKept",
+                message: `${PIN_RULES.pinKept} — ${missing.map(lib.pinKey).join(", ")}`,
+              },
+            });
+        }),
+      );
+      const quota = await pinQuotaCheck(input, pins, results);
+      for (let i = 0; i < quota.bad; i++)
+        violations.push({
+          key: "고정",
+          tie: 0,
+          violation: { rule: "pinQuota", message: PIN_RULES.pinQuota },
+        });
+      pinOps.pinKept = results.length;
+      pinOps.pinQuota = quota.opp;
+    }
+    return { generated, violations, pinOps };
   } catch (err) {
     return {
       generated: {},
+      pinOps: {},
       violations: [
         {
           key: "-",
@@ -399,13 +506,13 @@ async function shrink(input, rule, withA) {
       (aEvery > 0 && seed % aEvery === 0);
     if (withA) aRuns++;
     byScenario[input.scenario] = (byScenario[input.scenario] || 0) + 1;
-    const { generated, violations } = await check(input, withA);
+    const { generated, violations, pinOps } = await check(input, withA);
     Object.values(generated).forEach(
       (g) => (resultsChecked += 1 + (g.pool || []).length),
     );
-    Object.entries(await opportunities(input, generated)).forEach(
-      ([rule, n]) => (tally[rule].opportunities += n),
-    );
+    Object.entries(await opportunities(input, generated))
+      .concat(Object.entries(pinOps))
+      .forEach(([rule, n]) => (tally[rule].opportunities += n));
     violations.forEach((v) => {
       if (tally[v.violation.rule]) tally[v.violation.rule].violations++;
     });
@@ -428,7 +535,7 @@ async function shrink(input, rule, withA) {
   console.log("프로퍼티\t위반\t기회\t규칙");
   RULES.forEach((r) =>
     console.log(
-      `${r}\t${tally[r].violations}\t${tally[r].opportunities}\t${lib.HARD_RULES[r]}`,
+      `${r}\t${tally[r].violations}\t${tally[r].opportunities}\t${ruleText(r)}`,
     ),
   );
 

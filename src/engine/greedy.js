@@ -1035,32 +1035,30 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       return 1;
     }
 
-    // 확정(고정)된 세션이 있으면, 그 요일의 맨 앞부터 첫 확정 세션 앞까지의 빈 시간을 먼저
-    // 체인으로 채운 뒤 확정 세션들을 시간순으로 커밋한다. 이후 1~3단계는 extendExistingChain으로
+    // 확정(고정)된 세션이 있으면, 확정 세션들을 시간순으로 커밋한 뒤 그 요일의 맨 앞부터 첫
+    // 확정 세션 앞까지의 빈 시간을 체인으로 채운다. 이후 1~3단계는 extendExistingChain으로
     // 가장 늦은 세션 뒤쪽을, extendChainBackward로 가장 이른 세션 앞쪽을 각각 채운다 —
-    // 확정 세션이 여러 개인 날, 그 사이사이의 빈 시간까지 채우는 것은 지원하지 않는다(드문
-    // 경우라 범위 밖으로 둔다). 확정 세션과 겹치거나 간격이 부족한 다른 신청은, 체인이 정확히
-    // 맞물리는 항목만 잇는 구조상 애초에 선택되지 않는다.
+    // 확정 세션이 여러 개인 날, 그 사이사이의 빈 시간까지 채우는 것은 지원하지 않는다(재최적화
+    // 측정으로 품질 손실을 확인한 뒤 따로 다룬다). 확정 세션과 겹치거나 간격이 부족한 다른
+    // 신청은, 체인이 정확히 맞물리는 항목만 잇는 구조상 애초에 선택되지 않는다.
+    // 고정 세션은 회원 주간 횟수에 이미 사용된 수업이다 — 어느 요일의 앞 체인을 짜기 전에 모든
+    // 고정 세션을 먼저 커밋해, 뒤 요일에 고정된 회원이 앞 요일 체인에 들어가 최대 횟수를 넘지 않게
+    // 한다(withinCaps가 같은 날·최대 횟수를 함께 막는다). 앞 빈 시간은 extendChainBackward가 채운다 —
+    // 고정 세션끼리 이미 이동을 쓰고 있을 수 있어 앞 체인을 붙인 하루 전체로 이동 상한을 다시
+    // 검사해야 한다(퍼즈로 확인됨).
     if (pinned.length > 0) {
-      const pinsByDay = new Map();
-      pinned.forEach((p) => {
-        if (!pinsByDay.has(p.day)) pinsByDay.set(p.day, []);
-        pinsByDay.get(p.day).push(p);
-      });
-      pinsByDay.forEach((dayPins, day) => {
-        dayPins.sort((a, b) => a.startSlot - b.startSlot);
-        const pinnedMemberIds = new Set(dayPins.map((p) => p.memberId));
-        const beforeEligible = new Set(
-          [...allMemberIdsForDay(day)].filter((id) => !pinnedMemberIds.has(id)),
-        );
-        buildBestChain(
+      [...pinned]
+        .sort((a, b) => a.day - b.day || a.startSlot - b.startSlot)
+        .forEach((p) => commit(p.day, { ...p })); // 호출한 쪽(사용자 카드)의 객체를 결과와 공유하지 않는다
+      [...new Set(pinned.map((p) => p.day))].forEach((day) =>
+        extendChainBackward(
           day,
-          beforeEligible,
+          new Set(
+            [...allMemberIdsForDay(day)].filter((id) => withinCaps(id, day)),
+          ),
           fairnessWeight,
-          endBeforeOf(dayPins),
-        ).forEach((s) => commit(day, s));
-        dayPins.forEach((p) => commit(day, p));
-      });
+        ),
+      );
     }
 
     // 지정한 요일에는, 지정한 지점만으로 만들 수 있는 최대(가장 많이 배정되는) 체인을 1단계보다
@@ -1073,9 +1071,15 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       !pinned.some((p) => p.day === pinnedLocationDay.day) &&
       (byDay.get(pinnedLocationDay.day) || []).length > 0
     ) {
+      // 다른 요일에 고정된 회원은 이미 횟수를 쓰고 있으므로 상한(withinCaps) 안에서만 넣는다
+      // (고정이 없으면 아직 아무도 배정되지 않아 전원이 그대로 통과한다).
       buildBestChain(
         pinnedLocationDay.day,
-        allMemberIdsForDay(pinnedLocationDay.day),
+        new Set(
+          [...allMemberIdsForDay(pinnedLocationDay.day)].filter((id) =>
+            withinCaps(id, pinnedLocationDay.day),
+          ),
+        ),
         fairnessWeight,
         null,
         pinnedLocationDay.locationId,
@@ -1781,12 +1785,14 @@ export function candidateSignature(cand) {
 // 가능하면 엔진 워커 여러 개로 나눠 계산하고, 결과는 항상 이 번호 자리에 넣는다 — 워커가 끝나는
 // 순서와 무관하게 pool은 순차 실행과 같은 순서가 되어, 호출하는 쪽의 최선 선택·동점 풀 구성도
 // 같다. 워커를 못 쓰거나 워커가 실패한 시도만 메인 스레드가 예전처럼 순서대로 계산한다.
+// pins: 모든 시도에 그대로 둘 고정 세션(재최적화, engine/pins.js). 앱의 일반 생성은 [].
 export async function buildGreedySearchPool(
   eligible,
   eligibleIds,
   allMemberIds,
   onProgress,
   workerOptions = {},
+  pins = [],
 ) {
   const searchAttempts =
     workerOptions.attempts !== undefined
@@ -1801,6 +1807,7 @@ export async function buildGreedySearchPool(
       eligibleIds: [...eligibleIds],
       allMemberIds: [...allMemberIds],
       attempts: searchAttempts,
+      pins,
     }),
     taskCount: totalBuilds,
     taskMessage: (i) => ({
@@ -1841,7 +1848,7 @@ export async function buildGreedySearchPool(
             eligibleIds,
             allMemberIds,
             input.jitter,
-            [],
+            pins,
             input.dayOrder,
           );
           completed++;
@@ -1860,8 +1867,12 @@ export async function buildGreedySearchPool(
 }
 
 // workerOptions(createWorker/workerCount/attempts)는 테스트·벤치에서 워커 구성과 시도 횟수를 바꾸기
-// 위한 것이다 — 앱은 넘기지 않는다(buildGreedySearchPool 참고).
-export async function generateCandidatesAsync(onProgress, workerOptions = {}) {
+// 위한 것이다 — 앱은 넘기지 않는다(buildGreedySearchPool 참고). pins는 재최적화의 고정 세션.
+export async function generateCandidatesAsync(
+  onProgress,
+  workerOptions = {},
+  pins = [],
+) {
   // "미배정 회원"으로 지정된 회원은 애초에 없었던 것처럼 취급한다 — 배정 대상에서도,
   // (배정 실패가 아니라 의도적 제외이므로) 미배정 통계에서도 뺀다.
   const allMemberIds = new Set(
@@ -1891,6 +1902,7 @@ export async function generateCandidatesAsync(onProgress, workerOptions = {}) {
     allMemberIds,
     onProgress,
     workerOptions,
+    pins,
   );
 
   const builtPairs = STRATEGIES.map((strategy, idx) => {
