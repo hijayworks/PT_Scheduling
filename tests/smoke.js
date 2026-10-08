@@ -13,6 +13,7 @@
 // 확인하려면 SMOKE_FULL_BUDGET_A=1을 쓴다.
 "use strict";
 
+const fs = require("fs");
 const path = require("path");
 const { chromium } = require("playwright");
 
@@ -217,6 +218,29 @@ async function main() {
       cspViolations.length === 0,
       "CSP 위반 발생: " + JSON.stringify(cspViolations),
     );
+
+    // 후보 비교: 골든 CASE-09 생성 결과(추천 + 공강 최소)를 넣고 '추천안과 비교'를 연다. 이 저장
+    // 상태에는 inputKey가 없어 기존 저장분 경로(하드 제약 재검사 후 인정)도 함께 지난다.
+    const cmp = await browser.newPage();
+    const fixture = fs.readFileSync(path.join(__dirname, "fixtures", "compare-CASE-09.state.json"), "utf8");
+    await cmp.addInitScript((d) => {
+      if (!localStorage.getItem("pt_schedule_state_v3")) localStorage.setItem("pt_schedule_state_v3", d);
+    }, fixture);
+    await cmp.goto(INDEX_URL);
+    await cmp.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    const cmpTitles = await cmp.locator("#candidates3 .candidate-title").allTextContents();
+    assert(
+      JSON.stringify(cmpTitles) === JSON.stringify(["추천", "공강 최소"]),
+      "비교용 저장 상태의 카드가 다름 (실제: " + JSON.stringify(cmpTitles) + ")"
+    );
+    await cmp.locator(".compare-candidate-btn").first().click();
+    const panel = cmp.locator("#candidateCompare3");
+    const panelText = (await panel.isVisible()) ? await panel.innerText() : "";
+    assert(panelText.includes("빈 시간 -60분 대신 수업 -1"), "비교 요약 문장이 다름: " + panelText.split("\n")[2]);
+    assert((await panel.locator("tbody tr").count()) === 8, "비교 지표가 8개가 아님");
+    assert(panelText.includes("변경 회원 2명"), "배정 차이 회원 수가 다름");
+    await cmp.locator(".candidate-compare-close").click();
+    assert(!(await panel.isVisible()), "닫기를 눌러도 비교 패널이 남음");
   } finally {
     await browser.close();
   }
@@ -228,7 +252,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 회원 목록 렌더링 확인됨)"
   );
 }
 

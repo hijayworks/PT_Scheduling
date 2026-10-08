@@ -613,7 +613,7 @@
   var draggingSourceContainer = null;
   var LONG_PRESS_MS = 450;
   var LONG_PRESS_MOVE_TOLERANCE = 10;
-  function attachTouchDrag(el, container, meta) {
+  function attachTouchDrag(el2, container, meta) {
     let timer = null;
     let pointerId = null;
     let startX = 0, startY = 0;
@@ -642,10 +642,10 @@
         }
       }
       active = false;
-      el.classList.remove("dragging", "touch-drag-pending");
-      el.removeEventListener("pointermove", onMove);
-      el.removeEventListener("pointerup", onUp);
-      el.removeEventListener("pointercancel", onCancel);
+      el2.classList.remove("dragging", "touch-drag-pending");
+      el2.removeEventListener("pointermove", onMove);
+      el2.removeEventListener("pointerup", onUp);
+      el2.removeEventListener("pointercancel", onCancel);
     }
     function beginDrag() {
       active = true;
@@ -653,8 +653,8 @@
       draggingDurationSlots = meta.durationSlots;
       draggingValidator = meta.validator;
       draggingSourceContainer = container;
-      el.classList.remove("touch-drag-pending");
-      el.classList.add("dragging");
+      el2.classList.remove("touch-drag-pending");
+      el2.classList.add("dragging");
       const helpers = container._dndHelpers;
       if (helpers) helpers.paintDropTargets();
     }
@@ -693,31 +693,31 @@
       if (e.pointerId !== pointerId) return;
       cleanup();
     }
-    el.addEventListener("pointerdown", (e) => {
+    el2.addEventListener("pointerdown", (e) => {
       if (e.pointerType === "mouse") return;
       pointerId = e.pointerId;
       startX = e.clientX;
       startY = e.clientY;
-      el.classList.add("touch-drag-pending");
-      el.setPointerCapture(pointerId);
-      el.addEventListener("pointermove", onMove);
-      el.addEventListener("pointerup", onUp);
-      el.addEventListener("pointercancel", onCancel);
+      el2.classList.add("touch-drag-pending");
+      el2.setPointerCapture(pointerId);
+      el2.addEventListener("pointermove", onMove);
+      el2.addEventListener("pointerup", onUp);
+      el2.addEventListener("pointercancel", onCancel);
       timer = setTimeout(() => {
         timer = null;
         beginDrag();
       }, LONG_PRESS_MS);
     });
   }
-  function clearPlacementClasses(el) {
-    Array.from(el.classList).forEach((name) => {
+  function clearPlacementClasses(el2) {
+    Array.from(el2.classList).forEach((name) => {
       if (name.startsWith("grid-col-") || name.startsWith("grid-row-start-") || name.startsWith("grid-row-span-") || name.startsWith("lane-"))
-        el.classList.remove(name);
+        el2.classList.remove(name);
     });
   }
-  function setGridPlacement(el, column, rowStart, rowSpan = 1) {
-    clearPlacementClasses(el);
-    el.classList.add(
+  function setGridPlacement(el2, column, rowStart, rowSpan = 1) {
+    clearPlacementClasses(el2);
+    el2.classList.add(
       "grid-col-" + column,
       "grid-row-start-" + rowStart,
       "grid-row-span-" + rowSpan
@@ -931,7 +931,7 @@
       container.appendChild(block);
     });
     function cellAtPoint(x, y) {
-      return document.elementsFromPoint(x, y).find((el) => el.classList && el.classList.contains("cal-cell")) || null;
+      return document.elementsFromPoint(x, y).find((el2) => el2.classList && el2.classList.contains("cal-cell")) || null;
     }
     let dropPreviewEl = null;
     function clearDropPreview() {
@@ -1098,22 +1098,22 @@
         scale: 2,
         width: neededWidth || void 0,
         windowWidth: neededWidth || void 0,
-        ignoreElements: (el) => el.classList && el.classList.contains("candidate-card-actions"),
+        ignoreElements: (el2) => el2.classList && el2.classList.contains("candidate-card-actions"),
         // html2canvas가 repeating-linear-gradient 배경을 그리지 못하고 흰 배경으로 남기는 문제가
         // 있어(이동 시간 블록·제외 회원 블록에 사용 중), 캡처용 복제 문서에서만 무늬를 대표하는
         // 단색으로 바꿔치기한다. 화면에 실제로 보이는 원본 요소는 건드리지 않는다.
         onclone: (clonedDoc) => {
-          clonedDoc.querySelectorAll(".cal-travel-block").forEach((el) => {
-            el.classList.add("capture-travel-solid");
+          clonedDoc.querySelectorAll(".cal-travel-block").forEach((el2) => {
+            el2.classList.add("capture-travel-solid");
           });
-          clonedDoc.querySelectorAll(".cal-block.excluded").forEach((el) => {
-            el.classList.add("capture-excluded-solid");
+          clonedDoc.querySelectorAll(".cal-block.excluded").forEach((el2) => {
+            el2.classList.add("capture-excluded-solid");
           });
           if (neededWidth) {
             const clonedCard = clonedDoc.querySelector(`[${CAPTURE_ATTR}]`);
             if (clonedCard) clonedCard.classList.add("capture-card-wide");
-            clonedDoc.querySelectorAll(".grid-scroll").forEach((el) => {
-              el.classList.add("capture-grid-scroll");
+            clonedDoc.querySelectorAll(".grid-scroll").forEach((el2) => {
+              el2.classList.add("capture-grid-scroll");
             });
           }
         }
@@ -2720,6 +2720,227 @@
       built: builtPairs.map((p) => p.builtCand),
       pools: builtPairs.map((p) => p.tied)
     };
+  }
+
+  // src/engine/candidateDiff.js
+  var COMPARE_METRICS = [
+    { key: "unassigned", label: "미배정 회원", dir: -1 },
+    { key: "sessions", label: "총 수업", dir: 1 },
+    { key: "inefficientMoves", label: "비효율 이동", dir: -1 },
+    { key: "travelCount", label: "이동 횟수", dir: -1 },
+    { key: "travelMinutes", label: "이동 시간", dir: -1 },
+    { key: "idleMinutes", label: "빈 시간", dir: -1 },
+    { key: "workDays", label: "근무일 수", dir: -1 },
+    { key: "lastEndMinute", label: "마지막 수업 종료", dir: -1 }
+  ];
+  var DELTA_LABELS = {
+    unassigned: ["미배정", "명"],
+    sessions: ["수업", ""],
+    inefficientMoves: ["비효율 이동", ""],
+    travelCount: ["이동", ""],
+    travelMinutes: ["이동 시간", "분"],
+    idleMinutes: ["빈 시간", "분"],
+    workDays: ["근무일", "일"],
+    lastEndMinute: ["마지막 종료", "분"]
+  };
+  function formatDelta(key, delta) {
+    const [label, unit] = DELTA_LABELS[key];
+    return `${label} ${delta > 0 ? "+" : ""}${delta}${unit}`;
+  }
+  function metricDiff(base, other) {
+    return COMPARE_METRICS.map(({ key, label, dir }) => {
+      const delta = other[key] - base[key];
+      const effect = delta === 0 ? "same" : delta * dir > 0 ? "better" : "worse";
+      return { key, label, base: base[key], value: other[key], delta, effect };
+    });
+  }
+  function summarizeMetricDiff(diff) {
+    const list = (effect) => diff.filter((d) => d.effect === effect).map((d) => formatDelta(d.key, d.delta)).join(" / ");
+    const gains = list("better"), losses = list("worse");
+    if (gains && losses) return `${gains} 대신 ${losses}`;
+    if (gains) return `${gains} (나빠지는 지표 없음)`;
+    if (losses) return `나아지는 지표 없이 ${losses}`;
+    return "지표는 모두 같고 배치만 다릅니다";
+  }
+  var sameSession = (a, b) => a.day === b.day && a.startSlot === b.startSlot && a.locationId === b.locationId;
+  var bySlot = (a, b) => a.day - b.day || a.startSlot - b.startSlot;
+  function pairSessions(from, to) {
+    let a = from.slice().sort(bySlot), b = to.slice().sort(bySlot);
+    const pairs = [];
+    const take = (match) => {
+      a = a.filter((x) => {
+        const i = b.findIndex((y) => match(x, y));
+        if (i < 0) return true;
+        pairs.push([x, b[i]]);
+        b.splice(i, 1);
+        return false;
+      });
+    };
+    take(sameSession);
+    const unchanged = pairs.length;
+    take((x, y) => x.day === y.day);
+    take(() => true);
+    return pairs.slice(unchanged).concat(a.map((x) => [x, null]), b.map((y) => [null, y]));
+  }
+  var place = (r) => r && { day: r.day, startSlot: r.startSlot, locationId: r.locationId };
+  function assignmentDiff(base, other) {
+    const byMember = (result) => {
+      const map = /* @__PURE__ */ new Map();
+      result.assigned.forEach((r) => {
+        if (!map.has(r.memberId)) map.set(r.memberId, []);
+        map.get(r.memberId).push(r);
+      });
+      return map;
+    };
+    const a = byMember(base), b = byMember(other);
+    const ids = [.../* @__PURE__ */ new Set([...a.keys(), ...b.keys()])].sort();
+    const members = [];
+    ids.forEach((memberId) => {
+      const from = a.get(memberId) || [], to = b.get(memberId) || [];
+      const changes = pairSessions(from, to).map(([x, y]) => ({
+        from: place(x),
+        to: place(y),
+        dayChanged: !!(x && y) && x.day !== y.day,
+        startChanged: !!(x && y) && x.startSlot !== y.startSlot,
+        locationChanged: !!(x && y) && x.locationId !== y.locationId
+      }));
+      if (!changes.length) return;
+      const status = !from.length ? "assigned" : !to.length ? "unassigned" : "moved";
+      members.push({ memberId, status, changes });
+    });
+    const all = members.flatMap((m) => m.changes);
+    const countOf = (pred) => all.filter(pred).length;
+    return {
+      members,
+      counts: {
+        changedMembers: members.length,
+        dayChanges: countOf((c) => c.dayChanged),
+        startChanges: countOf((c) => c.startChanged),
+        locationChanges: countOf((c) => c.locationChanged),
+        newlyAssigned: members.filter((m) => m.status === "assigned").length,
+        newlyUnassigned: members.filter((m) => m.status === "unassigned").length,
+        sessionsAdded: countOf((c) => !c.from),
+        sessionsRemoved: countOf((c) => !c.to)
+      }
+    };
+  }
+
+  // src/candidateCompare.js
+  var UNITS = {
+    unassigned: "명",
+    sessions: "회",
+    inefficientMoves: "회",
+    travelCount: "회",
+    travelMinutes: "분",
+    idleMinutes: "분",
+    workDays: "일"
+  };
+  var formatValue = (key, v) => key === "lastEndMinute" ? v ? minutesLabel(v) : "-" : v + UNITS[key];
+  var el = (tag, className, text) => {
+    const e = document.createElement(tag);
+    if (className) e.className = className;
+    if (text !== void 0) e.textContent = text;
+    return e;
+  };
+  function placeLabel(p) {
+    const loc = locationById(p.locationId);
+    return `${DAYS[p.day]} ${slotLabel(p.startSlot)} ${loc ? loc.name : "?"}`;
+  }
+  var STATUS_LABELS = { assigned: "미배정 → 배정", unassigned: "배정 → 미배정" };
+  function changeLabel(c) {
+    if (!c.from) return "수업 추가 " + placeLabel(c.to);
+    if (!c.to) return "수업 빠짐 " + placeLabel(c.from);
+    const what = [
+      c.dayChanged && "요일",
+      c.startChanged && "시작 시각",
+      c.locationChanged && "지점"
+    ].filter(Boolean);
+    return `${placeLabel(c.from)} → ${placeLabel(c.to)} (${what.join("·")} 변경)`;
+  }
+  function renderCandidateCompare(container, base, other, onClose) {
+    container.innerHTML = "";
+    container.hidden = false;
+    const head = el("div", "candidate-compare-head");
+    head.appendChild(
+      el("h3", "candidate-compare-title", `${base.label} ↔ ${other.label} 비교`)
+    );
+    const closeBtn = el("button", "btn btn-ghost candidate-compare-close", "닫기");
+    closeBtn.type = "button";
+    closeBtn.addEventListener("click", onClose);
+    head.appendChild(closeBtn);
+    container.appendChild(head);
+    const diff = metricDiff(base.metrics, other.metrics);
+    const summary = el("p", "candidate-compare-summary");
+    summary.append(
+      el("b", null, "이 후보를 고르면 "),
+      summarizeMetricDiff(diff)
+    );
+    container.appendChild(summary);
+    const table = el("table", "candidate-compare-table");
+    const thead = el("thead");
+    const hr = el("tr");
+    ["지표", base.label, other.label, "추천 대비"].forEach(
+      (t) => hr.appendChild(el("th", null, t))
+    );
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    diff.forEach((d) => {
+      const tr = el("tr");
+      tr.appendChild(el("th", null, d.label));
+      tr.appendChild(el("td", null, formatValue(d.key, d.base)));
+      tr.appendChild(el("td", null, formatValue(d.key, d.value)));
+      tr.appendChild(
+        el(
+          "td",
+          "compare-delta compare-" + d.effect,
+          d.effect === "same" ? "같음" : (d.delta > 0 ? "+" : "") + d.delta + (d.key === "lastEndMinute" ? "분" : UNITS[d.key])
+        )
+      );
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    const tableWrap = el("div", "candidate-compare-table-wrap");
+    tableWrap.appendChild(table);
+    container.appendChild(tableWrap);
+    const { members, counts } = assignmentDiff(base.result, other.result);
+    container.appendChild(el("h4", "candidate-compare-subtitle", "배정 차이"));
+    const countText = [
+      `변경 회원 ${counts.changedMembers}명`,
+      `요일 변경 ${counts.dayChanges}`,
+      `시작 시각 변경 ${counts.startChanges}`,
+      `지점 변경 ${counts.locationChanges}`,
+      `미배정 → 배정 ${counts.newlyAssigned}명`,
+      `배정 → 미배정 ${counts.newlyUnassigned}명`
+    ].join(" · ");
+    container.appendChild(el("p", "candidate-compare-counts", countText));
+    if (members.length === 0) {
+      container.appendChild(
+        el("p", "candidate-compare-counts", "배정이 완전히 같습니다.")
+      );
+      return;
+    }
+    const list = el("ul", "candidate-compare-members");
+    members.map((m) => ({ ...m, member: memberById(m.memberId) })).sort(
+      (x, y) => (x.member ? x.member.name : "").localeCompare(
+        y.member ? y.member.name : "",
+        "ko"
+      )
+    ).forEach((m) => {
+      const li = el("li");
+      li.appendChild(el("b", null, m.member ? m.member.name : "(삭제된 회원)"));
+      if (STATUS_LABELS[m.status])
+        li.appendChild(
+          el(
+            "span",
+            "compare-status compare-status-" + m.status,
+            STATUS_LABELS[m.status]
+          )
+        );
+      li.append(" " + m.changes.map(changeLabel).join(", "));
+      list.appendChild(li);
+    });
+    container.appendChild(list);
   }
 
   // src/engine/rng.js
@@ -4575,19 +4796,8 @@
   function tradeoffDeltas(base, b) {
     return QUALITY_AXES.map(([k]) => k).concat("travelMinutes").filter((k) => b[k] !== base[k]).map((k) => ({ key: k, delta: b[k] - base[k] }));
   }
-  var DELTA_LABELS = {
-    unassigned: ["미배정", "명"],
-    sessions: ["수업", ""],
-    inefficientMoves: ["비효율 이동", ""],
-    travelCount: ["이동", ""],
-    idleMinutes: ["빈 시간", "분"],
-    travelMinutes: ["이동 시간", "분"]
-  };
   function formatTradeoff(deltas) {
-    return deltas.map(({ key, delta }) => {
-      const [label, unit] = DELTA_LABELS[key];
-      return `${label} ${delta > 0 ? "+" : ""}${delta}${unit}`;
-    }).join(" / ");
+    return deltas.map(({ key, delta }) => formatDelta(key, delta)).join(" / ");
   }
   var better = (a, b) => isSchedule2ResultBetter(a.result, b.result);
   var bestOf = (list) => list.reduce((x, y) => better(y, x) ? y : x);
@@ -4765,18 +4975,18 @@
   function syncMemberHintSpacing() {
     memberForm.classList.toggle(
       "has-hint",
-      memberHintEls.some((el) => el.textContent !== "")
+      memberHintEls.some((el2) => el2.textContent !== "")
     );
   }
-  function setMemberHint(el, message, isError) {
-    el.textContent = message;
-    el.classList.toggle("generate-hint-error", !!isError);
+  function setMemberHint(el2, message, isError) {
+    el2.textContent = message;
+    el2.classList.toggle("generate-hint-error", !!isError);
     syncMemberHintSpacing();
   }
   function clearMemberHints() {
-    memberHintEls.forEach((el) => {
-      el.textContent = "";
-      el.classList.remove("generate-hint-error");
+    memberHintEls.forEach((el2) => {
+      el2.textContent = "";
+      el2.classList.remove("generate-hint-error");
     });
     syncMemberHintSpacing();
   }
@@ -7307,12 +7517,16 @@
     return entries;
   }
   var shownVariantByCard = /* @__PURE__ */ new Map();
+  var compareCardKey = null;
+  var candidateCompare3El = document.getElementById("candidateCompare3");
   var CARD_DESC = {
     recommended: "미배정 → 비효율 이동 → 수업·이동·빈 시간 균형(수업 1건 = 이동 1번 = 빈 시간 60분) 순으로 가장 나은 후보입니다.",
-    edited: "직접 옮기거나 확정한 후보입니다. 다시 생성해도 지워지지 않습니다."
+    edited: "직접 옮기거나 확정한 후보입니다. 다시 생성해도 유지되지만, 회원·신청·설정이 바뀌면 함께 초기화됩니다."
   };
   function renderSchedule3Result() {
     candidates3El.innerHTML = "";
+    candidateCompare3El.hidden = true;
+    candidateCompare3El.innerHTML = "";
     const gridRange = businessHoursGridRange();
     const { cards } = selectCandidates(candidatePoolEntries());
     if (cards.length === 0) {
@@ -7326,6 +7540,7 @@
       return;
     }
     let promoted = false;
+    const shown = /* @__PURE__ */ new Map();
     cards.forEach((c) => {
       const cardKey = c.role === "edited" ? "edited:" + layoutSignature(c.variants[0].result) : qualityKey(c.metrics);
       const shownSig = shownVariantByCard.get(cardKey);
@@ -7339,7 +7554,8 @@
         entry.slot.result = entry.result;
         promoted = true;
       }
-      buildCard(c, entry.result, idx, (newIdx) => {
+      shown.set(cardKey, { card: c, entry });
+      buildCard(c, cardKey, entry.result, idx, (newIdx) => {
         shownVariantByCard.set(
           cardKey,
           layoutSignature(c.variants[newIdx].result)
@@ -7348,13 +7564,26 @@
       });
     });
     if (promoted) saveState();
+    const rec = [...shown.values()].find((x) => x.card.role === "recommended");
+    const target = shown.get(compareCardKey);
+    if (rec && target && target !== rec) {
+      const side = ({ card, entry }) => ({
+        label: card.label,
+        result: entry.result,
+        metrics: entry.metrics
+      });
+      renderCandidateCompare(candidateCompare3El, side(rec), side(target), () => {
+        compareCardKey = null;
+        renderSchedule3Result();
+      });
+    }
     if (cards.filter((c) => c.role !== "edited").length === 1) {
       const note = document.createElement("p");
       note.className = "pool-pager-hint candidates-note";
       note.textContent = "장단점이 다른 후보가 없어 추천 후보만 보여줍니다.";
       candidates3El.appendChild(note);
     }
-    function buildCard(c, result, variantIdx, onSelectVariant) {
+    function buildCard(c, cardKey, result, variantIdx, onSelectVariant) {
       const title = c.label;
       const desc = c.role === "recommended" ? CARD_DESC.recommended : c.role === "edited" ? CARD_DESC.edited + (c.deltas.length ? " 추천 대비 " + formatTradeoff(c.deltas) : "") : "추천 대비 " + formatTradeoff(c.deltas);
       const blocks = schedule2ToBlocks(result.assigned, {
@@ -7376,6 +7605,25 @@
       head.appendChild(titleEl);
       const actions = document.createElement("div");
       actions.className = "candidate-card-actions";
+      if (c.role !== "recommended" && cards[0].role === "recommended") {
+        const comparing = compareCardKey === cardKey;
+        const compareBtn = document.createElement("button");
+        compareBtn.type = "button";
+        compareBtn.className = "btn btn-ghost compare-candidate-btn";
+        compareBtn.textContent = "추천안과 비교";
+        compareBtn.setAttribute("aria-pressed", String(comparing));
+        compareBtn.setAttribute("aria-controls", "candidateCompare3");
+        compareBtn.addEventListener("click", () => {
+          compareCardKey = comparing ? null : cardKey;
+          renderSchedule3Result();
+          if (!candidateCompare3El.hidden)
+            candidateCompare3El.scrollIntoView({
+              behavior: "smooth",
+              block: "start"
+            });
+        });
+        actions.appendChild(compareBtn);
+      }
       function makeIconBtn(iconSvg, label, tooltip) {
         const b = document.createElement("button");
         b.type = "button";

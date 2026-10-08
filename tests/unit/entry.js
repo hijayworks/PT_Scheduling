@@ -81,6 +81,12 @@ export {
   prepareSwap,
 } from "../../src/schedule3.js";
 export { candidateAPools, candidatePools } from "../../src/engine/greedy.js";
+export {
+  metricDiff,
+  assignmentDiff,
+  summarizeMetricDiff,
+  COMPARE_METRICS,
+} from "../../src/engine/candidateDiff.js";
 
 export {
   BACKUP_VERSION,

@@ -1109,6 +1109,46 @@ body {
   font-weight: 700;
 }
 .action-divider { width: 1px; height: 18px; background: var(--border); margin: 0 2px; flex: 0 0 auto; }
+/* 후보 비교 패널: 추천안과 다른 후보 하나의 지표·배정 차이. */
+.compare-candidate-btn { height: 28px; padding: 0 10px; font-size: 12px; font-weight: 700; }
+.compare-candidate-btn[aria-pressed="true"] { background: var(--primary); color: #fff; }
+.candidate-compare {
+  margin-top: 16px; border: 2px solid var(--primary); border-radius: 12px;
+  padding: 14px; background: var(--card-bg); word-break: keep-all;
+}
+.candidate-compare[hidden] { display: none; }
+.candidate-compare-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.candidate-compare-title { margin: 0; font-size: 16px; }
+.candidate-compare-close { height: 28px; padding: 0 12px; font-size: 12px; }
+.candidate-compare-summary {
+  margin: 10px 0 12px; padding: 10px 12px; border-radius: 8px;
+  background: var(--primary-soft); font-size: 14px; line-height: 1.5;
+}
+.candidate-compare-table-wrap { overflow-x: auto; }
+.candidate-compare-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.candidate-compare-table th, .candidate-compare-table td {
+  padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap;
+}
+.candidate-compare-table th:first-child { text-align: left; }
+.candidate-compare-table thead th { color: var(--text-mute); font-weight: 600; font-size: 12px; }
+.compare-delta { font-weight: 700; }
+.compare-better { color: var(--success); }
+.compare-worse { color: var(--danger); }
+.compare-same { color: var(--text-mute); font-weight: 500; }
+.candidate-compare-subtitle { margin: 16px 0 4px; font-size: 14px; }
+.candidate-compare-counts { margin: 0 0 8px; font-size: 12px; color: var(--text-mute); }
+.candidate-compare-members { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.7; }
+.compare-status {
+  margin: 0 4px; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 700;
+  background: var(--primary-soft);
+}
+.compare-status-unassigned { background: var(--danger-soft); color: var(--danger); }
+.compare-status-assigned { background: var(--cell-available); color: var(--success); }
+@media (max-width: 480px) {
+  .candidate-compare { padding: 12px 10px; }
+  .candidate-compare-table { font-size: 12px; }
+  .candidate-compare-table th, .candidate-compare-table td { padding: 6px 3px; }
+}
 .candidate-desc { font-size: 12px; color: var(--text-mute); margin: 0 0 10px; }
 /* "배치 페이저": 미배정/수업/이동 지표가 동점인 다른 배치를 재계산 없이 넘나보는 컨트롤. */
 .candidate-pool-pager {

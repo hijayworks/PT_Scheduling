@@ -1,4 +1,5 @@
 import { isSchedule2ResultBetter } from "./scheduleCompare.js";
+import { formatDelta } from "./candidateDiff.js";
 
 // 후보 선정 정책의 단일 소유자: 여러 엔진(후보A-1~3·B·C와 각 동점 풀)이 만든 결과 전체를 하나의
 // 후보 풀로 보고, 사용자에게 보여줄 카드(실제 trade-off)를 고른다. 역할(추천·수업 우선 등)은 풀에
@@ -65,22 +66,9 @@ export function tradeoffDeltas(base, b) {
     .filter((k) => b[k] !== base[k])
     .map((k) => ({ key: k, delta: b[k] - base[k] }));
 }
-const DELTA_LABELS = {
-  unassigned: ["미배정", "명"],
-  sessions: ["수업", ""],
-  inefficientMoves: ["비효율 이동", ""],
-  travelCount: ["이동", ""],
-  idleMinutes: ["빈 시간", "분"],
-  travelMinutes: ["이동 시간", "분"],
-};
 // "수업 +1 / 이동 +2 / 빈 시간 -60분"
 export function formatTradeoff(deltas) {
-  return deltas
-    .map(({ key, delta }) => {
-      const [label, unit] = DELTA_LABELS[key];
-      return `${label} ${delta > 0 ? "+" : ""}${delta}${unit}`;
-    })
-    .join(" / ");
+  return deltas.map(({ key, delta }) => formatDelta(key, delta)).join(" / ");
 }
 
 const better = (a, b) => isSchedule2ResultBetter(a.result, b.result);
