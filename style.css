@@ -919,6 +919,17 @@ body {
   color: var(--text-mute);
 }
 
+.bulk-example-list code {
+  font-family: inherit;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+/* 일괄 등록 "작성 규칙"은 길어서 기본으로 접어 둔다(네이티브 details 토글). */
+.rules-details summary { cursor: pointer; margin: 0; }
+.rules-details summary:hover { color: var(--primary); }
+.rules-details[open] summary { margin-bottom: 4px; }
+.rules-group-title { margin: 10px 0 4px; font-size: 12px; font-weight: 700; color: var(--text); }
 .request-summary { font-size: 13px; color: var(--text-mute); margin-bottom: 10px; font-weight: 600; }
 .request-summary-link { color: var(--primary); text-decoration: underline; cursor: pointer; }
 

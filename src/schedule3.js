@@ -84,7 +84,8 @@ import {
 } from "./pages/memberSchedule.js";
 import { businessHoursGridRange } from "./pages/settings.js";
 
-// 후보 카드의 일정 하나를 확정한다: 재생성해도 이 일정은 고정되고 나머지만 다시 배정된다.
+// 후보 카드의 일정 하나를 확정한다: 확정한 후보는 수정 후보가 되어 재생성해도 덮어쓰지 않고(runGenerate3의
+// keepsUserEditedSlot), 확정 일정을 고정한 채 나머지를 다시 짜는 것은 재최적화(runReoptimize3)다.
 // container: 후보B/C(candidate) 또는 후보A(result) 객체 — 항상 .assigned와 .confirmedIds를 가진다.
 // onDone: 확정/확정취소/교체 뒤 다시 그릴 함수. 생성3의 카드에서 항상 renderSchedule3Result를
 // 명시적으로 넘겨받아 쓴다.
