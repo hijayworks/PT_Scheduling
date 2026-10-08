@@ -3,6 +3,8 @@
 // 확정한 후보 보존 → 저장 → 새로고침 후 유지)이 깨지지 않았는지 확인하는 E2E 스모크 테스트.
 // MCP의 대화형 Playwright 브라우저와는 별개의 독립 프로세스를 띄우므로 그 브라우저가
 // 사용 중이어도 영향받지 않는다.
+// 기본 검사는 로컬 HTTP 서버(127.0.0.1)에서 열고, README의 파일 직접 실행(file://)은 임시 persistent profile로
+// 저장·새로고침·브라우저 재실행만 따로 확인한다. 시드는 처음 한 번만 넣는다(새로고침은 저장된 데이터를 그대로 읽는다).
 //
 // 후보A(체인DP) 생성은 카드 3장 각각이 시간 예산제 다듬기(최대 90초/카드, 데이터 크기와
 // 무관하게 시간 비율로 식히는 방식)를 쓰므로 트리비얼한 입력에서도 수 분이 걸릴 수 있다.
@@ -14,12 +16,21 @@
 "use strict";
 
 const fs = require("fs");
+const http = require("http");
+const os = require("os");
 const path = require("path");
+const { pathToFileURL } = require("url");
 const { chromium } = require("playwright");
 
 const ROOT = path.resolve(__dirname, "..");
-const INDEX_URL = "file://" + path.join(ROOT, "index.html");
 const STORAGE_KEY = "pt_schedule_state_v3";
+// 앱이 읽지 않는 별도 키 — 시드를 넣을 때 한 번 기록한다. 새로고침된 문서가 시작될 때 이 키가 없으면 저장소가 통째로 사라진 것이다.
+const SEED_LOG_KEY = "__smoke_seed_log__";
+const BLANK_HTML = "<!doctype html><title>smoke seed</title>";
+// 교체·새로고침 단계 반복 횟수 — CI(Linux)에서만 간헐적으로 새로고침 때 저장소가 비어 있던 현상을 다시 확인한다.
+const SWAP_REPEAT = Number(process.env.SMOKE_SWAP_REPEAT || "20");
+// 실패 진단 기록(스크린샷·저장값·콘솔). CI가 실패 시 아티팩트로 올린다.
+const ARTIFACT_DIR = path.join(ROOT, "test-artifacts");
 const FULL_BUDGET_A = process.env.SMOKE_FULL_BUDGET_A === "1";
 const A_BUDGET_SCALE = Number(process.env.SMOKE_A_BUDGET_SCALE || "0.005");
 
@@ -78,6 +89,38 @@ function buildReoptSeedState(layout = "default") {
   };
 }
 
+// 수동 편집·설정 입력: 월·수만 근무(12:00~18:00), 회원A는 근무하지 않는 화요일에도 신청했다. 카드는 A가 월·수 2회,
+// B(수요일 신청)는 미배정. 두 지점 사이 이동 시간은 30분.
+function buildManualEditSeedState() {
+  const cells = [];
+  [0, 2].forEach((day) => {
+    for (let slot = 0; slot < 36; slot++) cells.push(day + "-" + slot);
+  });
+  const requests = [];
+  const addRequests = (memberId, days) =>
+    days.forEach((day) => {
+      for (let slot = 0; slot <= 30; slot++)
+        requests.push({ id: memberId + day + "_" + slot, memberId, day, startSlot: slot, duration: 60 });
+    });
+  addRequests("A", [0, 1, 2]);
+  addRequests("B", [2]);
+  const at = (memberId, day, slot) => ({ id: memberId + day + "_" + slot, memberId, day, startSlot: slot, duration: 60, locationId: "loc1" });
+  const memberB = { id: "B", name: "회원B", locationIds: ["loc1"], category: "등록" };
+  return {
+    locations: [{ id: "loc1", name: "테스트지점" }, { id: "loc2", name: "둘째지점" }],
+    travelTimes: { "loc1|loc2": 30 },
+    members: [{ id: "A", name: "회원A", locationIds: ["loc1"], category: "등록" }, memberB],
+    requests,
+    onceLimitedMemberIds3: [],
+    excludedMemberIds3: [],
+    availableCells: cells,
+    currentPage: "schedule3",
+    startMinBase: 720,
+    candidates: [{ assigned: [at("A", 0, 0), at("A", 2, 0)], unassignedMembers: [memberB], confirmedIds: [], strategyIndex: 0 }],
+    schedule3Result: { candidateAList: [null, null, null] },
+  };
+}
+
 // 알림(utils.showToast)이 만드는 DOM(.toast-container > .toast.toast-{type}.show)을 그대로 붙여 공통 알림 스타일을
 // 잰다. showToast는 번들 밖으로 노출되지 않고 2.2초 뒤 사라지므로 같은 구조를 직접 만든다.
 const TOAST_SAMPLES = [
@@ -113,6 +156,157 @@ async function readState(page) {
   return raw ? JSON.parse(raw) : null;
 }
 
+// 기본 검사는 로컬 HTTP 서버에서 연다(실제 배포와 같은 http origin). 앱이 쓰는 정적 파일과 시드용 빈 페이지만 낸다.
+const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
+function startServer() {
+  const server = http.createServer((req, res) => {
+    const pathname = decodeURIComponent(new URL(req.url, "http://x").pathname);
+    if (pathname === "/__smoke_blank") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      return res.end(BLANK_HTML);
+    }
+    const file = path.join(ROOT, pathname);
+    if (!file.startsWith(ROOT + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+      res.writeHead(404);
+      return res.end();
+    }
+    res.writeHead(200, { "Content-Type": (MIME[path.extname(file)] || "application/octet-stream") + "; charset=utf-8" });
+    fs.createReadStream(file).pipe(res);
+  });
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
+}
+
+// 시드는 처음 한 번만, 같은 origin의 빈 페이지에서 넣는다. 그 뒤 새로고침은 저장된 데이터를 그대로 읽는다(재주입 없음).
+// 문서가 시작될 때마다 저장소 키 목록을 window.__smoke_doc_start__에 남겨 새로고침 때 저장소가 비었는지 판별한다.
+async function openWithSeed(page, seed, site) {
+  await page.addInitScript(() => {
+    window.__smoke_doc_start__ = { url: location.href, origin: location.origin, keys: Object.keys(localStorage) };
+  });
+  await page.goto(site.blank);
+  const injection = await page.evaluate(
+    ({ key, data, logKey }) => {
+      const record = { at: new Date().toISOString(), url: location.href, origin: location.origin, keysBefore: Object.keys(localStorage) };
+      localStorage.setItem(key, data);
+      localStorage.setItem(logKey, JSON.stringify(record));
+      return record;
+    },
+    { key: STORAGE_KEY, data: typeof seed === "string" ? seed : JSON.stringify(seed), logKey: SEED_LOG_KEY }
+  );
+  await page.goto(site.index);
+  try {
+    await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+  } catch (err) {
+    // 시드를 넣은 뒤 앱이 생성 페이지로 열리지 않으면 URL·origin·저장소 상태를 남기고 멈춘다(CI가 아티팩트로 올린다).
+    const dir = path.join(ARTIFACT_DIR, "open-seed");
+    fs.mkdirSync(dir, { recursive: true });
+    const name = Date.now() + "-" + new URL(site.index).protocol.replace(":", "");
+    const state = await page.evaluate((key) => ({
+      url: location.href,
+      origin: location.origin,
+      keys: Object.keys(localStorage),
+      docStart: window.__smoke_doc_start__,
+      storedBytes: (localStorage.getItem(key) || "").length,
+      activePage: (document.querySelector(".page.active") || {}).id || null,
+      body: document.body ? document.body.innerText.slice(0, 500) : null,
+    }), STORAGE_KEY).catch((e) => ({ evaluateError: String(e) }));
+    fs.writeFileSync(path.join(dir, name + ".json"), JSON.stringify({ site, injection, state }, null, 2));
+    await page.screenshot({ path: path.join(dir, name + ".png"), fullPage: true }).catch(() => {});
+    throw new Error("시드를 넣은 뒤 생성 페이지가 열리지 않음: " + JSON.stringify({ injection, state }) + "\n" + err.message);
+  }
+  return injection;
+}
+
+// 새로고침된 문서가 시작될 때 시드 기록 키가 없으면 앱 오류가 아니라 환경(브라우저) 저장소 유실로 분류한다. 그래도 실패로 센다.
+async function reloadChecked(page, label, failures) {
+  await page.reload();
+  const docStart = await page.evaluate(() => window.__smoke_doc_start__);
+  const lost = !docStart || !docStart.keys.includes(SEED_LOG_KEY);
+  if (lost) failures.push("[환경 저장소 유실] " + label + ": 새로고침된 문서가 시작될 때 저장소가 비어 있음 " + JSON.stringify(docStart));
+  return { docStart, lost };
+}
+
+// 수동 편집 픽스처를 연다. 교체·새로고침 검사가 실패하면 원인을 볼 수 있도록 콘솔과 시드 주입 기록을 모은다.
+async function openManualEditPage(page, site, failures) {
+  const pageConsole = [];
+  page.on("console", (msg) => pageConsole.push({ type: msg.type(), text: msg.text() }));
+  page.on("pageerror", (err) => {
+    pageConsole.push({ type: "pageerror", text: err.message });
+    failures.push("수동 편집 페이지 런타임 에러: " + err.message);
+  });
+  const injection = await openWithSeed(page, buildManualEditSeedState(), site);
+  return { pageConsole, injection };
+}
+
+// 저장된 B 슬롯의 배정 id·미배정 id·확정 id
+const swapSummary = (c) => ({ assigned: c.assigned.map((a) => a.id), unassigned: (c.unassignedMembers || []).map((m) => m.id), confirmedIds: c.confirmedIds });
+const SWAPPED = { assigned: ["A0_0", "B2_0"], unassigned: [], confirmedIds: ["B2_0"] };
+
+// 메뉴로 미배정 회원B를 교체해 넣고 → 저장값 → 새로고침 후 저장값·카드를 본다. 실패하면 test-artifacts/swap-reload/<tag>/에
+// 단계별 스크린샷과 report.json(URL·origin·문서 시작 시 저장소 키·시드 주입 전 저장소 상태·저장값·콘솔)을 남긴다(CI가 아티팩트로 올린다).
+async function checkSwapReload(page, { pageConsole, injection }, tag, failures) {
+  const failuresBefore = failures.length;
+  const assert = (cond, msg) => { if (!cond) failures.push("[교체·새로고침 " + tag + "] " + msg); };
+  const stages = [];
+  const recordStage = async (stage) => {
+    const probe = await page.evaluate(({ key, logKey }) => ({
+      url: location.href,
+      origin: location.origin,
+      keys: Object.keys(localStorage),
+      docStart: window.__smoke_doc_start__,
+      raw: localStorage.getItem(key),
+      seedLog: localStorage.getItem(logKey),
+    }), { key: STORAGE_KEY, logKey: SEED_LOG_KEY });
+    const st = probe.raw ? JSON.parse(probe.raw) : null;
+    const c = st && st.candidates && st.candidates[0];
+    const snap = {
+      stage,
+      url: probe.url,
+      origin: probe.origin,
+      keys: probe.keys,
+      docStart: probe.docStart,
+      seedLog: probe.seedLog && JSON.parse(probe.seedLog),
+      stored: st && { inputKey: st.schedule3Result && st.schedule3Result.inputKey, candidateAList: st.schedule3Result && st.schedule3Result.candidateAList, candidates: st.candidates },
+      summary: c ? swapSummary(c) : null,
+      cardText: await page.locator("#candidates3 .candidate-card").first().innerText({ timeout: 2000 }).catch(() => "(카드 없음)"),
+      consoleSoFar: pageConsole.length,
+      screenshot: await page.screenshot({ fullPage: true }),
+    };
+    stages.push(snap);
+    return snap;
+  };
+  const before = await recordStage("교체 전");
+  assert(JSON.stringify(before.summary) === JSON.stringify({ assigned: ["A0_0", "A2_0"], unassigned: ["B"], confirmedIds: [] }), "교체 전 저장값이 픽스처와 다름: " + JSON.stringify(before.summary));
+  assert(/미배정 1명/.test(before.cardText), "교체 전 카드에 '미배정 1명'이 없음(픽스처 확인)");
+  await page.locator("#candidates3 .cal-block", { hasText: "회원A" }).nth(1).evaluate((el) => el.click());
+  await page.locator(".block-context-menu-item", { hasText: "회원B(으)로 교체" }).first().evaluate((el) => el.click());
+  const afterSwap = await recordStage("교체 직후");
+  assert(JSON.stringify(afterSwap.summary) === JSON.stringify(SWAPPED), "교체 직후 저장값(배정·미배정·확정)이 다름: " + JSON.stringify(afterSwap.summary));
+  assert(!/미배정 \d+명/.test(afterSwap.cardText), "미배정 회원으로 교체했는데 카드에 미배정이 남음: " + afterSwap.cardText);
+  const { lost } = await reloadChecked(page, "교체·새로고침 " + tag, failures);
+  if (!lost) await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 }).catch(() => assert(false, "새로고침 후 생성 페이지가 열리지 않음"));
+  const afterReload = await recordStage("새로고침 후");
+  // 저장소가 통째로 비었으면 앱 검사는 의미가 없다 — 위의 [환경 저장소 유실] 실패만 남긴다.
+  if (!lost) {
+    assert(JSON.stringify(afterReload.summary) === JSON.stringify(SWAPPED), "교체 뒤 새로고침하자 저장값(배정·미배정·확정)이 달라짐: " + JSON.stringify(afterReload.summary));
+    assert(!/미배정 \d+명/.test(afterReload.cardText), "교체 뒤 새로고침하자 카드에 미배정이 다시 나타남");
+  }
+  if (failures.length > failuresBefore) {
+    const dir = path.join(ARTIFACT_DIR, "swap-reload", tag);
+    fs.mkdirSync(dir, { recursive: true });
+    stages.forEach((snap, i) => fs.writeFileSync(path.join(dir, i + "-" + snap.stage + ".png"), snap.screenshot));
+    const report = {
+      failures: failures.slice(failuresBefore),
+      classification: lost ? "환경 저장소 유실(새로고침된 문서 시작 시 저장소 비어 있음)" : "앱 오류 의심(저장소는 남아 있음)",
+      expectedAfterSwap: SWAPPED,
+      injection,
+      stages: stages.map((snap) => ({ ...snap, screenshot: undefined })),
+      console: pageConsole,
+    };
+    fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify(report, null, 2));
+    console.error("교체·새로고침 진단 기록: " + dir);
+  }
+}
+
 async function clickGenerateAndWait(page, buttonSelector, timeoutMs) {
   await page.click(buttonSelector);
   await page.waitForFunction(
@@ -126,6 +320,9 @@ async function main() {
   const failures = [];
   const assert = (cond, msg) => { if (!cond) failures.push(msg); };
 
+  const server = await startServer();
+  const origin = "http://127.0.0.1:" + server.address().port;
+  const site = { blank: origin + "/__smoke_blank", index: origin + "/index.html" };
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
@@ -159,14 +356,6 @@ async function main() {
       };
     });
 
-    // 처음 열 때만 시드를 넣는다 — 매번 넣으면 새로고침 때 저장된 생성 결과까지 덮어써서
-    // "새로고침 후 유지"를 검증할 수 없다.
-    await page.addInitScript(
-      ({ key, data }) => {
-        if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(data));
-      },
-      { key: STORAGE_KEY, data: buildSeedState() }
-    );
     if (!FULL_BUDGET_A) {
       await page.addInitScript(
         (scale) => {
@@ -176,8 +365,7 @@ async function main() {
       );
     }
 
-    await page.goto(INDEX_URL);
-    await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    await openWithSeed(page, buildSeedState(), site);
 
     // 후보 생성(그리디 탐색 + 체인 DP 다듬기). 기본값은 위에서 주입한 __PT_TEST_BUDGET_SCALE__로
     // 체인 DP의 시간 예산을 축소해 몇 초 안에 끝난다. SMOKE_FULL_BUDGET_A=1이면 실제 운영 예산
@@ -227,6 +415,12 @@ async function main() {
       titles.includes("내가 수정한 후보"),
       "다시 생성한 뒤 '내가 수정한 후보'가 사라짐 (실제: " + JSON.stringify(titles) + ")"
     );
+    // 생성 중에 다시 그려진 카드의 재최적화 버튼은 생성이 끝나면 다시 눌러져야 한다.
+    const reoptDisabled = await page.locator("#candidates3 .reopt-btn").evaluateAll((bs) => bs.map((b) => b.disabled));
+    assert(
+      reoptDisabled.length > 0 && reoptDisabled.every((d) => !d),
+      "다시 생성한 뒤 '나머지 일정 다시 최적화' 버튼이 비활성으로 남음: " + JSON.stringify(reoptDisabled)
+    );
 
     // strict style CSP에서 html2canvas 캡처 경로도 실제로 동작하는지 확인한다.
     // 후보 생성 직후 첫 카드의 이미지 저장 버튼을 눌러 다운로드 완료까지 기다린다.
@@ -242,7 +436,7 @@ async function main() {
     }
 
     // 새로고침 후에도 데이터와 생성 결과가 유지되는지(localStorage 로드 경로 회귀 확인)
-    await page.reload();
+    await reloadChecked(page, "생성 결과 새로고침", failures);
     await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
     const reloadedMemberCount = await page.evaluate(() => {
       const raw = localStorage.getItem("pt_schedule_state_v3");
@@ -266,7 +460,7 @@ async function main() {
     await page.click('.nav-item[data-page="memberSchedule"]');
     page.once("dialog", (d) => d.accept());
     await page.click("#resetAllSchedulesBtn");
-    await page.reload();
+    await reloadChecked(page, "신청 변경 뒤 새로고침", failures);
     await page.click('.nav-item[data-page="schedule3"]');
     await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
     titles = await cardTitles();
@@ -274,6 +468,8 @@ async function main() {
       titles.length === 0,
       "신청이 바뀐 뒤 새로고침하자 옛 후보가 남음 (실제: " + JSON.stringify(titles) + ")"
     );
+    const staleHint = await page.locator("#generateHint3").innerText();
+    assert(staleHint.includes("회원·신청·설정이 변경되어") && !staleHint.includes("필수 조건"), "입력 변경 안내가 다름: " + staleHint);
 
 
     const cspViolations = await page.evaluate(() => window.__PT_CSP_VIOLATIONS__ || []);
@@ -286,11 +482,7 @@ async function main() {
     // 상태에는 inputKey가 없어 기존 저장분 경로(하드 제약 재검사 후 인정)도 함께 지난다.
     const cmp = await browser.newPage();
     const fixture = fs.readFileSync(path.join(__dirname, "fixtures", "compare-CASE-09.state.json"), "utf8");
-    await cmp.addInitScript((d) => {
-      if (!localStorage.getItem("pt_schedule_state_v3")) localStorage.setItem("pt_schedule_state_v3", d);
-    }, fixture);
-    await cmp.goto(INDEX_URL);
-    await cmp.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    await openWithSeed(cmp, fixture, site);
     const cmpTitles = await cmp.locator("#candidates3 .candidate-title").allTextContents();
     assert(
       JSON.stringify(cmpTitles) === JSON.stringify(["추천", "공강 최소"]),
@@ -312,11 +504,7 @@ async function main() {
     longState.locations.forEach((l) => (l.name = "아주긴지점이름ABCDEFGHIJKLMNOP".repeat(2) + l.name));
     for (const width of [320, 360, 390]) {
       const mob = await browser.newPage({ viewport: { width, height: 800 } });
-      await mob.addInitScript((d) => {
-        if (!localStorage.getItem("pt_schedule_state_v3")) localStorage.setItem("pt_schedule_state_v3", d);
-      }, JSON.stringify(longState));
-      await mob.goto(INDEX_URL);
-      await mob.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+      await openWithSeed(mob, longState, site);
       await mob.locator(".compare-candidate-btn").first().click();
       const scrollWidth = await mob.evaluate(() => document.documentElement.scrollWidth);
       assert(scrollWidth <= width, `${width}px 화면에서 페이지가 가로로 스크롤됨 (scrollWidth ${scrollWidth})`);
@@ -344,15 +532,10 @@ async function main() {
         if (msg.text().startsWith("[재최적화]")) log.push(JSON.parse(msg.text().slice("[재최적화] ".length)));
       });
       const seed = buildReoptSeedState(layout);
-      await page.addInitScript(
-        ({ key, data, scale }) => {
-          if (scale) window.__PT_TEST_BUDGET_SCALE__ = scale;
-          if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(data));
-        },
-        { key: STORAGE_KEY, data: seed, scale: FULL_BUDGET_A ? 0 : A_BUDGET_SCALE }
-      );
-      await page.goto(INDEX_URL);
-      await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+      await page.addInitScript((scale) => {
+        if (scale) window.__PT_TEST_BUDGET_SCALE__ = scale;
+      }, FULL_BUDGET_A ? 0 : A_BUDGET_SCALE);
+      await openWithSeed(page, seed, site);
       return { page, log, seed };
     };
     const { page: ro, log: reoptLog, seed: reoptSeed } = await openReoptPage("default");
@@ -449,7 +632,7 @@ async function main() {
     if (await undoBtn.isEnabled()) await undoBtn.click();
     else failures.push("적용 뒤 편집 취소(되돌리기) 버튼이 비활성");
     assert((await editedIds()) === seedJson, "되돌리기로 재최적화 전 카드가 복원되지 않음");
-    await ro.reload();
+    await reloadChecked(ro, "재최적화 되돌리기 뒤 새로고침", failures);
     await ro.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
     assert((await editedIds()) === seedJson, "되돌린 카드가 새로고침 뒤 유지되지 않음");
 
@@ -468,8 +651,93 @@ async function main() {
     assert(levelsRun(tightLog).endsWith("full×1"), "전체 일정 다시 탐색이 운영 예산으로 돌지 않음: " + levelsRun(tightLog));
     assert(!(await tightPanel.isVisible()), "전체 탐색에서도 나은 결과가 없으면 패널을 닫아야 함");
     assert((await tp.locator("#generateHint3").innerText()).includes("지금보다 나은 배치를 찾지 못했습니다"), "전체 탐색 실패 안내가 없음");
+
+    // 수동 편집·설정 입력의 화면 연결(판정 정책 자체는 unit이 맡는다): 드래그를 놓으면 근무 시간 검사가 적용되고,
+    // 메뉴로 회원을 교체하면 카드의 미배정 표시가 바뀌고, 입력칸·선택창은 보정된 값을 보여준다.
+    const me = await browser.newPage();
+    const meOpen = await openManualEditPage(me, site, failures);
+    const meCard = async () => (await readState(me)).candidates[0];
+    const toastTexts = () => me.locator(".toast").allTextContents();
+    const assignedBefore = JSON.stringify((await meCard()).assigned);
+    await me
+      .locator("#candidates3 .cal-block", { hasText: "회원A" })
+      .first()
+      .dragTo(me.locator('#candidates3 .cal-cell[data-day="1"][data-slot="0"]'));
+    assert(JSON.stringify((await meCard()).assigned) === assignedBefore, "근무하지 않는 화요일로 드래그한 수업이 옮겨짐");
+    assert((await toastTexts()).some((t) => t.includes("근무 가능 시간 밖")), "근무 시간 밖 드래그에 안내가 없음: " + JSON.stringify(await toastTexts()));
+    await checkSwapReload(me, meOpen, "http-1", failures);
+    await me.click('.nav-item[data-page="settings"]');
+    const travelInput = me.locator(".travel-min-input").first();
+    await travelInput.fill("");
+    await travelInput.dispatchEvent("change");
+    assert((await travelInput.inputValue()) === "30" && (await readState(me)).travelTimes["loc1|loc2"] === 30, "이동 시간 빈칸이 원래 값(30분)으로 되돌아가지 않음");
+    await travelInput.fill("0");
+    await travelInput.dispatchEvent("change");
+    assert((await readState(me)).travelTimes["loc1|loc2"] === 0, "이동 시간 0을 입력했는데 0분으로 저장되지 않음");
+    const monSelects = me.locator(".avail-day-row").first().locator("select");
+    await monSelects.nth(0).selectOption("33"); // 17:30
+    await monSelects.nth(1).selectOption("30"); // 17:00
+    const endShown = await monSelects.nth(1).evaluate((sel) => (sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : ""));
+    assert(endShown === "18:00", "근무 종료를 시작보다 이르게 고르면 선택창이 18:00을 보여야 함 (실제: '" + endShown + "')");
+    await me.close();
+    // 새 컨텍스트의 첫 문서에서 저장 → 새로고침하는 조건을 반복한다(CI에서 간헐적으로 저장소가 비어 있던 단계).
+    for (let i = 2; i <= SWAP_REPEAT; i++) {
+      const rp = await browser.newPage();
+      await checkSwapReload(rp, await openManualEditPage(rp, site, failures), "http-" + i, failures);
+      await rp.close();
+    }
+
+    // inputKey가 없는 옛 저장분에 정상 수정·확정 후보와 근무 시간 위반 후보(근무 안 하는 화요일)가 섞여 있으면
+    // 위반 후보만 비우고, 정상 후보는 확정 상태 그대로 새로고침 뒤에도 남는다. 안내는 입력 변경이 아니라 필수 조건 위반이다.
+    const lg = await browser.newPage();
+    lg.on("pageerror", (err) => failures.push("옛 저장분 페이지 런타임 에러: " + err.message));
+    const lgSeed = buildManualEditSeedState();
+    const lgAt = (day) => ({ id: "A" + day + "_0", memberId: "A", day, startSlot: 0, duration: 60, locationId: "loc1" });
+    const lgMemberB = lgSeed.members[1];
+    lgSeed.schedule3Result = { candidateAList: [{ assigned: [lgAt(0), lgAt(2)], unassignedMembers: [lgMemberB], confirmedIds: ["A0_0"] }, null, null] };
+    lgSeed.candidates = [{ assigned: [lgAt(0), lgAt(1)], unassignedMembers: [lgMemberB], confirmedIds: ["A1_0"], strategyIndex: 0 }];
+    await openWithSeed(lg, lgSeed, site);
+    const lgHint = await lg.locator("#generateHint3").innerText();
+    assert(lgHint.includes("필수 조건(근무 가능 시간에만 배정한다)을 어긴 후보 1개만") && !lgHint.includes("변경되어"), "옛 저장분 위반 안내가 다름: " + lgHint);
+    for (const when of ["로드 직후", "새로고침 후"]) {
+      const st = await readState(lg);
+      const kept = st.schedule3Result.candidateAList[0];
+      assert(st.candidates.length === 0 && kept && JSON.stringify(kept.confirmedIds) === JSON.stringify(["A0_0"]), when + ": 위반 후보만 비우고 정상 확정 후보를 남겨야 함: " + JSON.stringify(st.schedule3Result) + JSON.stringify(st.candidates));
+      assert(typeof st.schedule3Result.inputKey === "string", when + ": 현재 입력 키가 저장되지 않음");
+      assert((await lg.locator("#candidates3 .candidate-card").count()) === 1, when + ": 정상 후보 카드가 보이지 않음");
+      if (when === "로드 직후") {
+        await reloadChecked(lg, "옛 저장분 새로고침", failures);
+        await lg.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+      }
+    }
+    await lg.close();
+
+    // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-file-"));
+    try {
+      fs.writeFileSync(path.join(tmp, "blank.html"), BLANK_HTML);
+      const fileSite = { blank: pathToFileURL(path.join(tmp, "blank.html")).href, index: pathToFileURL(path.join(ROOT, "index.html")).href };
+      const profile = path.join(tmp, "profile");
+      let ctx = await chromium.launchPersistentContext(profile);
+      const fp = ctx.pages()[0] || (await ctx.newPage());
+      await checkSwapReload(fp, await openManualEditPage(fp, fileSite, failures), "file", failures);
+      await ctx.close();
+      ctx = await chromium.launchPersistentContext(profile);
+      const rp = ctx.pages()[0] || (await ctx.newPage());
+      await rp.goto(fileSite.index);
+      const after = await rp.evaluate(({ key, logKey }) => ({ url: location.href, origin: location.origin, keys: Object.keys(localStorage), raw: localStorage.getItem(key), logged: localStorage.getItem(logKey) }), { key: STORAGE_KEY, logKey: SEED_LOG_KEY });
+      if (!after.logged) failures.push("[환경 저장소 유실] file:// 브라우저 재실행: 저장소가 비어 있음 " + JSON.stringify({ url: after.url, origin: after.origin, keys: after.keys }));
+      else {
+        const c = after.raw && JSON.parse(after.raw).candidates[0];
+        assert(JSON.stringify(c && swapSummary(c)) === JSON.stringify(SWAPPED), "file:// 브라우저 재실행 후 저장값(배정·미배정·확정)이 다름: " + JSON.stringify(c && swapSummary(c)));
+      }
+      await ctx.close();
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   } finally {
     await browser.close();
+    server.close();
   }
 
   if (failures.length > 0) {
@@ -479,7 +747,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 새로고침·브라우저 재실행 유지, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 

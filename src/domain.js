@@ -10,7 +10,10 @@ import {
   MEMBER_COLOR_SHADE_STEPS,
   shadeColor,
 } from "./constants.js";
-import { currentOnceLimitIds } from "./selectionOverride.js";
+import {
+  currentExcludedIds,
+  currentOnceLimitIds,
+} from "./selectionOverride.js";
 
 // 생성 엔진이 신청·노드마다 아주 많이 부르므로 id → 배열 위치 색인을 둔다. 회원 목록은
 // 추가(unshift)·삭제(filter 재할당) 등 어떤 식으로든 바뀔 수 있으므로 색인을 믿지 않고, 찾은
@@ -184,14 +187,50 @@ export function pairKey(idA, idB) {
   return a < b ? a + "|" + b : b + "|" + a;
 }
 
+// 저장된 이동 시간 값의 유효성: 0 이상의 유한한 분. 0은 "모름"이 아니라 "이동 시간 0분"으로
+// 명시한 값이다 — 값이 없거나 이 조건을 벗어나면 travelMinutes가 연결 불가로 본다.
+export function isValidTravelMinutes(v) {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0;
+}
+
+// 이동 시간 입력칸의 글자를 저장할 분으로 바꾼다. 빈칸·숫자 아님·음수·소수는 null(거부) — 빈칸을
+// 0분으로 바꾸면 "모름(연결 불가)"이 "이동 시간 없음"으로 뒤바뀌어 불가능한 연속 수업이 생긴다.
+export function parseTravelMinutesInput(text) {
+  const trimmed = String(text == null ? "" : text).trim();
+  if (trimmed === "") return null;
+  const v = Number(trimmed);
+  return Number.isInteger(v) && isValidTravelMinutes(v) ? v : null;
+}
+
 export function travelMinutes(locIdA, locIdB) {
   if (!locIdA || !locIdB || locIdA === locIdB) return 0;
   const v = state.travelTimes[pairKey(locIdA, locIdB)];
   // 서로 다른 지점의 이동 시간이 없거나 손상된 경우 0분으로 간주하면 물리적으로 불가능한
   // 연속 수업이 생길 수 있다. 계산상 연결 불가능(Infinity)으로 취급해 해당 전이를 막는다.
-  return typeof v === "number" && Number.isFinite(v) && v >= 0
-    ? v
-    : Infinity;
+  return isValidTravelMinutes(v) ? v : Infinity;
+}
+
+// 배정 대상 회원(미배정 판정의 기준): 실제 존재하고, 신청을 하나라도 냈고, 제외("미배정 회원"으로
+// 지정)되지 않은 회원. 제외는 배정 실패가 아니라 의도적인 것이라 미배정에 넣지 않는다. 회원 목록 순서.
+export function scheduleTargetMemberIds() {
+  const excluded = new Set(currentExcludedIds());
+  const submitted = new Set(state.requests.map((r) => r.memberId));
+  return state.members
+    .filter((m) => submitted.has(m.id) && !excluded.has(m.id))
+    .map((m) => m.id);
+}
+
+// 후보의 unassignedMembers는 항상 이것으로 만든다: 배정 대상 중 assigned에 수업이 하나도 없는 회원.
+// 반복 호출하는 엔진은 targetIds(scheduleTargetMemberIds 결과, 배열·Set)를 한 번 만들어 넘긴다.
+export function unassignedMembersFor(
+  assigned,
+  targetIds = scheduleTargetMemberIds(),
+) {
+  const assignedIds = new Set(assigned.map((r) => r.memberId));
+  return [...targetIds]
+    .filter((id) => !assignedIds.has(id))
+    .map((id) => memberById(id))
+    .filter(Boolean);
 }
 
 // SOLO_TRAVEL_LOCATION_NAMES와 같은 원칙: 이름이 정확히 하나씩만 매칭돼야 규칙이 활성화된다

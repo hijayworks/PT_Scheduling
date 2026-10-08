@@ -9,7 +9,11 @@ import {
 } from "../constants.js";
 import { cellKey, minutesLabel, uid, showToast } from "../utils.js";
 import { state, runtime, saveState } from "../state.js";
-import { pairKey } from "../domain.js";
+import {
+  pairKey,
+  isValidTravelMinutes,
+  parseTravelMinutesInput,
+} from "../domain.js";
 import { resetCandidateSession } from "../engine/greedy.js";
 import { renderSchedule3Result, generateHint3El } from "../schedule3.js";
 import {
@@ -231,9 +235,19 @@ export function renderTravelMatrix() {
           : "";
       input.placeholder = "분";
       input.addEventListener("change", () => {
-        const v = parseInt(input.value, 10);
-        state.travelTimes[key] = isNaN(v) || v < 0 ? 0 : v;
-        input.value = state.travelTimes[key];
+        // 빈칸·잘못된 값은 저장하지 않고 원래 값으로 되돌린다 — 0분은 0을 직접 입력해야 한다.
+        const v = parseTravelMinutesInput(input.value);
+        if (v === null) {
+          const prev = state.travelTimes[key];
+          input.value = isValidTravelMinutes(prev) ? prev : "";
+          showToast(
+            "이동 시간은 0 이상의 정수(분)로 입력해주세요 (이동 시간이 없으면 0)",
+            "error",
+          );
+          return;
+        }
+        state.travelTimes[key] = v;
+        input.value = v;
         saveState();
         showToast("이동 시간이 저장되었습니다", "success");
         invalidateCandidates();
@@ -341,8 +355,7 @@ export function businessHoursGridRange() {
 
 // 근무 가능 시간(기본 설정) 전용 시간 선택창: 시작은 13:00~22:00, 종료는 14:00~24:00을
 // 30분 단위로 보여주되, 23:00~24:00 구간만 10분 단위로 더 촘촘하게 보여준다.
-export function fillAvailabilityTimeSelect(sel, kind) {
-  sel.innerHTML = "";
+export function availabilityTimeOptionSlots(kind) {
   const slots = [];
   if (kind === "start") {
     for (let m = 12 * 60; m <= 22 * 60; m += 30)
@@ -354,12 +367,33 @@ export function fillAvailabilityTimeSelect(sel, kind) {
     for (let m = fineFromMin + 10; m <= 24 * 60; m += 10)
       slots.push((m - START_MIN) / SLOT_MIN);
   }
+  return slots;
+}
+
+// selected가 선택 목록에 없는 값(백업 복원 등으로 저장된 임의 범위)이면 그 값도 넣어, 선택창이
+// 빈칸이 아니라 실제 저장된 시각을 보여주게 한다.
+export function fillAvailabilityTimeSelect(sel, kind, selected) {
+  sel.innerHTML = "";
+  const slots = availabilityTimeOptionSlots(kind);
+  if (Number.isInteger(selected) && !slots.includes(selected)) {
+    slots.push(selected);
+    slots.sort((a, b) => a - b);
+  }
   slots.forEach((s) => {
     const opt = document.createElement("option");
     opt.value = String(s);
     opt.textContent = minutesLabel(START_MIN + s * SLOT_MIN);
     sel.appendChild(opt);
   });
+  if (Number.isInteger(selected)) sel.value = String(selected);
+}
+
+// 종료가 시작보다 늦지 않으면 종료 선택 목록에서 시작보다 늦은 가장 이른 시각으로 맞춘다(목록에
+// 없는 값으로 맞추면 선택창이 빈칸이 된다). 그런 시각이 없으면 null — 범위를 거부한다.
+export function correctedAvailabilityEnd(start, end) {
+  if (end > start) return end;
+  const next = availabilityTimeOptionSlots("end").find((s) => s > start);
+  return next === undefined ? null : next;
 }
 
 export function renderAvailabilityList() {
@@ -389,10 +423,16 @@ export function renderAvailabilityList() {
     sep.className = "sep";
     sep.textContent = "~";
     const endSel = document.createElement("select");
-    fillAvailabilityTimeSelect(startSel, "start");
-    fillAvailabilityTimeSelect(endSel, "end");
-    startSel.value = String(range ? range.start : DEFAULT_BUSINESS_START_SLOT);
-    endSel.value = String(range ? range.end : DEFAULT_BUSINESS_END_SLOT);
+    fillAvailabilityTimeSelect(
+      startSel,
+      "start",
+      range ? range.start : DEFAULT_BUSINESS_START_SLOT,
+    );
+    fillAvailabilityTimeSelect(
+      endSel,
+      "end",
+      range ? range.end : DEFAULT_BUSINESS_END_SLOT,
+    );
     startSel.disabled = !isOn;
     endSel.disabled = !isOn;
     timeWrap.appendChild(startSel);
@@ -400,15 +440,24 @@ export function renderAvailabilityList() {
     timeWrap.appendChild(endSel);
 
     function applyRange() {
-      let start = parseInt(startSel.value, 10);
-      let end = parseInt(endSel.value, 10);
-      if (end <= start) {
-        end = start + 1;
-        endSel.value = String(end);
+      const start = parseInt(startSel.value, 10);
+      const picked = parseInt(endSel.value, 10);
+      const end = correctedAvailabilityEnd(start, picked);
+      if (end === null) {
+        renderAvailabilityList(); // 저장된 범위로 선택창을 되돌린다
+        showToast(d + "요일 근무 종료 시간이 시작보다 늦어야 합니다", "error");
+        return;
       }
+      endSel.value = String(end);
       setDayRange(di, start, end);
       saveState();
-      showToast(d + "요일 근무 가능 시간이 저장되었습니다", "success");
+      const endText = minutesLabel(START_MIN + end * SLOT_MIN);
+      showToast(
+        d +
+          "요일 근무 가능 시간이 저장되었습니다" +
+          (end !== picked ? " (종료를 " + endText + "로 맞춤)" : ""),
+        "success",
+      );
       invalidateCandidates();
     }
 

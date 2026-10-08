@@ -9,3 +9,6 @@ schedul.text
 
 # 로컬 인수인계 문서 — 저장소에는 올리지 않음
 HANDOFF.md
+
+# smoke 실패 진단 기록(CI 아티팩트로 업로드)
+test-artifacts/

@@ -23,6 +23,7 @@ import {
   travelMinutes,
   soloTravelMemberIds,
   breaksSoloTravel,
+  unassignedMembersFor,
   isOnceLimitEligible,
   appendOnceLimitMemberLabel,
   compareOnceLimitMembers,
@@ -42,6 +43,7 @@ import {
   MAX_POOL_VARIANTS,
   candidateLocationsForRequest,
   dayChainViolation,
+  isWithinAvailability,
   totalTravelCount,
   totalInefficientMoveCount,
 } from "./engine/greedy.js";
@@ -58,6 +60,7 @@ import { setIdleFirst } from "./engine/chainDpCore.js";
 import {
   scheduleMetrics,
   scheduleViolations,
+  HARD_RULES,
 } from "./engine/scheduleQuality.js";
 import {
   selectCandidates,
@@ -221,7 +224,8 @@ export function undoManualEdit(container, onDone) {
 // 배정된 세션의 자리(요일·시작 시각·길이·지점)는 그대로 두고 사람만 newMember로 바꿔치기한다.
 // moveSession/attemptSwap과 마찬가지로, 재생성해도 이 자리가 풀리지 않도록 새 회원의 신청
 // id를 confirmedIds에 자동으로 넣는다(사람이 손댄 자리는 알고리즘이 건드리지 않는다는
-// 원칙 — 세 "수동 편집" 함수 모두 같은 보호 수준을 준다).
+// 원칙 — 세 "수동 편집" 함수 모두 같은 보호 수준을 준다). 사람이 바뀌므로 미배정 명단은 바뀐
+// 배정 기준으로 다시 만든다(새 회원은 빠지고, 마지막 수업을 잃은 원래 회원은 들어간다).
 export function swapSessionMember(container, req, newMember, onDone) {
   const newReq = state.requests.find(
     (r) =>
@@ -242,6 +246,7 @@ export function swapSessionMember(container, req, newMember, onDone) {
     duration: req.duration,
     locationId: req.locationId,
   };
+  container.unassignedMembers = unassignedMembersFor(container.assigned);
   if (!Array.isArray(container.confirmedIds)) container.confirmedIds = [];
   container.confirmedIds = container.confirmedIds.filter((id) => id !== req.id);
   container.confirmedIds.push(newReq.id);
@@ -271,8 +276,10 @@ export function findOccupyingAssigned(
   );
 }
 
-// 수동 이동 하나의 회원 단위 검사: (1) 그 자리에 신청 이력이 있는지 → (2) 그 요일에 이 회원의
-// 다른 배정이 없는지(1일 최대 1회) → (3) 그 자리에서 지점을 그대로 쓸 수 있는지. ignoreIds의
+// 수동 이동 하나의 회원 단위 검사: (1) 그 자리에 신청 이력이 있는지 → (2) 수업 전체(시작~종료)가
+// 근무 가능 시간 안인지(자동 생성과 같은 isWithinAvailability — 근무 시간 밖 신청도 저장될 수 있다)
+// → (3) 그 요일에 이 회원의 다른 배정이 없는지(1일 최대 1회) → (4) 그 자리에서 지점을 그대로 쓸 수
+// 있는지. ignoreIds의
 // 배정은 "이미 자리를 비운 것"으로 친다(맞바꾸기에서 상대가 곧 비울 자리). 앞뒤 수업과의 간격 등
 // 요일 체인 규칙은 여기서 보지 않고 editedDaysViolation이 최종 결과로 검사한다.
 function planMove(container, req, targetDay, targetStartSlot, ignoreIds) {
@@ -288,6 +295,12 @@ function planMove(container, req, targetDay, targetStartSlot, ignoreIds) {
     return {
       ok: false,
       message: "이 회원은 해당 시간에 신청한 이력이 없습니다",
+    };
+  }
+  if (!isWithinAvailability(newReq)) {
+    return {
+      ok: false,
+      message: "근무 가능 시간 밖이라 이 자리로 옮길 수 없습니다",
     };
   }
   const sameDayConflict = container.assigned.some(
@@ -1033,22 +1046,35 @@ export function isUserEdited(result) {
 
 // 후보는 생성 당시 입력(schedule3Result.inputKey)과 현재 입력(candidateInputKey)이 같을 때만 유효하다.
 // 다르면 사용자가 수정한 후보까지 모두 비운다 — 사람이 손댔다고 해서 더 이상 맞지 않는 스케줄을 남기지
-// 않는다. inputKey가 없는 저장분(이 정책 이전 데이터)은 현재 입력으로 하드 제약을 다시 검사해 모두
-// 통과하면 현재 입력 기준으로 인정하고, 하나라도 위반하면 비운다. 비웠으면 true.
+// 않는다. inputKey가 없는 저장분(이 정책 이전 데이터)은 현재 입력 키를 기록하고, 입력이 같은 경우와
+// 똑같이 후보마다 하드 제약을 다시 검사한다. 입력이 같아도 수동 편집 검사가 빠져 있던 시절의 저장분이
+// 하드 제약을 어길 수 있으므로 dropInvalidCandidates로 위반 후보만 비운다. 비웠으면 true.
 export function dropStaleCandidates() {
   const slots = runtime.schedule3Result.candidateAList
     .concat(runtime.candidates)
     .filter(Boolean);
   if (slots.length === 0) return false;
+  // 미배정 명단은 배정에서 파생되는 값이라, 저장분이 어긋나 있으면 버리지 않고 다시 계산한다.
+  const idKey = (list) =>
+    list
+      .map((m) => m.id)
+      .sort()
+      .join();
+  let repaired = false;
+  slots.forEach((r) => {
+    const fresh = unassignedMembersFor(r.assigned);
+    if (idKey(r.unassignedMembers || []) !== idKey(fresh)) {
+      r.unassignedMembers = fresh;
+      repaired = true;
+    }
+  });
   const key = candidateInputKey();
   const saved = runtime.schedule3Result.inputKey;
-  if (saved === key) return false;
-  if (
-    saved === undefined &&
-    slots.every((r) => scheduleViolations(r).length === 0)
-  ) {
+  if (saved === key || saved === undefined) {
+    // 키가 없으면 생성 당시 입력을 알 수 없으니 현재 입력 기준으로 후보마다 다시 검사한다.
     runtime.schedule3Result.inputKey = key;
-    saveState();
+    if (dropInvalidCandidates()) return true;
+    if (repaired || saved === undefined) saveState();
     return false;
   }
   clearRuntimeScheduleCandidates();
@@ -1057,6 +1083,47 @@ export function dropStaleCandidates() {
   saveState();
   generateHint3El.textContent =
     "회원·신청·설정이 변경되어 기존 후보(내가 수정한 후보 포함)가 초기화되었습니다. 후보를 다시 생성해주세요.";
+  return true;
+}
+
+// 현재 입력 기준으로 하드 제약(근무 가능 시간 등, scheduleViolations)을 어긴 후보만 비우고 알린다 —
+// 정상 후보는 사용자가 수정·확정한 것도 그대로 둔다. 그 슬롯의 동점 풀도 함께 비운다(풀의 배치는
+// 손대기 전 것이라 남겨두면 비운 카드가 다른 배치로 되살아난다). 비웠으면 true.
+function dropInvalidCandidates() {
+  const rules = new Set();
+  const isInvalid = (r) => {
+    const violations = scheduleViolations(r);
+    violations.forEach((v) => rules.add(v.rule));
+    return violations.length > 0;
+  };
+  let dropped = 0;
+  runtime.schedule3Result.candidateAList.forEach((r, i) => {
+    if (r && isInvalid(r)) {
+      runtime.schedule3Result.candidateAList[i] = null;
+      delete candidateAPools[i];
+      dropped++;
+    }
+  });
+  const keptBC = runtime.candidates.filter((r) => !(r && isInvalid(r)));
+  if (keptBC.length !== runtime.candidates.length) {
+    dropped += runtime.candidates.length - keptBC.length;
+    // 후보B·C 풀은 candidates 배열 위치를 따르므로, 위치가 당겨지면 함께 비운다(카드는 그대로 보인다).
+    Object.keys(candidatePools).forEach((k) => delete candidatePools[k]);
+    runtime.candidates = keptBC;
+  }
+  if (dropped === 0) return false;
+  renderSchedule3Result();
+  saveState();
+  const reasons = [...rules].map((rule) => HARD_RULES[rule]).join(", ");
+  // 입력 변경 무효화(dropStaleCandidates)와 구분되게, 입력은 그대로이고 위반 후보만 비웠다고 알린다.
+  const kept =
+    runtime.schedule3Result.candidateAList.some(Boolean) ||
+    runtime.candidates.length > 0;
+  generateHint3El.textContent = kept
+    ? `저장된 후보 중 필수 조건(${reasons})을 어긴 후보 ${dropped}개만 초기화했습니다. ` +
+      "나머지 후보(내가 수정한 후보 포함)는 그대로 두었습니다."
+    : `저장된 후보가 모두 필수 조건(${reasons})을 어겨 초기화되었습니다. 후보를 다시 생성해주세요.`;
+  showToast(`필수 조건을 어긴 후보 ${dropped}개를 초기화했습니다`, "error");
   return true;
 }
 
@@ -1479,7 +1546,15 @@ export function renderSchedule3Result() {
 }
 
 // 생성·재최적화 공통 진행 표시. 취소 버튼은 runtime.generationCancelRequested를 켠다.
+// 카드의 "나머지 일정 다시 최적화" 버튼은 그릴 때 generationInProgress를 읽으므로, 생성 중에 그려진
+// 카드는 생성이 끝나도 비활성으로 남는다 — 진행 표시를 켜고 끌 때 함께 맞춘다.
+function setCardReoptButtonsDisabled(disabled) {
+  candidates3El
+    .querySelectorAll(".reopt-btn")
+    .forEach((b) => (b.disabled = disabled));
+}
 function startGenerationProgress(label, cancelLabel) {
+  setCardReoptButtonsDisabled(true);
   generateBtn3El.disabled = true;
   generateBtn3El.classList.add("loading");
   generateBtn3LabelEl.textContent = label;
@@ -1506,6 +1581,7 @@ function endGenerationProgress() {
   generateBtn3CancelEl.hidden = true;
   runtime.generationInProgress = false;
   runtime.generationCancelRequested = false;
+  setCardReoptButtonsDisabled(false);
   releaseWakeLock();
 }
 
