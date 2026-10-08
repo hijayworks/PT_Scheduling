@@ -78,6 +78,36 @@ function buildReoptSeedState(layout = "default") {
   };
 }
 
+// 알림(utils.showToast)이 만드는 DOM(.toast-container > .toast.toast-{type}.show)을 그대로 붙여 공통 알림 스타일을
+// 잰다. showToast는 번들 밖으로 노출되지 않고 2.2초 뒤 사라지므로 같은 구조를 직접 만든다.
+const TOAST_SAMPLES = [
+  "저장됨",
+  "더 넓게 찾은 결과를 비교해 고를 수 있습니다",
+  "백업 코드를 만들었습니다. 백업 비밀번호도 함께 기억해주세요.",
+  "https://example.com/" + "averyveryverylongtokenwithoutanyspaces".repeat(4),
+];
+async function measureToasts(page, messages) {
+  return page.evaluate((messages) => {
+    const box = document.createElement("div");
+    box.className = "toast-container";
+    document.body.appendChild(box);
+    const els = messages.map((m) => {
+      const el = document.createElement("div");
+      el.className = "toast toast-success show";
+      el.textContent = m;
+      box.appendChild(el);
+      return el;
+    });
+    const pageScroll = document.documentElement.scrollWidth;
+    const out = els.map((el, i) => {
+      const r = el.getBoundingClientRect();
+      return { message: messages[i], left: r.left, right: r.right, width: r.width, height: r.height, overflow: el.scrollWidth - el.clientWidth, pageScroll };
+    });
+    box.remove();
+    return out;
+  }, messages);
+}
+
 async function readState(page) {
   const raw = await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY);
   return raw ? JSON.parse(raw) : null;
@@ -290,8 +320,18 @@ async function main() {
       await mob.locator(".compare-candidate-btn").first().click();
       const scrollWidth = await mob.evaluate(() => document.documentElement.scrollWidth);
       assert(scrollWidth <= width, `${width}px 화면에서 페이지가 가로로 스크롤됨 (scrollWidth ${scrollWidth})`);
+      for (const t of await measureToasts(mob, TOAST_SAMPLES)) {
+        assert(t.left >= 0 && t.right <= width, `${width}px 화면에서 알림이 화면 밖으로 잘림 (${t.left}~${t.right}): ${t.message}`);
+        assert(t.overflow <= 0, `${width}px 화면에서 알림 문구가 줄바꿈되지 않고 넘침 (${t.overflow}px): ${t.message}`);
+        assert(t.pageScroll <= width, `${width}px 화면에서 알림 때문에 페이지가 가로로 스크롤됨 (scrollWidth ${t.pageScroll})`);
+      }
       await mob.close();
     }
+    // 데스크톱에서는 기존처럼 문구 길이만큼(최소 200px) 한 줄로 나온다.
+    const [shortToast, ...longToasts] = await measureToasts(cmp, TOAST_SAMPLES.slice(0, 3));
+    assert(shortToast.width === 200, `데스크톱 짧은 알림 폭이 최소 200px이 아님 (${shortToast.width})`);
+    for (const t of longToasts)
+      assert(t.width > 200 && t.height === shortToast.height, `데스크톱에서 알림이 문구 길이만큼 한 줄로 나오지 않음 (폭 ${t.width}, 높이 ${t.height}): ${t.message}`);
 
     // 재최적화(5b-2b): 취소(카드 그대로) → L1 변경 최소화 제안(전체 자동 실행 없음) → 버리기 → 다시 → 전체 일정
     // 다시 탐색(더 나은 결과는 기존 제안과 함께 비교) → 넓은 결과 적용(확정은 사용자 고정만) → 되돌리기 → 새로고침.

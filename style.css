@@ -1308,7 +1308,9 @@ body {
   font-size: 13.5px;
   font-weight: 600;
   text-align: center;
-  white-space: nowrap;
+  /* 폭은 문구 길이(max-content)를 따르되 화면 폭을 넘으면 줄바꿈한다. 한국어는 어절 단위로, 공백 없는 긴 문자열은 아무 데서나 끊는다. */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
   box-shadow: 0 8px 24px rgba(20, 24, 40, 0.22);
   opacity: 0;
   transform: translateY(10px);
