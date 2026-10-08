@@ -16,6 +16,13 @@ export {
 } from "../../src/domain.js";
 export { state } from "../../src/state.js";
 export {
+  MAX_SESSIONS_PER_MEMBER,
+  MAX_TRAVELS_PER_DAY,
+  SESSION_DURATION_MIN,
+  CONSULT_DURATION_MIN,
+  DAYS,
+} from "../../src/constants.js";
+export {
   mulberry32,
   shuffled,
   isSchedule2ResultBetter,
@@ -45,6 +52,8 @@ export {
   revertUnneededChanges,
   byTravelThenSignature,
   MAX_CARD_VARIANTS,
+  MAX_CANDIDATE_CARDS,
+  CANDIDATE_ROLES,
   pickVariants,
 } from "../../src/engine/candidateSelection.js";
 export { setIdleFirst } from "../../src/engine/chainDpCore.js";
@@ -61,6 +70,7 @@ export {
 } from "../../src/engine/greedy.js";
 export {
   parseBulkImportLine,
+  describeDaySpecs,
   hourMarkToStartSlot,
   addDesiredRange,
   mergeRequestRuns,

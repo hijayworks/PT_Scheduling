@@ -864,6 +864,49 @@ test("일괄 등록: (지점) 표기", () => {
   assertEqual(unknown.days, []);
   assert(unknown.errors.length === 1, "등록되지 않은 지점은 오류로 알리고 그 시간은 건너뜀");
 });
+// index.html 안내 문구가 실제 정책과 어긋나지 않게 한다(예전 "5678 → 각각 정시" 안내는 실제
+// 동작인 17:00~20:00 연속 구간과 달랐다).
+const indexHtml = require("fs").readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+test("일괄 등록 안내의 예시 결과는 실제 미리보기 해석과 같다", () => {
+  lib.state.locations = bulkLocations();
+  const modal = indexHtml.slice(indexHtml.indexOf('id="bulkImportStepInput"'));
+  const examples = [...modal.matchAll(/<li><code>([^<]+)<\/code> → <span>([^<]+)<\/span><\/li>/g)];
+  assert(examples.length >= 10, "예시를 찾지 못함: " + examples.length);
+  examples.forEach(([, line, expected]) => {
+    const parsed = lib.parseBulkImportLine(line);
+    assertEqual(parsed.errors.concat(parsed.warnings), [], line);
+    // 미리보기 칩("월 (마포점) 17:00~20:00")을 같은 해석끼리 요일만 묶어 한 줄로 만든다.
+    const groups = new Map();
+    parsed.days.forEach((d) => {
+      const loc = lib.state.locations.find((l) => l.id === d.locationId);
+      const text = (loc ? "(" + loc.name + ") " : "") + lib.describeDaySpecs(d.specs);
+      if (!groups.has(text)) groups.set(text, []);
+      groups.get(text).push(lib.DAYS[d.day]);
+    });
+    const actual = parsed.clearAll
+      ? "기존 가능 시간 전체 삭제"
+      : [...groups].map(([text, days]) => days.join("·") + " " + text).join(" / ");
+    assertEqual(actual, expected, line);
+  });
+});
+test("후보 조건 안내의 숫자·역할 이름은 정책값과 같다", () => {
+  const rules = indexHtml.slice(
+    indexHtml.indexOf('id="candidateRulesList3"'),
+    indexHtml.indexOf('id="excludedBlock3"'),
+  );
+  assert(rules.length > 0, "후보 조건 목록을 찾지 못함");
+  [
+    `등록 회원 ${lib.SESSION_DURATION_MIN}분, 상담 회원 ${lib.CONSULT_DURATION_MIN}분`,
+    `하루 최대 1회, 주 최대 ${lib.MAX_SESSIONS_PER_MEMBER}회`,
+    `하루 지점 간 이동은 최대 ${lib.MAX_TRAVELS_PER_DAY}회`,
+    `추천 포함 최대 ${lib.MAX_CANDIDATE_CARDS}개`,
+    "'추천'만 나올 수도",
+    // 역할 카드는 정책 순서(CANDIDATE_ROLES)대로 채워지므로 안내도 그 순서로 적는다.
+    lib.CANDIDATE_ROLES.map((r) => `'${r.label}'`).join(""),
+  ].forEach((phrase) =>
+    assert(rules.replace(/\([^)]*\)·?/g, "").includes(phrase), "후보 조건에 없음: " + phrase),
+  );
+});
 
 /* ---------------- 지점별 가능 시간 블록 합치기 ---------------- */
 // addDesiredRange로 월요일 신청을 만들고, mergeRequestRuns가 만든 블록을 "지점들 시작~끝"으로 요약한다.
@@ -1211,6 +1254,12 @@ test("후보 선정: 모든 축에서 같거나 못한 후보는 지우고, 추�
     "이동 최소·공강 최소는 추천안보다 나은 후보가 없어 만들지 않는다",
   );
   assertEqual([sel.stats.dominatedGroups, sel.stats.dominatedLayouts, sel.hidden.length], [1, 1, 0]);
+});
+test("후보 선정: 추천보다 나은 지표가 있는 후보가 없으면 추천 카드 하나만 보인다", () => {
+  qualityFixture();
+  const base = selEntry("base", SEL_BASE);
+  const worse = selEntry("worse", [["A", 0, 0, "L1"], ["B", 0, 9, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]]);
+  assertEqual(lib.selectCandidates([worse, base]).cards.map((c) => c.label), ["추천"]);
 });
 test("후보 선정: 미배정이 추천안보다 많은 대안은 Pareto여도 카드로 보이지 않고 gate 사유로 보고한다", () => {
   qualityFixture();
