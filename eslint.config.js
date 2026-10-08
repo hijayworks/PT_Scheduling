@@ -31,7 +31,7 @@ const browserGlobals = {
   atob: "readonly",
   Worker: "readonly",
   self: "readonly",
-  __PT_POLISH_WORKER_SOURCE__: "readonly" // scripts/build.js의 esbuild define
+  __PT_ENGINE_WORKER_SOURCE__: "readonly" // scripts/build.js의 esbuild define
 };
 
 const nodeGlobals = {

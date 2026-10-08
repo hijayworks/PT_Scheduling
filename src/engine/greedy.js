@@ -28,6 +28,7 @@ import {
 } from "../domain.js";
 import { currentExcludedIds } from "../selectionOverride.js";
 import { schedule2TotalIdleMinutes } from "./scheduleCompare.js";
+import { engineWorkerInit, runTasksInWorkers } from "./workerPool.js";
 
 export function requestCells(req) {
   const cells = [];
@@ -1595,7 +1596,7 @@ export function shuffledDayOrder(randomFn) {
 // 브라우저가 아예 실행하지 않으므로, 그때는 setTimeout만으로 양보해 생성이 멈추지 않고
 // (다소 느려지더라도) 계속 진행되게 한다.
 export function yieldToUI() {
-  // 다듬기 Web Worker 안에는 document(그릴 화면)가 없다 — 이벤트 루프에만 한 번 양보한다.
+  // 엔진 Web Worker 안에는 document(그릴 화면)가 없다 — 이벤트 루프에만 한 번 양보한다.
   if (typeof document === "undefined" || document.hidden) {
     return new Promise((resolve) => setTimeout(resolve, 0));
   }
@@ -1671,6 +1672,34 @@ export async function searchStrategyPool(
 // 조합을 안정적으로 찾았다 — 여유를 두어 1000회로 늘렸다(약 10분 소요, 생성3는 페이지를
 // 이동해도 백그라운드에서 계속 진행되므로 결과를 기다리는 동안 다른 메뉴를 써도 된다).
 export const INITIAL_SEARCH_ATTEMPTS = 1000;
+
+// 그리디 탐색 시도의 입력(지터·요일 순서)을 전략별 시드 난수에서 순서대로 만든다 — 0번은
+// 지터 없는 기본 시도, 1번부터는 시드 난수 시도다. 메인 스레드의 순차 실행과 엔진 워커
+// (engineWorker.js)가 이 생성기 하나를 같이 써서, 같은 (전략, 시도 번호)는 어디서 계산하든
+// 항상 같은 입력이 된다.
+export function* greedyAttemptInputs(strategyIndex, eligible, attempts) {
+  const rand = makeSeededRandom(strategyIndex + 1);
+  yield { jitter: new Map(eligible.map((r) => [r.id, 0])), dayOrder: undefined };
+  for (let i = 0; i < attempts; i++) {
+    const jitter = new Map(eligible.map((r) => [r.id, rand()]));
+    const dayOrder = shuffledDayOrder(rand);
+    yield { jitter, dayOrder };
+  }
+}
+
+// 그리디 탐색 시도는 서로 독립이고 시간 예산 없이 시드 난수로만 정해지므로(같은 입력이면 항상
+// 같은 결과), 워커끼리 CPU를 나눠 써도 결과가 바뀌지 않는다 — 다듬기(polishWorkerPool.js)와 달리
+// 코어를 넉넉히 써도 된다. 메인 스레드(화면)용 코어 하나는 남겨둔다.
+// 상한 4는 실측으로 정했다(Chromium, Intel i5-8279U 물리 4/논리 8코어, 후보B·C 전체 생성):
+// 회원 12명 167s(순차)/161s(1개)/84s(2개)/59s(4개)/58s(6개), 회원 30명 396s/384s/200s/137s/153s.
+// 워커 6개는 물리 코어를 넘어 이득이 없거나 오히려 느렸다. 결과 해시는 워커 수와 무관하게 같았다.
+// 알고리즘 튜닝값: 그리디 워커 수 상한.
+export const MAX_GREEDY_WORKERS = 4;
+export function defaultGreedyWorkerCount() {
+  const cores =
+    (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 1;
+  return Math.max(0, Math.min(MAX_GREEDY_WORKERS, cores - 1));
+}
 // "다음 후보" 시 전략당 추가로 시도해볼 조합 수. regenerateCandidate는 (generateCandidatesAsync와
 // 달리) searchStrategyPool로 그 전략 하나만의 풀을 새로 만들어 쓰므로 다른 전략 수의 영향을
 // 받지 않는다 — 초기 생성과 다른 값을 쓸 수 있도록 별도로 둔 것뿐이다.
@@ -1727,7 +1756,92 @@ export function candidateSignature(cand) {
 // onProgress(0~1)를 주기적으로 호출해가며 진행률을 알려준다. 실제로 몇 개를 만들었는지를
 // 세는 "진짜" 진행률이라, 회원 수·기기 성능과 상관없이 항상 정확하다(타이머로 흉내낸
 // 가짜 진행바가 아니다).
-export async function generateCandidatesAsync(onProgress) {
+// 전략마다 지터 없는 기본 시도 1개 + 시드 난수 시도 attempts개를 만들어, 시도 번호 순서 그대로
+// 하나의 배열(pool)로 돌려준다. 시도 번호 i = 전략 × (attempts + 1) + 전략 안의 시도 번호.
+// 가능하면 엔진 워커 여러 개로 나눠 계산하고, 결과는 항상 이 번호 자리에 넣는다 — 워커가 끝나는
+// 순서와 무관하게 pool은 순차 실행과 같은 순서가 되어, 호출하는 쪽의 최선 선택·동점 풀 구성도
+// 같다. 워커를 못 쓰거나 워커가 실패한 시도만 메인 스레드가 예전처럼 순서대로 계산한다.
+export async function buildGreedySearchPool(
+  eligible,
+  eligibleIds,
+  allMemberIds,
+  onProgress,
+  workerOptions = {},
+) {
+  const searchAttempts =
+    workerOptions.attempts !== undefined
+      ? workerOptions.attempts
+      : INITIAL_SEARCH_ATTEMPTS;
+  const perStrategy = searchAttempts + 1;
+  const totalBuilds = STRATEGIES.length * perStrategy;
+  let completed = 0;
+  const pool = await runTasksInWorkers({
+    init: engineWorkerInit("greedy", {
+      eligible,
+      eligibleIds: [...eligibleIds],
+      allMemberIds: [...allMemberIds],
+      attempts: searchAttempts,
+    }),
+    taskCount: totalBuilds,
+    taskMessage: (i) => ({
+      strategyIndex: Math.floor(i / perStrategy),
+      attempt: i % perStrategy,
+    }),
+    workerCount:
+      workerOptions.workerCount !== undefined
+        ? workerOptions.workerCount
+        : defaultGreedyWorkerCount(),
+    onTaskDone: () => {
+      completed++;
+      if (completed % PROGRESS_YIELD_EVERY === 0)
+        onProgress(completed / totalBuilds);
+    },
+    checkCancelled: checkGenerationCancelled,
+    label: "그리디",
+    createWorker: workerOptions.createWorker,
+  });
+  pool.forEach((cand) => {
+    if (cand)
+      cand.unassignedMembers = cand.unassignedMembers
+        .map(memberById)
+        .filter(Boolean);
+  });
+  if (completed < totalBuilds) {
+    for (let idx = 0; idx < STRATEGIES.length; idx++) {
+      let i = idx * perStrategy;
+      for (const input of greedyAttemptInputs(
+        idx,
+        eligible,
+        searchAttempts,
+      )) {
+        if (!pool[i]) {
+          pool[i] = buildCandidateFromStrategy(
+            idx,
+            eligible,
+            eligibleIds,
+            allMemberIds,
+            input.jitter,
+            [],
+            input.dayOrder,
+          );
+          completed++;
+          if (completed % PROGRESS_YIELD_EVERY === 0) {
+            onProgress(completed / totalBuilds);
+            await yieldToUI();
+            checkGenerationCancelled();
+          }
+        }
+        i++;
+      }
+    }
+  }
+  onProgress(1);
+  return pool;
+}
+
+// workerOptions(createWorker/workerCount/attempts)는 테스트·벤치에서 워커 구성과 시도 횟수를 바꾸기
+// 위한 것이다 — 앱은 넘기지 않는다(buildGreedySearchPool 참고).
+export async function generateCandidatesAsync(onProgress, workerOptions = {}) {
   // "미배정 회원"으로 지정된 회원은 애초에 없었던 것처럼 취급한다 — 배정 대상에서도,
   // (배정 실패가 아니라 의도적 제외이므로) 미배정 통계에서도 뺀다.
   const allMemberIds = new Set(
@@ -1751,46 +1865,13 @@ export async function generateCandidatesAsync(onProgress) {
   // 있는 전략은 그 상한을 지키는 시도만 고를 수 있다(상한 없는 전략의 결과를 그대로 가져오면
   // 그 전략의 조건을 어길 수 있으므로). 시드가 고정돼 있어 같은 데이터라면 "후보 생성하기"를
   // 몇 번 눌러도 항상 같은 결과가 나온다(재현 가능).
-  const pool = [];
-  const totalBuilds = STRATEGIES.length * (INITIAL_SEARCH_ATTEMPTS + 1);
-  let completed = 0;
-  for (let idx = 0; idx < STRATEGIES.length; idx++) {
-    const rand = makeSeededRandom(idx + 1);
-    const zeroJitter = new Map(eligible.map((r) => [r.id, 0]));
-    pool.push(
-      buildCandidateFromStrategy(
-        idx,
-        eligible,
-        eligibleIds,
-        allMemberIds,
-        zeroJitter,
-        [],
-      ),
-    );
-    completed++;
-    for (let i = 0; i < INITIAL_SEARCH_ATTEMPTS; i++) {
-      const jitter = new Map(eligible.map((r) => [r.id, rand()]));
-      const dayOrder = shuffledDayOrder(rand);
-      pool.push(
-        buildCandidateFromStrategy(
-          idx,
-          eligible,
-          eligibleIds,
-          allMemberIds,
-          jitter,
-          [],
-          dayOrder,
-        ),
-      );
-      completed++;
-      if (completed % PROGRESS_YIELD_EVERY === 0) {
-        onProgress(completed / totalBuilds);
-        await yieldToUI();
-        checkGenerationCancelled();
-      }
-    }
-  }
-  onProgress(1);
+  const pool = await buildGreedySearchPool(
+    eligible,
+    eligibleIds,
+    allMemberIds,
+    onProgress,
+    workerOptions,
+  );
 
   const builtPairs = STRATEGIES.map((strategy, idx) => {
     const myPrimary = strategyPrimary(idx);

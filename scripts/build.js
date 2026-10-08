@@ -11,7 +11,7 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const ENTRY = path.join(ROOT, "src", "main.js");
-const POLISH_WORKER_ENTRY = path.join(ROOT, "src", "engine", "polishWorker.js");
+const ENGINE_WORKER_ENTRY = path.join(ROOT, "src", "engine", "engineWorker.js");
 const OUTFILE = path.join(ROOT, "script.js");
 
 const GENERATED_HEADER =
@@ -22,12 +22,12 @@ const GENERATED_HEADER =
   "// 덮어써집니다.\n";
 
 async function main() {
-  // 후보A 다듬기 Web Worker 번들. file://로 여는 배포라 워커 스크립트를 별도 파일 URL로
-  // 띄울 수 없어(origin이 null), script.js 안에 문자열로 넣어두고 Blob URL로 띄운다
-  // (engine/polishWorkerPool.js 참고). 워커에는 메인 앱의 최상위 부수효과가 필요 없으므로
+  // 후보 생성 엔진 Web Worker 번들(다듬기·그리디 탐색). file://로 여는 배포라 워커 스크립트를
+  // 별도 파일 URL로 띄울 수 없어(origin이 null), script.js 안에 문자열로 넣어두고 Blob URL로
+  // 띄운다(engine/workerPool.js 참고). 워커에는 메인 앱의 최상위 부수효과가 필요 없으므로
   // 여기서는 트리쉐이킹을 켠다.
   const workerResult = await esbuild.build({
-    entryPoints: [POLISH_WORKER_ENTRY],
+    entryPoints: [ENGINE_WORKER_ENTRY],
     bundle: true,
     format: "iife",
     target: "es2020",
@@ -50,7 +50,7 @@ async function main() {
     // (DOM 요소 캐싱, 이벤트 리스너 등록 등)가 다 필요하다 — 트리쉐이킹이 "안 쓰는 것 같은"
     // export를 지우면서 그 주석까지 함께 지워버리는 문제가 있어 꺼둔다.
     treeShaking: false,
-    define: { __PT_POLISH_WORKER_SOURCE__: JSON.stringify(workerSource) }
+    define: { __PT_ENGINE_WORKER_SOURCE__: JSON.stringify(workerSource) }
   });
 
   const bundled = result.outputFiles.find((f) => f.path === OUTFILE);

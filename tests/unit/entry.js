@@ -29,6 +29,9 @@ export {
   totalInefficientMoveCount,
   candidateSearchScore,
   isCandidateWorse,
+  generateCandidatesAsync,
+  buildGreedySearchPool,
+  isEligibleRequest,
 } from "../../src/engine/greedy.js";
 export {
   parseBulkImportLine,

@@ -94,7 +94,7 @@ export async function releaseWakeLock() {
     }
   }
 }
-// 다듬기 Web Worker(engine/polishWorker.js)도 이 모듈을 불러오는데 워커에는 document가 없다.
+// 엔진 Web Worker(engine/engineWorker.js)도 이 모듈을 불러오는데 워커에는 document가 없다.
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && runtime.generationInProgress) {
