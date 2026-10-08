@@ -9,11 +9,10 @@ import {
   FORCE_ONCE_WEIGHT,
   COVERAGE_WEIGHT_GAP_THRESHOLD,
 } from "../constants.js";
-import { cellKey, durationToSlots, showToast } from "../utils.js";
+import { cellKey, durationToSlots } from "../utils.js";
 import {
   state,
   runtime,
-  saveState,
   GenerationCancelledError,
 } from "../state.js";
 import {
@@ -1523,8 +1522,7 @@ export function buildCandidateFromStrategy(
 // 내세우므로(strengthenSearch: "sessions"), primary가 "sessions"면 순서를 뒤집는다 — 그래야
 // 후보B가 인원 대신 수업 건수를 우선하는 자기만의 트레이드오프를 실제로 보여줄 수 있다(안
 // 그러면 항상 인원 기준으로만 비교돼 후보A와 사실상 같은 결과로 수렴해버린다). 처음 생성할
-// 때 더 나은 조합을 찾을 때(generateCandidates)와, 재생성 시 지금보다 못한 결과로 후퇴하지
-// 않게 막을 때(regenerateCandidate) 공통으로 쓴다 — 항상 그 후보 자신의 primary로 비교해야
+// 때 더 나은 조합을 찾을 때(generateCandidates) 쓴다 — 항상 그 후보 자신의 primary로 비교해야
 // 한다.
 // maxUnassigned가 주어지면(후보B의 "미배정 1명까지 허용") 그 상한을 지키는지 여부를 다른 무엇
 // 보다도 먼저 비교한다 — 안 그러면 "수업 건수 최대화"가 항상 이겨서, 상한을 어기고서라도
@@ -1637,8 +1635,8 @@ export const PROGRESS_YIELD_EVERY = 5; // 이만큼 조합을 만들 때마다 �
 // REGEN_MAX_ATTEMPTS(10)번만 새로 시도해야 했다 — 이미 만들어둔 (attempts+1)개 중에는
 // "아직 못 봤고 지금 화면보다 못하지 않은" 조합이 있어도 그냥 버려졌으므로, 재생성이 실제보다
 // 훨씬 쉽게 "더 나은 후보지를 찾지 못했습니다"로 포기해버리는 문제가 있었다. 풀 전체를
-// 돌려주면 regenerateCandidate가 이 목록 안에서 직접 찾아, 추가 계산 없이 훨씬 많은 후보
-// 중에서 고를 수 있다. randomFn으로 재현 가능한 시드 난수(makeSeededRandom)를 넘기면 항상
+// 돌려주면 호출부가 이 목록 안에서 직접 찾아, 추가 계산 없이 훨씬 많은 후보 중에서 고를 수
+// 있다. randomFn으로 재현 가능한 시드 난수(makeSeededRandom)를 넘기면 항상
 // 같은 결과가, Math.random을 넘기면 매번 다를 수 있는 결과가 나온다. onProgress(0~1)를 넘기면
 // 중간중간 진행률을 알려주면서 화면을 그릴 틈도 준다.
 export async function searchStrategyPool(
@@ -1720,20 +1718,6 @@ export function defaultGreedyWorkerCount() {
     (typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 1;
   return Math.max(0, Math.min(MAX_GREEDY_WORKERS, cores - 1));
 }
-// "다음 후보" 시 전략당 추가로 시도해볼 조합 수. regenerateCandidate는 (generateCandidatesAsync와
-// 달리) searchStrategyPool로 그 전략 하나만의 풀을 새로 만들어 쓰므로 다른 전략 수의 영향을
-// 받지 않는다 — 초기 생성과 다른 값을 쓸 수 있도록 별도로 둔 것뿐이다.
-export const REGENERATE_SEARCH_ATTEMPTS = 25;
-
-// strategyIndex별로 "이미 보여준 배정 결과"를 기록해, 재생성 시 똑같은 조합이 다시 나오는지
-// 판별한다. 배정 결과(assigned)를 이루는 신청 id 집합을 그대로 서명으로 쓴다 — 같은
-// 신청 조합이면 같은 서명이 나온다. (페이지를 새로고침하면 초기화되는 세션 한정 기록.)
-export const candidateHistory = {}; // strategyIndex -> Set(signature)
-// strategyIndex별로, 재생성으로 덮어쓰기 전의 이전 후보를 순서대로 쌓아둔다 — "이전 후보
-// 다시보기" 버튼으로 되돌아갈 수 있게(여러 번 재생성했으면 여러 단계 되돌아갈 수 있다).
-// candidateHistory와 마찬가지로 새로고침하면 초기화되는 세션 한정 기록.
-export const candidateUndoStack = {}; // strategyIndex -> Candidate[]
-
 // "배치 페이저"용: 미배정/수업 건수/이동 횟수(후보A는 이동 시간·빈 시간까지) 지표가 완전히
 // 동점인 배치를 최대 이만큼만 서로 다른 배정(서명 기준)으로 모아둔다 — 화면이 지저분해지지
 // 않게 상한을 둔다.
@@ -1748,19 +1732,15 @@ export const TRAVEL_VALUE_MINUTES = 60;
 export const SESSION_VALUE_MINUTES = TRAVEL_VALUE_MINUTES;
 // strategyIndex별 동점 배치 풀(후보B/C). runtime.candidates[strategyIndex]는 항상 이 풀의 한 항목과
 // 같은 객체 참조를 가리킨다 — 페이저가 pool.indexOf(현재 후보)로 현재 위치를 찾기 때문이다.
-// candidateHistory와 마찬가지로 저장하지 않는 세션 한정 기록(새로고침하면 초기화).
+// 저장하지 않는 세션 한정 기록(새로고침하면 초기화).
 export const candidatePools = {}; // strategyIndex -> Candidate[]
 // 후보A-1/A-2/A-3(체인 DP) 카드별 동점 배치 풀. schedule3Result.candidateAList[i]는 항상
 // candidateAPools[i]의 한 항목과 같은 객체 참조를 가리킨다. 세션 한정 기록.
 export const candidateAPools = {}; // 카드 인덱스(0/1/2) -> Candidate[]
 
-// 위 네 기록을 모두 비운다("전체 재생성" 등 지금까지의 재생성/되돌리기 이력이 더 이상
-// 유효하지 않을 때 호출). 호출부(schedule3.js 등)가 각자 Object.keys(...).forEach(delete)로
-// 직접 비우면 이 네 기록이 정확히 어떤 세트인지가 엔진 밖 여러 곳에 흩어져 있어야 해서,
-// 하나를 추가/제거할 때 어느 한 곳을 빠뜨리기 쉽다 — 이 함수로 한곳에 모아둔다.
+// 위 세션 한정 동점 풀을 모두 비운다(후보 데이터가 더 이상 유효하지 않을 때 호출). 어떤 기록이
+// 세션 상태인지 엔진 밖에 흩어지지 않도록 이 함수로 한곳에 모아둔다.
 export function resetCandidateSession() {
-  Object.keys(candidateHistory).forEach((k) => delete candidateHistory[k]);
-  Object.keys(candidateUndoStack).forEach((k) => delete candidateUndoStack[k]);
   Object.keys(candidatePools).forEach((k) => delete candidatePools[k]);
   Object.keys(candidateAPools).forEach((k) => delete candidateAPools[k]);
 }
@@ -1951,195 +1931,3 @@ export async function generateCandidatesAsync(onProgress, workerOptions = {}) {
   };
 }
 
-// 후보 카드 하나만 같은 전략 안에서 다시 계산한다 (동점인 신청들의 순서를 랜덤으로 바꿔 다른 배정을 시도).
-// 확정된 세션이 있으면 그대로 고정하고, 나머지 신청들 안에서만 다시 배정한다.
-// 이번 풀(REGENERATE_SEARCH_ATTEMPTS+1개) 안에 이미 봤던 조합밖에 없으면, 처음 후보로
-// 되돌릴지 사용자에게 물어본다.
-// "다음 후보 보기" 버튼을 켤지 판단한다: 확정(고정)된 세션을 뺀 나머지 신청이 하나도
-// 없으면 다시 계산해봐야 항상 같은(빈) 결과라 "다음 후보"라 부를 게 없다.
-export function hasRegenerableEligible(strategyIndex) {
-  const prevCand = runtime.candidates[strategyIndex];
-  const confirmedIds = new Set((prevCand && prevCand.confirmedIds) || []);
-  const pinnedIds = new Set(
-    (prevCand
-      ? prevCand.assigned.filter((r) => confirmedIds.has(r.id))
-      : []
-    ).map((r) => r.id),
-  );
-  return state.requests.some(
-    (r) => isEligibleRequest(r) && !pinnedIds.has(r.id),
-  );
-}
-
-// onDone: 재생성이 끝나 화면을 다시 그려야 할 때 호출부가 넘겨주는 콜백(항상 명시적으로
-// 넘겨받는다 — chainDp.js의 schedule2ToBlocks 등과 같은 관례. 엔진이 페이지 렌더 함수를
-// 직접 import하면 페이지 ↔ 엔진 순환 의존이 생기므로 피한다).
-export async function regenerateCandidate(strategyIndex, onProgress, onDone) {
-  const prevCand = runtime.candidates[strategyIndex];
-  if (!candidateHistory[strategyIndex]) {
-    candidateHistory[strategyIndex] = new Set(
-      prevCand ? [candidateSignature(prevCand)] : [],
-    );
-  }
-  const seen = candidateHistory[strategyIndex];
-  const confirmedIds = new Set((prevCand && prevCand.confirmedIds) || []);
-  const pinned = prevCand
-    ? prevCand.assigned.filter((r) => confirmedIds.has(r.id))
-    : [];
-  const pinnedIds = new Set(pinned.map((r) => r.id));
-  // "미배정 회원"으로 지정된 회원은 배정 대상·미배정 통계 모두에서 뺀다(단, 이미 확정된
-  // 세션은 그대로 유지된다 — 확정은 다른 설정보다 항상 우선한다).
-  const allMemberIds = new Set(
-    state.requests
-      .filter(
-        (r) =>
-          pinnedIds.has(r.id) || !currentExcludedIds().includes(r.memberId),
-      )
-      .map((r) => r.memberId),
-  );
-  const eligible = state.requests.filter(
-    (r) => isEligibleRequest(r) && !pinnedIds.has(r.id),
-  );
-  const eligibleIds = new Set(eligible.map((r) => r.id));
-
-  // 재생성은 "다른 배치를 보여주는 것"이 목적이지, "후보 조건"의 우선순위(인원 최대화 →
-  // 수업 건수 → 이동 횟수 최소화)보다 못한 결과로 후퇴하는 것은 아니다. 최소 허용선은
-  // 기준(jitter 0) 결과 하나만이 아니라, 지금 화면에 이미 표시된 후보(prevCand)와 비교해도
-  // 정해야 한다 — prevCand는 (운 좋은 jitter나 사전 탐색으로) 기준보다 이미 더 나은 상태일
-  // 수 있는데, 기준만 최소 허용선으로 삼으면 "지금 보고 있는 것보다 못한" 결과도 통과해
-  // 버린다(실제로 미배정 인원은 그대로인데 수업 건수만 줄어든 후보가 표시되는 문제가 있었다).
-  // 그래서 둘 중 더 나은 쪽을 최소 허용선으로 삼고, 인원 → 수업 건수 → 이동 횟수 순으로,
-  // 그보다 못한 시도는 아무리 새로운 조합이어도 버린다. baseline 자체도 (초기 생성과 같은
-  // 방식으로) 시드 없이 여러 조합을 미리 시도해 최선을 찾아둔다 — 그래야 floor가 지나치게
-  // 낮게 잡혀 있다가 낮은 결과를 새 것으로 오인해 받아들이는 일이 없다.
-  // 비교는 이 전략 자신의 primary로 해야 한다 — 그래야 후보B가 "다음 후보"를 눌러도
-  // 인원 기준으로 강제되지 않고, 자기가 내세우는 수업 건수 우선 트레이드오프를 유지한다.
-  const myPrimary = strategyPrimary(strategyIndex);
-  const myMaxUnassigned = strategyMaxUnassigned(strategyIndex);
-  const pool = await searchStrategyPool(
-    strategyIndex,
-    eligible,
-    eligibleIds,
-    allMemberIds,
-    pinned,
-    REGENERATE_SEARCH_ATTEMPTS,
-    Math.random,
-    onProgress,
-  );
-  let baseline = pool[0];
-  let baselineScore = candidateSearchScore(
-    baseline,
-    myPrimary,
-    myMaxUnassigned,
-  );
-  pool.forEach((cand) => {
-    const score = candidateSearchScore(cand, myPrimary, myMaxUnassigned);
-    if (isCandidateWorse(baselineScore, score)) {
-      baseline = cand;
-      baselineScore = score;
-    }
-  });
-  // floorCand: baseline과 prevCand 중 더 나은 쪽. "새로운 조합을 못 찾았을 때"도 이 값으로
-  // 돌아가야지, baseline으로 그냥 되돌리면 prevCand보다 못한 결과가 화면에 나타날 수 있다
-  // (아래 !newCand 분기 참고) — "다음 후보"를 반복 클릭했을 때 수업 건수가 오르내리며
-  // 들쭉날쭉해 보이는 문제가 바로 이 지점에서 나고 있었다.
-  const floorCand =
-    prevCand &&
-    isCandidateWorse(
-      baselineScore,
-      candidateSearchScore(prevCand, myPrimary, myMaxUnassigned),
-    )
-      ? prevCand
-      : baseline;
-  const floorScore = candidateSearchScore(
-    floorCand,
-    myPrimary,
-    myMaxUnassigned,
-  );
-
-  // 방금 만든 풀(pool) 안에서, 아직 못 본 조합 중 최소 허용선(floor) 이상인 것 중 가장 좋은
-  // 것을 고른다 — 별도로 다시 시도하지 않고 이미 계산해둔 (attempts+1)개를 그대로 훑으므로,
-  // 추가 계산 없이 예전(REGEN_MAX_ATTEMPTS=10개만 별도 시도)보다 훨씬 많은 후보 중에서 고를
-  // 수 있다.
-  let newCand = null;
-  let newScore = null;
-  pool.forEach((cand) => {
-    const score = candidateSearchScore(cand, myPrimary, myMaxUnassigned);
-    if (isCandidateWorse(score, floorScore)) return; // 최소 허용선보다 못하면 버린다
-    const sig = candidateSignature(cand);
-    if (seen.has(sig)) return;
-    if (!newCand || isCandidateWorse(newScore, score)) {
-      newCand = cand;
-      newScore = score;
-    }
-  });
-  if (newCand) seen.add(candidateSignature(newCand));
-
-  if (!newCand) {
-    // 더 나은 조합을 못 찾았을 때도 사용자에게 묻지 않고, 지금까지 본 조합 기록을 지우고
-    // 자동으로 다시 찾는다(다음 클릭 때 새 조합을 탐색할 수 있도록).
-    newCand = floorCand; // baseline이 아니라 floorCand — 지금 보다 못한 결과로 되돌리지 않는다.
-    candidateHistory[strategyIndex] = new Set([candidateSignature(newCand)]);
-    newCand.confirmedIds = [...confirmedIds];
-    if (prevCand && prevCand !== newCand) {
-      if (!candidateUndoStack[strategyIndex])
-        candidateUndoStack[strategyIndex] = [];
-      candidateUndoStack[strategyIndex].push(prevCand);
-    }
-    runtime.candidates[strategyIndex] = newCand;
-    saveState();
-    onDone();
-    showToast("더 나은 조합을 찾지 못해 다시 탐색합니다", "info");
-    return;
-  }
-
-  newCand.confirmedIds = [...confirmedIds];
-  // 배치 페이저용: newCand와 완전히 동점인 배치를 모아 풀로 저장한다. 재생성은 확정된 세션을
-  // 고정한 채 탐색하므로(pinned), 풀의 모든 항목에 같은 confirmedIds를 설정해야 페이저로
-  // 넘나들어도 확정 표시가 유지된다. newCand 자신과 서명이 같은 자리는 (같은 배정을 만든
-  // 다른 시도 객체가 아니라) newCand 참조 그대로 넣어야 페이저의 pool.indexOf(현재 후보)
-  // 판별이 성립한다.
-  {
-    const newCandSig = candidateSignature(newCand);
-    const tied = [];
-    const seenTieSig = new Set();
-    pool.forEach((cand) => {
-      const score = candidateSearchScore(cand, myPrimary, myMaxUnassigned);
-      if (!isCandidateScoreTie(score, newScore)) return;
-      const sig = candidateSignature(cand);
-      if (seenTieSig.has(sig)) return;
-      seenTieSig.add(sig);
-      const entry = sig === newCandSig ? newCand : cand;
-      entry.confirmedIds = [...confirmedIds];
-      if (tied.length < MAX_POOL_VARIANTS) tied.push(entry);
-    });
-    // 캡에 먼저 도달하면 newCand 자신이 못 들어갈 수 있다 — newCand는 정의상 항상
-    // 자기 자신과 동점이므로, 페이저가 현재 위치를 찾으려면 반드시 pool에 있어야 한다.
-    if (!tied.includes(newCand)) {
-      if (tied.length >= MAX_POOL_VARIANTS) tied.length = MAX_POOL_VARIANTS - 1;
-      tied.unshift(newCand);
-    }
-    candidatePools[strategyIndex] = tied;
-  }
-  if (prevCand) {
-    if (!candidateUndoStack[strategyIndex])
-      candidateUndoStack[strategyIndex] = [];
-    candidateUndoStack[strategyIndex].push(prevCand);
-  }
-  runtime.candidates[strategyIndex] = newCand;
-  saveState();
-  onDone();
-  showToast("후보가 재생성되었습니다", "success");
-}
-
-// "이전 후보 다시보기": 재생성으로 덮어쓰기 전의 후보로 되돌아간다(여러 번 눌러 여러 단계
-// 되돌아갈 수 있음). 되돌아간 후보를 다시 재생성하면, 그 시점부터 새 이력이 쌓인다.
-// onDone: regenerateCandidate와 같은 이유로 호출부가 명시적으로 넘겨준다.
-export function restorePreviousCandidate(strategyIndex, onDone) {
-  const stack = candidateUndoStack[strategyIndex];
-  if (!stack || stack.length === 0) return;
-  runtime.candidates[strategyIndex] = stack.pop();
-  saveState();
-  onDone();
-  showToast("이전 후보로 되돌아갔습니다", "info");
-}

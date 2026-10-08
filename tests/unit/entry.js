@@ -35,6 +35,7 @@ export {
   formatTradeoff,
   selectCandidates,
   MAX_CARD_VARIANTS,
+  pickVariants,
 } from "../../src/engine/candidateSelection.js";
 export { setIdleFirst } from "../../src/engine/chainDpCore.js";
 export {
@@ -69,7 +70,12 @@ export {
   runtime,
   GenerationCancelledError,
 } from "../../src/state.js";
-export { candidatePreservesConfirmed } from "../../src/schedule3.js";
+export {
+  isUserEdited,
+  keepsUserEditedSlot,
+  candidatePoolEntries,
+} from "../../src/schedule3.js";
+export { candidateAPools, candidatePools } from "../../src/engine/greedy.js";
 
 export {
   BACKUP_VERSION,

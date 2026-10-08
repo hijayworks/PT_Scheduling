@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'sha256-UP0QZg7irvSMvOBz9mH2PIIE28+57UiavRfeVea0l3g='; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; worker-src blob:; object-src 'none'; base-uri 'none';" />
 <title>수업 스케줄 자동 생성기</title>
-<link rel="stylesheet" href="style.css?v=04b4e9e2" />
+<link rel="stylesheet" href="style.css?v=5d20aebf" />
 </head>
 <body>
 
@@ -87,12 +87,12 @@
       </div>
     </section>
 
-    <!-- PAGE: 스케줄생성3 (생성1·생성2 엔진을 그대로 재사용해 후보 3개를 한 화면에: A=생성2, B/C=생성1의 후보A/B) -->
+    <!-- PAGE: 스케줄생성3 (그리디·체인 DP 엔진 결과 전체를 후보 풀로 보고, 실제 장단점이 다른 후보만 카드로) -->
     <section class="card page" id="pageSchedule3">
       <div class="card-head">
         <div>
           <h2>수업 스케줄 생성</h2>
-          <p class="card-desc">겹치지 않는 스케줄 후보 3개(후보A·B·C)를 한 화면에서 생성하세요.</p>
+          <p class="card-desc">겹치지 않는 스케줄 후보를 만들고, 장단점이 실제로 다른 후보끼리 비교해 고르세요.</p>
         </div>
       </div>
 
@@ -108,16 +108,16 @@
               </span>
             </button>
             <ul class="candidate-rules-list" id="candidateRulesList3">
-              <li>후보A는 체인 DP + 다듬기 방식으로 만듭니다.</li>
-              <li>후보B·C는 그리디 방식으로 만듭니다. (후보B: 인원 최대 우선, 후보C: 수업 횟수 최대 우선)</li>
+              <li>여러 방식으로 후보를 탐색한 뒤 미배정·수업 수·비효율 이동·이동 횟수·빈 시간을 비교해, 장단점이 실제로 다른 후보만 최대 3개까지 보여줍니다.</li>
+              <li>추천 후보보다 미배정 회원이 많아지는 후보는 보여주지 않습니다.</li>
+              <li>직접 옮기거나 확정한 후보는 '내가 수정한 후보'로 따로 보이며, 다시 생성해도 지워지지 않습니다.</li>
               <li>정해진 스케줄은 다른 스케줄과 겹칠 수 없습니다.</li>
               <li>스케줄과 이동시간은 겹칠 수 없습니다.</li>
               <li>각 회원은 1일 최대 1회의 스케줄을 가질 수 있습니다.</li>
               <li>각 회원은 최대 2회까지의 스케줄을 가질 수 있습니다. (상담 회원의 경우 최대 1회까지)</li>
               <li>1회 제한 회원에 선택된 회원은 스케줄이 최대 1회까지 배정됩니다.</li>
-              <li>하루 이동은 최소화하며, 이동할 경우 최대 2회까지로 제한합니다. (후보A·B·C 모두 동일하게 적용)</li>
-              <li>후보B·C는 이동시간을 제외한 빈 시간이 없도록 배정합니다. (단, 빈 시간을 허용해서 수업의 횟수가 늘어난다면 10분까지 허용합니다.)</li>
-              <li>여기서 선택한 미배정 회원 · 1회 제한 회원 설정은 후보A·B·C 모두에 똑같이 적용됩니다.</li>
+              <li>하루 이동은 최소화하며, 이동할 경우 최대 2회까지로 제한합니다.</li>
+              <li>여기서 선택한 미배정 회원 · 1회 제한 회원 설정은 모든 후보에 똑같이 적용됩니다.</li>
             </ul>
           </div>
 
@@ -147,36 +147,18 @@
 
           <div class="day-start-block-row">
             <div class="day-start-block">
-              <p class="day-start-title">후보A (체인 DP 방식)</p>
               <div class="generate-row">
-                <button type="button" class="btn btn-primary btn-lg" id="generateBtnA3">
-                  <span class="btn-spinner" id="generateBtnA3Spinner" aria-hidden="true"></span>
-                  <span id="generateBtnA3Label">후보A 생성하기</span>
+                <button type="button" class="btn btn-primary btn-lg" id="generateBtn3">
+                  <span class="btn-spinner" id="generateBtn3Spinner" aria-hidden="true"></span>
+                  <span id="generateBtn3Label">수업 스케줄 후보 생성</span>
                 </button>
-                <button type="button" class="btn btn-ghost" id="generateBtnA3Cancel" hidden>생성 취소</button>
+                <button type="button" class="btn btn-ghost" id="generateBtn3Cancel" hidden>생성 취소</button>
               </div>
-              <div class="generate-progress" id="generateProgressWrapA3" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnA3Label">
+              <div class="generate-progress" id="generateProgressWrap3" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtn3Label">
                 <div class="generate-progress-track">
-                  <div class="generate-progress-fill" id="generateProgressFillA3"></div>
+                  <div class="generate-progress-fill" id="generateProgressFill3"></div>
                 </div>
-                <span class="generate-progress-text" id="generateProgressTextA3">0%</span>
-              </div>
-            </div>
-
-            <div class="day-start-block">
-              <p class="day-start-title">후보B·C (그리디 방식)</p>
-              <div class="generate-row">
-                <button type="button" class="btn btn-primary btn-lg" id="generateBtnBC3">
-                  <span class="btn-spinner" id="generateBtnBC3Spinner" aria-hidden="true"></span>
-                  <span id="generateBtnBC3Label">후보B·C 생성하기</span>
-                </button>
-                <button type="button" class="btn btn-ghost" id="generateBtnBC3Cancel" hidden>생성 취소</button>
-              </div>
-              <div class="generate-progress" id="generateProgressWrapBC3" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtnBC3Label">
-                <div class="generate-progress-track">
-                  <div class="generate-progress-fill" id="generateProgressFillBC3"></div>
-                </div>
-                <span class="generate-progress-text" id="generateProgressTextBC3">0%</span>
+                <span class="generate-progress-text" id="generateProgressText3">후보 탐색 0%</span>
               </div>
             </div>
           </div>
@@ -451,6 +433,6 @@
 <script src="vendor/html2canvas.min.js"></script>
 <!-- script.js / style.css의 ?v= 값은 scripts/bump-cache-version.js가 파일 해시로 자동 갱신합니다
      (git pre-commit 훅에서 자동 실행됨). 손으로 바꾸지 마세요. -->
-<script src="script.js?v=b7147262"></script>
+<script src="script.js?v=bcd3adb5"></script>
 </body>
 </html>

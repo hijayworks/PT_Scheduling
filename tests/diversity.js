@@ -8,6 +8,8 @@
 //   node tests/diversity.js --a-scale 0.05   후보A 시간 예산 비율(가짜 시계라 결과는 결정적)
 //   node tests/diversity.js --case CASE-03   한 케이스만
 //   node tests/diversity.js --json out.json  케이스별 요약·쌍별 관계를 파일로 저장
+//   node tests/diversity.js --state dir      케이스별 앱 저장 상태(생성 결과 포함)를 dir/CASE-xx.state.json으로
+//                                            — 같은 결과를 브라우저에 넣어 화면을 비교할 때 쓴다
 "use strict";
 
 const fs = require("fs");
@@ -52,6 +54,7 @@ const COLUMNS = [
 const LABEL = Object.fromEntries(COLUMNS);
 const metricRow = (m) => COLUMNS.map(([k]) => m[k]).join("/");
 const HIDDEN_REASON = {
+  "unassigned-gate": "미배정 gate(추천보다 미배정 많음)",
   unlabeled: "unlabeled Pareto",
   "role-taken": "같은 역할을 더 나은 후보가 차지",
   "card-limit": "카드 수 상한",
@@ -95,6 +98,28 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
       });
     }
     const s = diversitySummary(cands);
+
+    if (opt("--state")) {
+      const { state, runtime } = lib;
+      const slot = (k) => (gen[k] ? gen[k].result : null);
+      fs.writeFileSync(
+        path.join(opt("--state"), c.id + ".state.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          startMinBase: 720,
+          currentPage: "schedule3",
+          locations: state.locations,
+          travelTimes: state.travelTimes,
+          members: state.members,
+          requests: state.requests,
+          availableCells: [...runtime.availableCells],
+          onceLimitedMemberIds3: state.onceLimitedMemberIds3,
+          excludedMemberIds3: state.excludedMemberIds3,
+          candidates: [slot("B"), slot("C")].filter(Boolean),
+          schedule3Result: { candidateAList: ["A1", "A2", "A3"].map(slot) },
+        }),
+      );
+    }
 
     // 후보 선정: 표시 카드 5장과 각 엔진의 동점 풀 전체를 하나의 후보 풀로 본다.
     const entries = [];
@@ -190,7 +215,7 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
 
     const st = sel.stats;
     console.log(
-      `  [선정] 생성 ${st.generated} → exact unique ${st.exactUnique}(중복 ${st.exactDuplicates}) → 품질 그룹 ${st.qualityGroups} → Pareto 그룹 ${st.paretoGroups}(지배 제거: 그룹 ${st.dominatedGroups}, 배치 ${st.dominatedLayouts}) → 카드 ${st.cardsShown}`,
+      `  [선정] 생성 ${st.generated} → exact unique ${st.exactUnique}(중복 ${st.exactDuplicates}) → 품질 그룹 ${st.qualityGroups} → 미배정 gate 제거 그룹 ${st.gatedGroups}(배치 ${st.gatedLayouts}) → Pareto 그룹 ${st.paretoGroups}(지배 제거: 그룹 ${st.dominatedGroups}, 배치 ${st.dominatedLayouts}) → 카드 ${st.cardsShown}`,
     );
     console.log(
       `         유사 variant 제거 ${st.similarRemoved}, variant 상한 초과 ${st.variantLimitRemoved}`,
@@ -212,7 +237,7 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
     });
   }
   console.log(
-    `\n선정 합계(${selectionTotals.cases}개 케이스): 생성 ${selectionTotals.generated}, exact unique ${selectionTotals.exactUnique}(중복 ${selectionTotals.exactDuplicates}), 품질 그룹 ${selectionTotals.qualityGroups}, Pareto 그룹 ${selectionTotals.paretoGroups}(지배 제거 그룹 ${selectionTotals.dominatedGroups}/배치 ${selectionTotals.dominatedLayouts}), 카드 ${selectionTotals.cardsShown}, 유사 variant 제거 ${selectionTotals.similarRemoved}, variant 상한 초과 ${selectionTotals.variantLimitRemoved}`,
+    `\n선정 합계(${selectionTotals.cases}개 케이스): 생성 ${selectionTotals.generated}, exact unique ${selectionTotals.exactUnique}(중복 ${selectionTotals.exactDuplicates}), 품질 그룹 ${selectionTotals.qualityGroups}, 미배정 gate 제거 그룹 ${selectionTotals.gatedGroups}(배치 ${selectionTotals.gatedLayouts}), Pareto 그룹 ${selectionTotals.paretoGroups}(지배 제거 그룹 ${selectionTotals.dominatedGroups}/배치 ${selectionTotals.dominatedLayouts}), 카드 ${selectionTotals.cardsShown}, 유사 variant 제거 ${selectionTotals.similarRemoved}, variant 상한 초과 ${selectionTotals.variantLimitRemoved}`,
   );
   console.log(
     "역할별 카드: " +
@@ -221,7 +246,7 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
         .join(", "),
   );
   console.log(
-    `숨긴 Pareto 그룹 ${hiddenAll.length}개: ` +
+    `숨긴 그룹(gate로 빠진 Pareto 포함) ${hiddenAll.length}개: ` +
       (hiddenAll
         .map(
           (h) =>

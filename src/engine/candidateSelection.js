@@ -4,7 +4,9 @@ import { isSchedule2ResultBetter } from "./scheduleCompare.js";
 // 후보 풀로 보고, 사용자에게 보여줄 카드(실제 trade-off)를 고른다. 역할(추천·수업 우선 등)은 풀에
 // 따라 달라지는 파생값이라 저장하지 않고 매번 여기서 계산한다.
 //
-// 입력 entry: { key, result: {assigned, unassignedMembers}, metrics: scheduleMetrics(result) }.
+// 입력 entry: { key, result: {assigned, unassignedMembers}, metrics: scheduleMetrics(result), fixed? }.
+// fixed는 사용자가 옮기거나 확정한(사람의 의도가 담긴) 결과다 — 자동 선정에서 지우지 않고
+// "내가 수정한 후보" 카드로 따로 보여주며, 추천 역할은 주지 않는다.
 // isSchedule2ResultBetter가 state(회원·지점)를 읽으므로 생성 때와 같은 선택(미배정·1회 제한)
 // 상태에서 호출하고, 빈 시간 최소화 모드(setIdleFirst)는 꺼져 있어야 한다.
 
@@ -83,77 +85,114 @@ export function formatTradeoff(deltas) {
 
 const better = (a, b) => isSchedule2ResultBetter(a.result, b.result);
 const bestOf = (list) => list.reduce((x, y) => (better(y, x) ? y : x));
+// 같은 품질 그룹 안의 순서: 이동 시간이 짧은 순, 같으면 배치 서명 순(입력 순서와 무관하게 결정적).
+function byTravelThenSignature(x, y) {
+  return (
+    x.metrics.travelMinutes - y.metrics.travelMinutes ||
+    (layoutSignature(x.result) < layoutSignature(y.result) ? -1 : 1)
+  );
+}
+
+// 그룹(이동 시간 순) 안에서 variant를 고른다: 대표(첫 배치)부터 시작해, 이미 고른 배치들과의
+// 최소 배정 차이가 가장 큰 배치를 차례로 더한다(같으면 그룹 순서). 이미 고른 배치와 차이가
+// VARIANT_MIN_PLACEMENT_CHANGES 미만인 배치는 유사 배치로 지운다.
+export function pickVariants(group) {
+  const kept = [group[0]];
+  let rest = group.slice(1);
+  const distance = (e) =>
+    Math.min(...kept.map((k) => placementChanges(e.result, k.result)));
+  let similar = 0;
+  for (;;) {
+    const scored = rest.map((e) => ({ e, d: distance(e) }));
+    similar += scored.filter((x) => x.d < VARIANT_MIN_PLACEMENT_CHANGES).length;
+    rest = scored
+      .filter((x) => x.d >= VARIANT_MIN_PLACEMENT_CHANGES)
+      .map((x) => x.e);
+    if (!rest.length || kept.length >= MAX_CARD_VARIANTS) break;
+    const far = scored
+      .filter((x) => x.d >= VARIANT_MIN_PLACEMENT_CHANGES)
+      .reduce((x, y) => (y.d > x.d ? y : x));
+    kept.push(far.e);
+    rest = rest.filter((e) => e !== far.e);
+  }
+  return { kept, similar, overLimit: rest.length };
+}
 
 // 반환: { cards, hidden, stats }
-//   cards: [{ role, label, metrics, variants: entry[], deltas }] — 첫 장이 추천(role "recommended").
-//   hidden: 카드가 되지 못한 Pareto 그룹 [{ reason: "unlabeled" | "role-taken" | "card-limit", ... }]
+//   cards: [{ role, label, metrics, variants: entry[], deltas }] — 자동 카드(첫 장이 추천, role
+//     "recommended")와 그 뒤의 사용자 수정 카드(role "edited").
+//   hidden: 카드가 되지 못한 그룹 [{ reason, ... }]
+//     "unassigned-gate"(미배정이 추천안보다 많아 대안에서 뺀, gate가 없었다면 Pareto였던 그룹)
+//     "unlabeled" | "role-taken" | "card-limit"(Pareto지만 카드가 되지 못함)
 export function selectCandidates(entries) {
-  // 1) 완전히 같은 배치는 하나만(먼저 나온 것) 남긴다.
+  // 1) 사용자 수정 카드는 그대로 둔다(서로 완전히 같으면 하나만). 자동 배치가 수정 카드와 완전히
+  //    같으면 자동 쪽을 지운다 — 같은 배치를 두 장 보여주지 않고, 사람이 손댄 카드가 대표한다.
   const seen = new Set();
-  const unique = entries.filter((e) => {
+  const firstOfSignature = (e) => {
     const sig = layoutSignature(e.result);
     if (seen.has(sig)) return false;
     seen.add(sig);
     return true;
+  };
+  const fixed = entries.filter((e) => e.fixed).filter(firstOfSignature);
+  const fixedCount = seen.size;
+  const autoEntries = entries.filter((e) => !e.fixed);
+  let mergedIntoFixed = 0;
+  const unique = autoEntries.filter((e) => {
+    const sig = layoutSignature(e.result);
+    if (seen.has(sig)) {
+      if (fixed.some((f) => layoutSignature(f.result) === sig))
+        mergedIntoFixed++;
+      return false;
+    }
+    seen.add(sig);
+    return true;
   });
-  // 2) 품질(Pareto 축)이 같은 배치끼리 묶는다. 그룹 안은 이동 시간이 짧은 순(같으면 입력 순).
+  // 2) 품질(Pareto 축)이 같은 배치끼리 묶는다.
   const groupMap = new Map();
   unique.forEach((e) => {
     const k = qualityKey(e.metrics);
     if (!groupMap.has(k)) groupMap.set(k, []);
     groupMap.get(k).push(e);
   });
-  const groups = [...groupMap.values()].map((layouts) =>
-    layouts
-      .map((e, i) => ({ e, i }))
-      .sort(
-        (x, y) =>
-          x.e.metrics.travelMinutes - y.e.metrics.travelMinutes || x.i - y.i,
-      )
-      .map(({ e }) => e),
+  const groups = [...groupMap.values()]
+    .map((g) => g.sort(byTravelThenSignature))
+    .sort((g, h) => byTravelThenSignature(g[0], h[0]));
+  const head = (g) => g[0];
+  // 3) 추천: 기존 생성 비교 기준(isSchedule2ResultBetter)으로 가장 나은 그룹. 그 기준은 미배정을
+  //    가장 먼저 보고 Pareto 축에 단조라, 추천은 항상 미배정이 가장 적은 Pareto 그룹이다.
+  const rec = groups.length ? bestOf(groups.map(head)) : null;
+  // 4) 미배정 gate: 추천안보다 미배정이 많은 그룹은 대안이 될 수 없다(Pareto 판정 전에 뺀다).
+  const eligible = groups.filter(
+    (g) => head(g).metrics.unassigned <= rec.metrics.unassigned,
   );
-  // 3) 다른 그룹에 지배당하는 그룹을 지운다.
-  const pareto = groups.filter(
-    (g) => !groups.some((h) => dominates(h[0].metrics, g[0].metrics)),
-  );
-  const dominatedLayouts = groups
-    .filter((g) => !pareto.includes(g))
-    .reduce((n, g) => n + g.length, 0);
-  // 4) 그룹 안에서 앞서 남긴 배치와 거의 같은(회원·요일·지점 배정 차이가 적은) 배치를 지우고,
-  //    MAX_CARD_VARIANTS개까지만 남긴다.
+  const gated = groups.filter((g) => !eligible.includes(g));
+  const isParetoIn = (g, pool) =>
+    !pool.some((h) => dominates(h[0].metrics, g[0].metrics));
+  // 5) 남은 그룹 중 다른 그룹에 지배당하는 그룹을 지운다.
+  const pareto = eligible.filter((g) => isParetoIn(g, eligible));
+  const count = (list) => list.reduce((n, g) => n + g.length, 0);
+  // 6) 그룹 안 variant(다양성 우선, 최대 MAX_CARD_VARIANTS개).
   let similarRemoved = 0,
     variantLimitRemoved = 0;
   const variantsOf = new Map();
   pareto.forEach((g) => {
-    const kept = [];
-    g.forEach((e) => {
-      if (
-        kept.some(
-          (k) =>
-            placementChanges(e.result, k.result) <
-            VARIANT_MIN_PLACEMENT_CHANGES,
-        )
-      )
-        similarRemoved++;
-      else if (kept.length >= MAX_CARD_VARIANTS) variantLimitRemoved++;
-      else kept.push(e);
-    });
+    const { kept, similar, overLimit } = pickVariants(g);
+    similarRemoved += similar;
+    variantLimitRemoved += overLimit;
     variantsOf.set(g, kept);
   });
-  // 5) 추천: 기존 생성 비교 기준(isSchedule2ResultBetter)으로 가장 나은 그룹. 그 기준은 Pareto 축에
-  //    단조라 추천은 항상 Pareto 그룹이다.
-  const head = (g) => g[0];
-  const rec = pareto.length ? bestOf(pareto.map(head)) : null;
   const recGroup = pareto.find((g) => head(g) === rec);
+  const deltasOf = (m) => (rec ? tradeoffDeltas(rec.metrics, m) : []);
   const cardOf = (g, role, label) => ({
     role,
     label,
     metrics: head(g).metrics,
-    variants: variantsOf.get(g),
-    deltas: rec ? tradeoffDeltas(rec.metrics, head(g).metrics) : [],
+    variants: variantsOf.get(g) || g,
+    deltas: deltasOf(head(g).metrics),
   });
   const cards = recGroup ? [cardOf(recGroup, "recommended", "추천")] : [];
-  // 6) 역할: 추천안보다 그 축이 나은 그룹 중 그 축이 가장 좋은 그룹(같으면 추천 기준). 한 그룹은
+  // 7) 역할: 추천안보다 그 축이 나은 그룹 중 그 축이 가장 좋은 그룹(같으면 추천 기준). 한 그룹은
   //    한 역할만 맡고, 해당하는 그룹이 없는 역할은 만들지 않는다.
   const used = new Set([recGroup]);
   const qualifies = (g, axis) => {
@@ -173,32 +212,54 @@ export function selectCandidates(entries) {
     used.add(g);
     cards.push(cardOf(g, role, label));
   });
-  const hidden = pareto
-    .filter((g) => !used.has(g))
-    .map((g) => {
-      const card = cardOf(g, null, null);
-      const roles = CANDIDATE_ROLES.filter(({ axis }) => qualifies(g, axis));
-      return {
-        ...card,
-        reason: !roles.length
-          ? "unlabeled"
-          : cards.length >= MAX_CANDIDATE_CARDS
-            ? "card-limit"
-            : "role-taken",
-        qualifiesFor: roles.map((r) => r.label),
-      };
-    });
+  const hiddenOf = (g, reason) => ({
+    ...cardOf(g, null, null),
+    reason,
+    qualifiesFor: CANDIDATE_ROLES.filter(({ axis }) => qualifies(g, axis)).map(
+      (r) => r.label,
+    ),
+  });
+  const hidden = gated
+    .filter((g) => isParetoIn(g, groups))
+    .map((g) => hiddenOf(g, "unassigned-gate"))
+    .concat(
+      pareto
+        .filter((g) => !used.has(g))
+        .map((g) =>
+          hiddenOf(
+            g,
+            !CANDIDATE_ROLES.some(({ axis }) => qualifies(g, axis))
+              ? "unlabeled"
+              : cards.length >= MAX_CANDIDATE_CARDS
+                ? "card-limit"
+                : "role-taken",
+          ),
+        ),
+    );
+  fixed.forEach((e) =>
+    cards.push({
+      role: "edited",
+      label: "내가 수정한 후보",
+      metrics: e.metrics,
+      variants: [e],
+      deltas: deltasOf(e.metrics),
+    }),
+  );
   return {
     cards,
     hidden,
     stats: {
       generated: entries.length,
+      fixedCards: fixedCount,
+      mergedIntoFixed,
       exactUnique: unique.length,
-      exactDuplicates: entries.length - unique.length,
+      exactDuplicates: autoEntries.length - unique.length - mergedIntoFixed,
       qualityGroups: groups.length,
+      gatedGroups: gated.length,
+      gatedLayouts: count(gated),
       paretoGroups: pareto.length,
-      dominatedGroups: groups.length - pareto.length,
-      dominatedLayouts,
+      dominatedGroups: eligible.length - pareto.length,
+      dominatedLayouts: count(eligible.filter((g) => !pareto.includes(g))),
       similarRemoved,
       variantLimitRemoved,
       cardsShown: cards.length,

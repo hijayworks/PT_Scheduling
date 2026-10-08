@@ -173,7 +173,7 @@ body {
   vertical-align: -2px;
   animation: btn-spin 0.7s linear infinite;
 }
-#generateBtnA3.loading .btn-spinner, #generateBtnBC3.loading .btn-spinner { display: inline-block; }
+#generateBtn3.loading .btn-spinner { display: inline-block; }
 @keyframes btn-spin { to { transform: rotate(360deg); } }
 
 /* "후보 생성하기" 진행률 표시줄: 실제로 만든 조합 수 기준 진행률(0~100%)을 보여준다. */
@@ -1062,12 +1062,8 @@ body {
    doesn't overlap whatever comes right after the form (e.g. the table below). Only added
    while a hint is actually showing, so the form doesn't carry dead space normally. */
 .request-form.has-hint { padding-bottom: 40px; }
-/* 후보A(체인 DP) 카드들은 왼쪽 열, 후보B·C(그리디) 카드들은 오른쪽 열에 고정한다 —
-   렌더링 시 script.js가 .candidates-col 두 개(왼쪽/오른쪽)를 만들어 각 열에 맞는 카드만
-   채워 넣으므로, 여기서는 그 두 열을 나란히 배치하기만 하면 된다. grid로 두 열의 폭을
-   항상 정확히 동일하게(1fr씩) 고정한다 — flex는 카드 개수·내용에 따라 두 열의 폭이 미묘하게
-   어긋나 보일 수 있었다. 폭이 좁아지면(minmax(400px,1fr) 트랙이 800px+gap을 넘지 못하는
-   지점) auto-fit이 자연히 위아래로 쌓는다. */
+/* 후보 카드(추천·역할 카드·내가 수정한 후보)를 순서대로 흘려 넣는다. 폭이 좁아지면
+   (minmax(400px,1fr) 트랙이 들어가지 못하는 지점) auto-fit이 자연히 위아래로 쌓는다. */
 .candidates {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
@@ -1075,11 +1071,9 @@ body {
   gap: 16px;
   margin-top: 18px;
 }
-.candidates-col {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  min-width: 0;
+.candidates-note {
+  grid-column: 1 / -1;
+  margin: 0;
 }
 .candidate-card {
   border: 2px solid var(--border);
