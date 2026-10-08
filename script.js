@@ -4469,6 +4469,18 @@
   var TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = scaledBudgetMs(9e4, 100);
   var TARGET_MATCH_ALT_BASE_BUDGET_MS = scaledBudgetMs(8e3, 20);
   var TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40;
+  function groupBudgets(scale = 1) {
+    if (!(scale > 0) || !Number.isFinite(scale))
+      throw new Error("budgetScale은 0보다 큰 유한한 수여야 합니다: " + scale);
+    const ms = (x) => scale === 1 ? x : Math.max(1, Math.round(x * scale));
+    return {
+      search: ms(PER_GROUP_SEARCH_DEADLINE_MS),
+      targetExtra: ms(TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS),
+      altBase: ms(TARGET_MATCH_ALT_BASE_BUDGET_MS),
+      polishTotal: ms(PER_GROUP_TOTAL_POLISH_BUDGET_MS),
+      minPolish: ms(MIN_POLISH_BUDGET_MS)
+    };
+  }
   function groupByDay(reqs) {
     const reqsByDay = /* @__PURE__ */ new Map();
     DAYS.forEach((_, d) => reqsByDay.set(d, []));
@@ -4518,7 +4530,8 @@
     }
     return { evaluated, best, bestOrder, bestSeedOffset };
   }
-  async function runSchedule2RestartGroup(eligibleReqsMaster, groupSeed, groupIndex, onProgress, targetFloor, pins = []) {
+  async function runSchedule2RestartGroup(eligibleReqsMaster, groupSeed, groupIndex, onProgress, targetFloor, pins = [], budgetScale = 1) {
+    const budget = groupBudgets(budgetScale);
     const randomFn = mulberry32(groupSeed);
     let eligibleReqs = shuffled(eligibleReqsMaster, randomFn);
     let grouping = groupByDay(eligibleReqs);
@@ -4529,7 +4542,7 @@
       reqsByDay,
       daysWithReqs,
       PER_GROUP_DAY_ORDER_SHUFFLES,
-      PER_GROUP_SEARCH_DEADLINE_MS,
+      budget.search,
       groupIndex * 5e6,
       randomFn,
       async () => {
@@ -4547,14 +4560,14 @@
     );
     let evaluated = primary.evaluated, best = primary.best, bestOrder = primary.bestOrder, bestSeedOffset = primary.bestSeedOffset;
     if (targetFloor && best && floorIsBetter(targetFloor, best)) {
-      const extraDeadline = performance.now() + TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS;
+      const extraDeadline = performance.now() + budget.targetExtra;
       let altRestartCount = 0;
       while (performance.now() < extraDeadline && floorIsBetter(targetFloor, best)) {
         altRestartCount++;
         const altReqs = shuffled(eligibleReqsMaster, randomFn);
         const altGrouping = groupByDay(altReqs);
         const altBudget = Math.min(
-          TARGET_MATCH_ALT_BASE_BUDGET_MS,
+          budget.altBase,
           Math.max(0, extraDeadline - performance.now())
         );
         const alt = await searchWithinBase(
@@ -4618,8 +4631,8 @@
       }
     }
     const perAttemptBudget = Math.max(
-      MIN_POLISH_BUDGET_MS,
-      Math.floor(PER_GROUP_TOTAL_POLISH_BUDGET_MS / attempts.length)
+      budget.minPolish,
+      Math.floor(budget.polishTotal / attempts.length)
     );
     let completedAttempts = 0;
     const fromWorkers = await runPolishAttemptsInWorkers(
@@ -4709,7 +4722,8 @@
               );
           },
           targetFloor,
-          pins
+          pins,
+          options.budgetScale
         );
       } finally {
         setIdleFirst(false);

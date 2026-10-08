@@ -24,6 +24,12 @@ export {
   schedule2Signature,
   runChainDP,
   generateSchedule2Async,
+  groupBudgets,
+  PER_GROUP_SEARCH_DEADLINE_MS,
+  TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS,
+  TARGET_MATCH_ALT_BASE_BUDGET_MS,
+  PER_GROUP_TOTAL_POLISH_BUDGET_MS,
+  MIN_POLISH_BUDGET_MS,
 } from "../../src/engine/chainDp.js";
 export { scheduleMetrics, scheduleViolations, HARD_RULES } from "../../src/engine/scheduleQuality.js";
 export {
@@ -112,3 +118,4 @@ export {
   saveState,
 } from "../../src/state.js";
 export { pinKey, pinsFromResult, missingPins } from "../../src/engine/pins.js";
+export { IMPACT_LEVELS, impactRegion, runImpactLevels } from "../../src/engine/localReoptimize.js";

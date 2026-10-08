@@ -8,6 +8,8 @@
 // 회원 횟수(pinQuota)를 지키는지 본다. 고정을 고른 결과를 "지금 카드"로 두고 selectReoptimization이
 // 내준 제안·동점 variant·개선 목록 전부가 고정 유지·하드 제약·총 수업 수와 미배정 수 유지를 지키고 지금
 // 카드보다 엄격히 나은지, 제안·variant가 개선 결과 중 품질 최선보다 낮지 않은지(reoptProposal, 5b-1)도 본다.
+// 국소 재최적화(5b-2a): 같은 고정에서 모든 Level의 영향 범위 구조(impactRegion)를 검사하고, 시드가 고른
+// Level 하나의 범위(나머지 기존 세션은 임시 고정)로 다시 생성해 위 규칙을 그 고정 집합으로 똑같이 본다.
 //
 // 모든 입력은 시드 하나로 결정되고 후보A도 가짜 시계라, 같은 시드는 항상 같은 결과를 낸다.
 //
@@ -255,6 +257,8 @@ const PIN_RULES = {
   pinQuota: "고정 세션도 회원 최대 횟수와 하루 1회에 포함한다",
   reoptProposal:
     "재최적화 제안은 고정·하드 제약을 지키고, 총 수업 수를 줄이거나 미배정을 늘리지 않으며, 지금 카드보다 낫고, 개선 결과 중 품질 최선보다 낮지 않다",
+  impactRegion:
+    "국소 재최적화 영향 범위는 사용자 고정을 항상 포함하고, 움직일 세션과 고정이 겹치지 않고 합쳐 전체이며, Level이 오를수록 줄지 않는다",
 };
 const RULES = Object.keys(lib.HARD_RULES).concat(Object.keys(PIN_RULES));
 const ruleText = (r) => lib.HARD_RULES[r] || PIN_RULES[r];
@@ -440,8 +444,85 @@ function withoutMember(input, id) {
   };
 }
 
+// 고정 세션과 함께 다시 생성해 하드 제약·고정 유지·고정 회원 횟수·재최적화 제안을 검사한다(키 앞에 prefix).
+async function pinnedRun(input, opts, source, pins, prefix, generated, violations) {
+  const pinnedRaw = await runner.generate(input, { ...opts, pins });
+  const pinned = Object.fromEntries(
+    Object.entries(pinnedRaw).map(([k, v]) => [prefix + k, v]),
+  );
+  Object.assign(generated, pinned);
+  violations.push(...(await runner.violationsOf(input, pinned)));
+  const results = Object.values(pinned).flatMap((g) => [g.result].concat(g.pool || []));
+  Object.entries(pinned).forEach(([key, g]) =>
+    [g.result].concat(g.pool || []).forEach((r, tie) => {
+      const missing = lib.missingPins(r.assigned, pins);
+      if (missing.length)
+        violations.push({
+          key,
+          tie,
+          violation: {
+            rule: "pinKept",
+            message: `${PIN_RULES.pinKept} — ${missing.map(lib.pinKey).join(", ")}`,
+          },
+        });
+    }),
+  );
+  const quota = await pinQuotaCheck(input, pins, results);
+  for (let i = 0; i < quota.bad; i++)
+    violations.push({
+      key: prefix + "고정",
+      tie: 0,
+      violation: { rule: "pinQuota", message: PIN_RULES.pinQuota },
+    });
+  const reopt = await reoptProposalCheck(input, source, pins, results);
+  for (let i = 0; i < reopt.bad; i++)
+    violations.push({
+      key: prefix + "재최적화 제안",
+      tie: 0,
+      violation: { rule: "reoptProposal", message: PIN_RULES.reoptProposal },
+    });
+  return { pinKept: results.length, pinQuota: quota.opp, reoptProposal: reopt.opp };
+}
+
+// 시드에서 결정적으로 Level(L1~L3)과 원래 위치(절반은 모름, 절반은 고정 회원의 다른 신청 자리)를 고르고
+// 모든 Level의 영향 범위를 만든다.
+function impactLevelFor(input, source, pins) {
+  let h = 0;
+  for (const ch of input.id) h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0;
+  const rand = mulberry32(h ^ 0x1b873593);
+  const level = ["L1", "L2", "L3"][Math.floor(rand() * 3)];
+  const origins = [];
+  if (rand() < 0.5)
+    pins.forEach((p) => {
+      const reqs = lib.state.requests.filter((r) => r.memberId === p.memberId);
+      const r = reqs[Math.floor(rand() * reqs.length)];
+      if (r) origins.push({ day: r.day, startSlot: r.startSlot });
+    });
+  const regions = Object.fromEntries(
+    lib.IMPACT_LEVELS.map((l) => [l, lib.impactRegion(source, pins, l, origins)]),
+  );
+  return { level, origins, regions };
+}
+
+// 영향 범위 구조 규칙 위반 메시지 목록.
+function impactRegionViolations(source, pins, regions) {
+  const bad = [];
+  let prev = null;
+  lib.IMPACT_LEVELS.forEach((l) => {
+    const r = regions[l];
+    const pinned = new Set(r.pins.map(lib.pinKey));
+    const open = new Set(r.movable.map(lib.pinKey));
+    if (!pins.every((p) => pinned.has(lib.pinKey(p)))) bad.push(l + ": 사용자 고정이 빠짐");
+    if (r.movable.some((a) => pinned.has(lib.pinKey(a)))) bad.push(l + ": 움직일 세션이 고정에도 있음");
+    if (pinned.size + open.size !== source.assigned.length) bad.push(l + ": 고정 + 움직임 ≠ 전체 세션");
+    if (prev && [...prev].some((k) => !open.has(k))) bad.push(l + ": 앞 Level보다 범위가 줄어듦");
+    prev = open;
+  });
+  return bad;
+}
+
 // 한 시드 실행: 위반 목록과(엔진이 예외를 던지면 그것도 실패) 기회 집계를 돌려준다. 고정 없이 한 번,
-// 그 결과에서 고른 고정 세션과 함께 한 번 생성한다(pinned의 키는 "고정 B"처럼 붙인다).
+// 그 결과에서 고른 고정 세션과 함께 한 번, Level 영향 범위로 한 번 생성한다(키는 "고정 B", "L2 B"처럼 붙인다).
 async function check(input, withA) {
   runner.loadCase(input);
   try {
@@ -449,46 +530,21 @@ async function check(input, withA) {
     const generated = await runner.generate(input, opts);
     const violations = await runner.violationsOf(input, generated);
     const { pins, source } = pinsFor(input, generated);
-    const pinOps = { pinKept: 0, pinQuota: 0, reoptProposal: 0 };
+    const pinOps = { pinKept: 0, pinQuota: 0, reoptProposal: 0, impactRegion: 0 };
+    const addOps = (o) => Object.keys(o).forEach((k) => (pinOps[k] += o[k]));
     if (pins.length) {
-      const pinnedRaw = await runner.generate(input, { ...opts, pins });
-      const pinned = Object.fromEntries(
-        Object.entries(pinnedRaw).map(([k, v]) => ["고정 " + k, v]),
+      addOps(await pinnedRun(input, opts, source, pins, "고정 ", generated, violations));
+      // 5b-2a: 같은 사용자 고정에서 Level 하나의 영향 범위(나머지는 임시 고정)로 다시 생성한다.
+      const { level, origins, regions } = impactLevelFor(input, source, pins);
+      const bad = impactRegionViolations(source, pins, regions);
+      bad.forEach((message) =>
+        violations.push({ key: "영향 범위", tie: 0, violation: { rule: "impactRegion", message } }),
       );
-      Object.assign(generated, pinned);
-      violations.push(...(await runner.violationsOf(input, pinned)));
-      const results = Object.values(pinned).flatMap((g) => [g.result].concat(g.pool || []));
-      Object.entries(pinned).forEach(([key, g]) =>
-        [g.result].concat(g.pool || []).forEach((r, tie) => {
-          const missing = lib.missingPins(r.assigned, pins);
-          if (missing.length)
-            violations.push({
-              key,
-              tie,
-              violation: {
-                rule: "pinKept",
-                message: `${PIN_RULES.pinKept} — ${missing.map(lib.pinKey).join(", ")}`,
-              },
-            });
-        }),
-      );
-      const quota = await pinQuotaCheck(input, pins, results);
-      for (let i = 0; i < quota.bad; i++)
-        violations.push({
-          key: "고정",
-          tie: 0,
-          violation: { rule: "pinQuota", message: PIN_RULES.pinQuota },
-        });
-      const reopt = await reoptProposalCheck(input, source, pins, results);
-      for (let i = 0; i < reopt.bad; i++)
-        violations.push({
-          key: "재최적화 제안",
-          tie: 0,
-          violation: { rule: "reoptProposal", message: PIN_RULES.reoptProposal },
-        });
-      pinOps.pinKept = results.length;
-      pinOps.pinQuota = quota.opp;
-      pinOps.reoptProposal = reopt.opp;
+      pinOps.impactRegion++;
+      const region = regions[level];
+      if (region.movable.length && region.tempPinned) {
+        addOps(await pinnedRun(input, opts, source, region.pins, `${level}${origins.length ? "+원위치" : ""} `, generated, violations));
+      }
     }
     return { generated, violations, pinOps };
   } catch (err) {

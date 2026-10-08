@@ -105,6 +105,21 @@ export const MIN_POLISH_BUDGET_MS = scaledBudgetMs(6000, 10); // 시도가 여�
 export const TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS = scaledBudgetMs(90000, 100);
 export const TARGET_MATCH_ALT_BASE_BUDGET_MS = scaledBudgetMs(8000, 20); // 대안 골격 하나에 쓸 수 있는 시간 상한
 export const TARGET_MATCH_ALT_BASE_DAY_ORDER_SHUFFLES = 40; // 대안 골격 하나에서 시도할 무작위 요일 순서 수
+// 호출 단위 예산 배율(5b-2a 측정): 재시작 그룹 하나가 쓰는 시간 예산 전부에 곱한다. 생략하거나 1이면
+// 위 운영 상수를 그대로 돌려준다(일반 생성·재최적화의 기본 예산은 바뀌지 않는다 — unit 테스트로 고정).
+// 0 이하·숫자 아님은 조용히 기본값으로 바꾸지 않고 거부한다.
+export function groupBudgets(scale = 1) {
+  if (!(scale > 0) || !Number.isFinite(scale))
+    throw new Error("budgetScale은 0보다 큰 유한한 수여야 합니다: " + scale);
+  const ms = (x) => (scale === 1 ? x : Math.max(1, Math.round(x * scale)));
+  return {
+    search: ms(PER_GROUP_SEARCH_DEADLINE_MS),
+    targetExtra: ms(TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS),
+    altBase: ms(TARGET_MATCH_ALT_BASE_BUDGET_MS),
+    polishTotal: ms(PER_GROUP_TOTAL_POLISH_BUDGET_MS),
+    minPolish: ms(MIN_POLISH_BUDGET_MS),
+  };
+}
 // 신청 배열 순서(base) 하나를 요일별로 묶는다.
 function groupByDay(reqs) {
   const reqsByDay = new Map();
@@ -192,7 +207,7 @@ async function searchWithinBase(
 // 재시작 그룹 하나를 처음부터 끝까지(요일 순서 탐색 → 다듬기) 돌려 그 그룹의 최종 결과
 // 하나를 반환한다. groupSeed가 요일 순서 무작위 셔플을 결정하고, groupIndex는 다듬기
 // 단계의 담금질 시드가 그룹끼리 겹치지 않도록 seedOffset의 밑변을 벌려준다. pins는 재최적화의
-// 고정 세션(engine/pins.js) — 앱의 일반 생성은 [].
+// 고정 세션(engine/pins.js) — 앱의 일반 생성은 []. budgetScale: groupBudgets 참고(생략하면 운영 예산).
 export async function runSchedule2RestartGroup(
   eligibleReqsMaster,
   groupSeed,
@@ -200,7 +215,9 @@ export async function runSchedule2RestartGroup(
   onProgress,
   targetFloor,
   pins = [],
+  budgetScale = 1,
 ) {
+  const budget = groupBudgets(budgetScale);
   const randomFn = mulberry32(groupSeed);
 
   // ---- 기본 골격(primary base): 카드 고유의 시드로 신청 배열을 한 번 섞는다(사용자가
@@ -219,7 +236,7 @@ export async function runSchedule2RestartGroup(
     reqsByDay,
     daysWithReqs,
     PER_GROUP_DAY_ORDER_SHUFFLES,
-    PER_GROUP_SEARCH_DEADLINE_MS,
+    budget.search,
     groupIndex * 5000000,
     randomFn,
     async () => {
@@ -249,8 +266,7 @@ export async function runSchedule2RestartGroup(
   // 결과를 찾으면 그 골격으로 완전히 갈아탄다. 그래도 못 미치면 그 시점까지 찾은 가장 좋은
   // 결과로 넘어간다 — 최댓값이 이 그룹의 시드 공간에서 사실상 못 닿는 경우도 있을 수 있어서다.
   if (targetFloor && best && floorIsBetter(targetFloor, best)) {
-    const extraDeadline =
-      performance.now() + TARGET_MATCH_EXTRA_SEARCH_BUDGET_MS;
+    const extraDeadline = performance.now() + budget.targetExtra;
     let altRestartCount = 0;
     while (
       performance.now() < extraDeadline &&
@@ -260,7 +276,7 @@ export async function runSchedule2RestartGroup(
       const altReqs = shuffled(eligibleReqsMaster, randomFn);
       const altGrouping = groupByDay(altReqs);
       const altBudget = Math.min(
-        TARGET_MATCH_ALT_BASE_BUDGET_MS,
+        budget.altBase,
         Math.max(0, extraDeadline - performance.now()),
       );
       const alt = await searchWithinBase(
@@ -358,8 +374,8 @@ export async function runSchedule2RestartGroup(
   // 다듬기 전 지표가 같아 함께 뽑힘), 최선 하나만 고르면 그 안에 이미 있었던 동점 배치를
   // 그냥 버리게 된다(실제로 이 문제로 확인됨 — 페이저에 아무 것도 안 뜸).
   const perAttemptBudget = Math.max(
-    MIN_POLISH_BUDGET_MS,
-    Math.floor(PER_GROUP_TOTAL_POLISH_BUDGET_MS / attempts.length),
+    budget.minPolish,
+    Math.floor(budget.polishTotal / attempts.length),
   );
   // 시도들은 서로 독립이라 가능하면 Web Worker 여러 개로 동시에 다듬는다(polishWorkerPool.js
   // 참고) — 워커를 못 쓰거나 실패한 시도만 아래에서 메인 스레드가 예전처럼 하나씩 다듬는다.
@@ -439,6 +455,8 @@ export async function runSchedule2RestartGroup(
 // 후보A의 하드 제약 스모크를 짧게 돌릴 때만 넘긴다.
 // options.pins: 재최적화의 고정 세션(engine/pins.js). 모든 카드 탐색과 그리디 기준선에 넘기고,
 // 카드를 바꿔치기할 외부 결과(화면의 후보B·C 등)도 고정 세션을 모두 지킨 것만 쓴다.
+// options.budgetScale: 카드(재시작 그룹)마다의 후보A 시간 예산 배율(groupBudgets). 생략하면 운영 예산.
+// 국소 재최적화 측정(tests/reoptimize.js --levels)만 넘긴다. 그리디 기준선은 greedyAttempts로 따로 정한다.
 export async function generateSchedule2Async(onProgress, options = {}) {
   const eligibleReqs = state.requests.filter(isEligibleRequest2);
   const pins = options.pins || [];
@@ -492,6 +510,7 @@ export async function generateSchedule2Async(onProgress, options = {}) {
         },
         targetFloor,
         pins,
+        options.budgetScale,
       );
     } finally {
       setIdleFirst(false);
