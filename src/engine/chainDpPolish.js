@@ -5,6 +5,8 @@ import {
   memberById,
   inefficientRoundTripLocationInfo,
   soloTravelMemberIds,
+  scheduleTargetMemberIds,
+  unassignedMembersFor,
 } from "../domain.js";
 import { currentExcludedIds2 } from "../selectionOverride.js";
 import {
@@ -320,7 +322,8 @@ export async function runSchedule2Pipeline(
   // 조건이므로, 모든 단계에서 항상 그대로 지킨다 — 그 제한 안에서 자리가 없으면(연쇄
   // 교환까지 다 시도해도) 최종 미배정으로 남는다.
   const MAX_EJECTION_DEPTH = 3;
-  const submittedIds = new Set(state.requests.map((r) => r.memberId));
+  // 배정 대상(미배정 판정 기준)은 파이프라인 한 번 동안 바뀌지 않으므로 한 번만 만든다.
+  const targetMemberIds = scheduleTargetMemberIds();
   // 요일 순서 후보를 여러 개 비교하는 탐색 단계 등에서 이 함수가 반복문 안에서 아주 여러
   // 번 불리므로, 매번 dayChains 전체를 훑어(O(전체 배정 세션 수)) Set을 새로 만들지 않고
   // commit/uncommit이 이미 정확히 유지하고 있는 assignedCountByMember를 그대로 O(1)로 조회한다.
@@ -504,10 +507,7 @@ export async function runSchedule2Pipeline(
   }
 
   function stillUnassignedIds() {
-    return state.members
-      .filter((m) => !excludedIdSet2.has(m.id) && submittedIds.has(m.id))
-      .map((m) => m.id)
-      .filter((id) => !isCurrentlyAssigned(id));
+    return targetMemberIds.filter((id) => !isCurrentlyAssigned(id));
   }
 
   // 연쇄 교환(ejection chain)까지 포함한 복구는 계산량이 꽤 크므로, 여러 요일 순서를
@@ -2039,15 +2039,8 @@ export async function runSchedule2Pipeline(
   const assigned = [];
   dayChains.forEach((chain) => assigned.push(...chain));
   // 가능 시간(신청)을 아예 제출하지 않은 회원은 배정 대상이 아니었으므로 "미배정"에 넣지
-  // 않는다 — 신청은 했지만 자리를 못 받은 회원만 미배정으로 표시한다.
-  const eligibleMemberIds = state.members
-    .filter((m) => !excludedIdSet2.has(m.id) && submittedIds.has(m.id))
-    .map((m) => m.id);
-  const assignedMemberIds = new Set(assigned.map((r) => r.memberId));
-  const unassignedMembers = eligibleMemberIds
-    .filter((id) => !assignedMemberIds.has(id))
-    .map(memberById)
-    .filter(Boolean);
+  // 않는다 — 신청은 했지만 자리를 못 받은 회원만 미배정으로 표시한다(scheduleTargetMemberIds).
+  const unassignedMembers = unassignedMembersFor(assigned, targetMemberIds);
 
   return { assigned, unassignedMembers };
 }

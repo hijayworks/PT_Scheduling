@@ -78,6 +78,38 @@ function buildReoptSeedState(layout = "default") {
   };
 }
 
+// 수동 편집·설정 입력: 월·수만 근무(12:00~18:00), 회원A는 근무하지 않는 화요일에도 신청했다. 카드는 A가 월·수 2회,
+// B(수요일 신청)는 미배정. 두 지점 사이 이동 시간은 30분.
+function buildManualEditSeedState() {
+  const cells = [];
+  [0, 2].forEach((day) => {
+    for (let slot = 0; slot < 36; slot++) cells.push(day + "-" + slot);
+  });
+  const requests = [];
+  const addRequests = (memberId, days) =>
+    days.forEach((day) => {
+      for (let slot = 0; slot <= 30; slot++)
+        requests.push({ id: memberId + day + "_" + slot, memberId, day, startSlot: slot, duration: 60 });
+    });
+  addRequests("A", [0, 1, 2]);
+  addRequests("B", [2]);
+  const at = (memberId, day, slot) => ({ id: memberId + day + "_" + slot, memberId, day, startSlot: slot, duration: 60, locationId: "loc1" });
+  const memberB = { id: "B", name: "회원B", locationIds: ["loc1"], category: "등록" };
+  return {
+    locations: [{ id: "loc1", name: "테스트지점" }, { id: "loc2", name: "둘째지점" }],
+    travelTimes: { "loc1|loc2": 30 },
+    members: [{ id: "A", name: "회원A", locationIds: ["loc1"], category: "등록" }, memberB],
+    requests,
+    onceLimitedMemberIds3: [],
+    excludedMemberIds3: [],
+    availableCells: cells,
+    currentPage: "schedule3",
+    startMinBase: 720,
+    candidates: [{ assigned: [at("A", 0, 0), at("A", 2, 0)], unassignedMembers: [memberB], confirmedIds: [], strategyIndex: 0 }],
+    schedule3Result: { candidateAList: [null, null, null] },
+  };
+}
+
 // 알림(utils.showToast)이 만드는 DOM(.toast-container > .toast.toast-{type}.show)을 그대로 붙여 공통 알림 스타일을
 // 잰다. showToast는 번들 밖으로 노출되지 않고 2.2초 뒤 사라지므로 같은 구조를 직접 만든다.
 const TOAST_SAMPLES = [
@@ -226,6 +258,12 @@ async function main() {
     assert(
       titles.includes("내가 수정한 후보"),
       "다시 생성한 뒤 '내가 수정한 후보'가 사라짐 (실제: " + JSON.stringify(titles) + ")"
+    );
+    // 생성 중에 다시 그려진 카드의 재최적화 버튼은 생성이 끝나면 다시 눌러져야 한다.
+    const reoptDisabled = await page.locator("#candidates3 .reopt-btn").evaluateAll((bs) => bs.map((b) => b.disabled));
+    assert(
+      reoptDisabled.length > 0 && reoptDisabled.every((d) => !d),
+      "다시 생성한 뒤 '나머지 일정 다시 최적화' 버튼이 비활성으로 남음: " + JSON.stringify(reoptDisabled)
     );
 
     // strict style CSP에서 html2canvas 캡처 경로도 실제로 동작하는지 확인한다.
@@ -468,6 +506,51 @@ async function main() {
     assert(levelsRun(tightLog).endsWith("full×1"), "전체 일정 다시 탐색이 운영 예산으로 돌지 않음: " + levelsRun(tightLog));
     assert(!(await tightPanel.isVisible()), "전체 탐색에서도 나은 결과가 없으면 패널을 닫아야 함");
     assert((await tp.locator("#generateHint3").innerText()).includes("지금보다 나은 배치를 찾지 못했습니다"), "전체 탐색 실패 안내가 없음");
+
+    // 수동 편집·설정 입력의 화면 연결(판정 정책 자체는 unit이 맡는다): 드래그를 놓으면 근무 시간 검사가 적용되고,
+    // 메뉴로 회원을 교체하면 카드의 미배정 표시가 바뀌고, 입력칸·선택창은 보정된 값을 보여준다.
+    const me = await browser.newPage();
+    me.on("pageerror", (err) => failures.push("수동 편집 페이지 런타임 에러: " + err.message));
+    const meSeed = buildManualEditSeedState();
+    await me.addInitScript(
+      ({ key, data }) => {
+        if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(data));
+      },
+      { key: STORAGE_KEY, data: meSeed }
+    );
+    await me.goto(INDEX_URL);
+    await me.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    const meCard = async () => (await readState(me)).candidates[0];
+    const toastTexts = () => me.locator(".toast").allTextContents();
+    const assignedBefore = JSON.stringify((await meCard()).assigned);
+    await me
+      .locator("#candidates3 .cal-block", { hasText: "회원A" })
+      .first()
+      .dragTo(me.locator('#candidates3 .cal-cell[data-day="1"][data-slot="0"]'));
+    assert(JSON.stringify((await meCard()).assigned) === assignedBefore, "근무하지 않는 화요일로 드래그한 수업이 옮겨짐");
+    assert((await toastTexts()).some((t) => t.includes("근무 가능 시간 밖")), "근무 시간 밖 드래그에 안내가 없음: " + JSON.stringify(await toastTexts()));
+    const cardText = () => me.locator("#candidates3 .candidate-card").first().innerText();
+    assert(/미배정 1명/.test(await cardText()), "교체 전 카드에 '미배정 1명'이 없음(픽스처 확인)");
+    await me.locator("#candidates3 .cal-block", { hasText: "회원A" }).nth(1).evaluate((el) => el.click());
+    await me.locator(".block-context-menu-item", { hasText: "회원B(으)로 교체" }).first().evaluate((el) => el.click());
+    assert(!/미배정 \d+명/.test(await cardText()), "미배정 회원으로 교체했는데 카드에 미배정이 남음: " + (await cardText()));
+    await me.reload();
+    await me.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    assert(!/미배정 \d+명/.test(await cardText()), "교체 뒤 새로고침하자 카드에 미배정이 다시 나타남");
+    await me.click('.nav-item[data-page="settings"]');
+    const travelInput = me.locator(".travel-min-input").first();
+    await travelInput.fill("");
+    await travelInput.dispatchEvent("change");
+    assert((await travelInput.inputValue()) === "30" && (await readState(me)).travelTimes["loc1|loc2"] === 30, "이동 시간 빈칸이 원래 값(30분)으로 되돌아가지 않음");
+    await travelInput.fill("0");
+    await travelInput.dispatchEvent("change");
+    assert((await readState(me)).travelTimes["loc1|loc2"] === 0, "이동 시간 0을 입력했는데 0분으로 저장되지 않음");
+    const monSelects = me.locator(".avail-day-row").first().locator("select");
+    await monSelects.nth(0).selectOption("33"); // 17:30
+    await monSelects.nth(1).selectOption("30"); // 17:00
+    const endShown = await monSelects.nth(1).evaluate((sel) => (sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : ""));
+    assert(endShown === "18:00", "근무 종료를 시작보다 이르게 고르면 선택창이 18:00을 보여야 함 (실제: '" + endShown + "')");
+    await me.close();
   } finally {
     await browser.close();
   }
@@ -479,7 +562,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 

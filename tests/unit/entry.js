@@ -13,6 +13,9 @@ export {
   maxSessionsFor,
   soloTravelMemberIds,
   chainBreaksSoloTravel,
+  scheduleTargetMemberIds,
+  unassignedMembersFor,
+  parseTravelMinutesInput,
 } from "../../src/domain.js";
 export { state } from "../../src/state.js";
 export {
@@ -102,6 +105,9 @@ export {
   reoptimizedCard,
   applyReoptimizedCard,
   moveSession,
+  attemptSwap,
+  swapSessionMember,
+  eligibleSwapMembersFor,
   confirmSession,
   unconfirmSession,
   undoManualEdit,
@@ -152,3 +158,4 @@ export {
   continueLocalSearch,
   addWiderProposal,
 } from "../../src/engine/localReoptimize.js";
+export { availabilityTimeOptionSlots, correctedAvailabilityEnd } from "../../src/pages/settings.js";

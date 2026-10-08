@@ -1515,6 +1515,176 @@ test("수동 이동·맞바꾸기: 하드 제약을 지키는 결과는 허용�
   assert(lib.prepareSwap(container, a, b).ok, "같은 지점 앞뒤 맞바꾸기");
 });
 
+/* ---------------- schedule3.js: 수동 편집은 근무 가능 시간·미배정 명단까지 지킨다 ---------------- */
+const noopDone = () => {};
+// 수동 편집·후보 정리 함수는 끝에 showToast(requestAnimationFrame)를 부른다.
+function toastTest(name, fn) {
+  test(name, () => {
+    const realRaf = globalThis.requestAnimationFrame;
+    globalThis.requestAnimationFrame = () => {};
+    try {
+      fn();
+    } finally {
+      globalThis.requestAnimationFrame = realRaf;
+    }
+  });
+}
+const ids = (members) => members.map((m) => m.id);
+const nonUnassignedViolations = (r) => lib.scheduleViolations(r).filter((v) => v.rule !== "unassigned");
+toastTest("수동 이동: 근무하지 않는 요일로는 회원이 신청했더라도 옮기지 않는다", () => {
+  manualFixture();
+  for (let s = 0; s <= 40; s++) lib.runtime.availableCells.delete("1-" + s); // 화요일 근무 없음
+  const a = at("A", 0, 0, "L1");
+  const container = { assigned: [a], confirmedIds: [] };
+  assert(!lib.validateMove(container, a, 1, 0).ok, "화요일은 근무 불가");
+  lib.moveSession(container, a, 1, 0, noopDone);
+  assertEqual(container.assigned, [a], "배정이 바뀌지 않아야 함");
+  assertEqual(container.confirmedIds, [], "자동 확정도 하지 않아야 함");
+});
+toastTest("수동 이동: 수업 종료가 근무 가능 시간을 넘어가는 자리로는 옮기지 않는다", () => {
+  manualFixture();
+  for (let s = 10; s <= 40; s++) lib.runtime.availableCells.delete("1-" + s); // 화 12:00~13:40
+  const a = at("A", 0, 0, "L1");
+  const container = { assigned: [a], confirmedIds: [] };
+  assert(!lib.validateMove(container, a, 1, 6).ok, "13:00~14:00 수업은 13:40 근무 종료를 넘김");
+  assert(lib.validateMove(container, a, 1, 4).ok, "12:40~13:40 수업은 근무 시간 안");
+});
+toastTest("수동 맞바꾸기: 근무 가능 시간 밖 자리로 가는 맞바꾸기는 막는다", () => {
+  manualFixture();
+  // 기존 저장분에 근무 시간 밖 배정(B 화 14:00)이 남아 있어도, A를 그 자리로 보내는 맞바꾸기는 막는다.
+  for (let s = 10; s <= 40; s++) lib.runtime.availableCells.delete("1-" + s);
+  const a = at("A", 0, 0, "L1");
+  const b = at("B", 1, 12, "L1");
+  assert(!lib.prepareSwap({ assigned: [a, b], confirmedIds: [] }, a, b).ok);
+});
+toastTest("회원 교체: 미배정 회원으로 교체하면 미배정 명단에서 빠진다", () => {
+  qualityFixture();
+  // A가 월·화 2회, B는 미배정. A의 화요일 수업을 B로 교체하면 둘 다 수업이 있다.
+  const a1 = at("A", 1, 0, "L1");
+  const container = {
+    assigned: [at("A", 0, 0, "L1"), a1, at("S", 0, 12, "L1"), at("C", 1, 12, "L3")],
+    unassignedMembers: [lib.memberById("B")],
+    confirmedIds: [],
+  };
+  assertEqual(nonUnassignedViolations(container), [], "픽스처 확인");
+  const b = lib.eligibleSwapMembersFor(container, a1).find((m) => m.id === "B");
+  assert(b, "B는 교체 후보");
+  lib.swapSessionMember(container, a1, b, noopDone);
+  assertEqual(ids(container.unassignedMembers), []);
+  assertEqual(lib.scheduleViolations(container), []);
+});
+toastTest("회원 교체: 마지막 수업을 잃은 회원은 미배정 명단에 들어간다", () => {
+  qualityFixture();
+  const a = at("A", 0, 0, "L1");
+  const container = { assigned: [a, at("B", 0, 6, "L1")], unassignedMembers: [lib.memberById("S"), lib.memberById("C")], confirmedIds: [] };
+  const s = lib.eligibleSwapMembersFor(container, a).find((m) => m.id === "S");
+  assert(s, "S는 교체 후보");
+  lib.swapSessionMember(container, a, s, noopDone);
+  assertEqual(ids(container.unassignedMembers).sort(), ["A", "C"]);
+  assertEqual(lib.scheduleViolations(container), []);
+});
+toastTest("수동 편집: 이동·맞바꾸기·교체 결과는 하드 제약 위반이 0건이다", () => {
+  manualFixture();
+  const base = () => ({
+    assigned: [at("A", 0, 0, "L1"), at("B", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 12, "L3")],
+    unassignedMembers: [lib.memberById("D"), lib.memberById("X")],
+    confirmedIds: [],
+  });
+  assertEqual(lib.scheduleViolations(base()), [], "픽스처 확인");
+  const moved = base();
+  lib.moveSession(moved, moved.assigned[0], 1, 20, noopDone);
+  assertEqual(moved.confirmedIds.length, 1, "이동됨");
+  assertEqual(lib.scheduleViolations(moved), []);
+  const swapped = base();
+  lib.attemptSwap(swapped, swapped.assigned[0], swapped.assigned[1], noopDone);
+  assertEqual(swapped.confirmedIds.length, 2, "맞바꿔짐");
+  assertEqual(lib.scheduleViolations(swapped), []);
+  const replaced = base();
+  const x = lib.eligibleSwapMembersFor(replaced, replaced.assigned[0]).find((m) => m.id === "X");
+  assert(x, "X는 교체 후보");
+  lib.swapSessionMember(replaced, replaced.assigned[0], x, noopDone);
+  assertEqual(ids(replaced.unassignedMembers).sort(), ["A", "D"], "A가 미배정으로");
+  assertEqual(lib.scheduleViolations(replaced), []);
+});
+toastTest("미배정 명단: 배정 대상(제외되지 않고 신청을 낸 실존 회원) 중 수업이 없는 회원이다", () => {
+  qualityFixture();
+  lib.state.members.push({ id: "N", name: "n", locationIds: ["L1"], category: "등록" }); // 신청 없음
+  lib.state.requests.push({ id: "GHOST", memberId: "GONE", day: 0, startSlot: 0, duration: 60 }); // 삭제된 회원
+  assertEqual(lib.scheduleTargetMemberIds(), ["A", "B", "S", "C"]);
+  assertEqual(ids(lib.unassignedMembersFor([at("A", 0, 0, "L1"), at("S", 1, 0, "L1")])), ["B", "C"]);
+});
+
+/* ---------------- schedule3.js: 저장된 후보의 미배정 명단 재계산·필수 제약 위반 후보 정리 ---------------- */
+toastTest("저장 후보: 미배정 명단이 실제 배정과 어긋나면 배정 기준으로 다시 계산하고 후보는 남긴다", () => {
+  qualityFixture();
+  const stale = { ...validQualityResult(), unassignedMembers: [lib.memberById("B")], confirmedIds: [at("A", 0, 0, "L1").id] };
+  lib.runtime.schedule3Result = { candidateAList: [stale, null, null], inputKey: lib.candidateInputKey() };
+  lib.runtime.candidates = [];
+  assert(!lib.dropStaleCandidates(), "비운 후보 없음");
+  assertEqual(lib.runtime.schedule3Result.candidateAList[0], stale, "수정 후보 유지");
+  assertEqual(stale.unassignedMembers, []);
+});
+toastTest("저장 후보: 근무 가능 시간을 어긴 후보만 비우고 정상 후보(수정 후보 포함)는 남긴다", () => {
+  qualityFixture();
+  for (let s = 30; s <= 40; s++) lib.runtime.availableCells.delete("1-" + s); // 화 17:00 이후 근무 없음
+  const edited = { ...validQualityResult(), confirmedIds: [at("A", 0, 0, "L1").id] };
+  const invalid = {
+    assigned: [at("A", 1, 28, "L1"), at("B", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 12, "L3")],
+    unassignedMembers: [],
+    confirmedIds: [at("A", 1, 28, "L1").id],
+  };
+  assertEqual(lib.scheduleViolations(invalid).map((v) => v.rule), ["availability"], "픽스처 확인");
+  const valid = validQualityResult();
+  lib.runtime.schedule3Result = { candidateAList: [edited, invalid, null], inputKey: lib.candidateInputKey() };
+  lib.runtime.candidates = [valid, invalid];
+  assert(lib.dropStaleCandidates(), "비운 후보가 있다고 알려야 함");
+  assertEqual(lib.runtime.schedule3Result.candidateAList, [edited, null, null]);
+  assertEqual(lib.runtime.candidates, [valid]);
+});
+toastTest("저장 후보: 새로고침(loadState) 후에도 근무 시간 밖 수정 후보는 남지 않는다", () => {
+  qualityFixture();
+  for (let s = 30; s <= 40; s++) lib.runtime.availableCells.delete("1-" + s);
+  const invalid = {
+    assigned: [at("A", 1, 28, "L1"), at("B", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 12, "L3")],
+    unassignedMembers: [],
+    confirmedIds: [at("A", 1, 28, "L1").id],
+  };
+  lib.runtime.schedule3Result = { candidateAList: [invalid, validQualityResult(), null], inputKey: lib.candidateInputKey() };
+  lib.runtime.candidates = [];
+  const saved = JSON.stringify({ ...lib.state, schemaVersion: 1, startMinBase: 12 * 60, availableCells: [...lib.runtime.availableCells], schedule3Result: lib.runtime.schedule3Result, candidates: [] });
+  const originalGetItem = globalThis.localStorage.getItem;
+  globalThis.localStorage.getItem = () => saved;
+  try {
+    lib.loadState();
+  } finally {
+    globalThis.localStorage.getItem = originalGetItem;
+  }
+  assert(lib.dropStaleCandidates());
+  const list = lib.runtime.schedule3Result.candidateAList;
+  assertEqual([list[0], !!list[1]], [null, true], "위반 후보만 비움");
+  assertEqual(lib.state.requests.length, JSON.parse(saved).requests.length, "신청 원본 유지");
+});
+
+/* ---------------- 설정: 이동 시간·근무 가능 시간 입력 ---------------- */
+test("이동 시간 입력: 빈칸·잘못된 값은 0분으로 바꾸지 않고 거부하며, 명시적 0은 0분이다", () => {
+  ["", "  ", "abc", "-1", "1.5", "Infinity"].forEach((t) =>
+    assertEqual(lib.parseTravelMinutesInput(t), null, JSON.stringify(t)),
+  );
+  assertEqual(lib.parseTravelMinutesInput("0"), 0);
+  assertEqual(lib.parseTravelMinutesInput(" 30 "), 30);
+});
+test("근무 가능 시간: 종료가 시작보다 이르면 선택창에 있는 가장 가까운 종료 시각으로 보정한다", () => {
+  const slot = (h, m) => (h * 60 + m - 12 * 60) / 10;
+  const endOptions = lib.availabilityTimeOptionSlots("end");
+  assertEqual(lib.correctedAvailabilityEnd(slot(17, 30), slot(17, 0)), slot(18, 0));
+  assertEqual(lib.correctedAvailabilityEnd(slot(17, 30), slot(17, 30)), slot(18, 0));
+  assertEqual(lib.correctedAvailabilityEnd(slot(14, 0), slot(23, 30)), slot(23, 30), "정상 범위는 그대로");
+  lib.availabilityTimeOptionSlots("start").forEach((start) => {
+    const end = lib.correctedAvailabilityEnd(start, start);
+    assert(end > start && endOptions.includes(end), "시작 " + start + " → 종료 " + end + "는 선택창에 있어야 함");
+  });
+});
+
 /* ---------------- goldenFloors.js: 골든 품질 하한 래칫 ---------------- */
 const goldenFloors = require("./goldenFloors.js");
 function floorSet(sessions, travel) {

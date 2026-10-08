@@ -25,6 +25,8 @@ import {
   inefficientRoundTripLocationInfo,
   isInefficientRoundTrip,
   roundTripOriginLoc,
+  scheduleTargetMemberIds,
+  unassignedMembersFor,
 } from "../domain.js";
 import { currentExcludedIds } from "../selectionOverride.js";
 import { schedule2TotalIdleMinutes } from "./scheduleCompare.js";
@@ -1249,11 +1251,7 @@ export function buildCandidate(
     options,
     pinned,
   );
-  const assignedMemberIds = new Set(assigned.map((r) => r.memberId));
-  const unassignedMembers = [...allMemberIds]
-    .filter((id) => !assignedMemberIds.has(id))
-    .map((id) => memberById(id))
-    .filter(Boolean);
+  const unassignedMembers = unassignedMembersFor(assigned, allMemberIds);
   return {
     title,
     desc,
@@ -1874,12 +1872,8 @@ export async function generateCandidatesAsync(
   pins = [],
 ) {
   // "미배정 회원"으로 지정된 회원은 애초에 없었던 것처럼 취급한다 — 배정 대상에서도,
-  // (배정 실패가 아니라 의도적 제외이므로) 미배정 통계에서도 뺀다.
-  const allMemberIds = new Set(
-    state.requests
-      .filter((r) => !currentExcludedIds().includes(r.memberId))
-      .map((r) => r.memberId),
-  );
+  // (배정 실패가 아니라 의도적 제외이므로) 미배정 통계에서도 뺀다(scheduleTargetMemberIds).
+  const allMemberIds = new Set(scheduleTargetMemberIds());
   const eligible = state.requests.filter(isEligibleRequest);
   const eligibleIds = new Set(eligible.map((r) => r.id));
 
