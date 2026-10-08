@@ -20,6 +20,10 @@ const { chromium } = require("playwright");
 const ROOT = path.resolve(__dirname, "..");
 const INDEX_URL = "file://" + path.join(ROOT, "index.html");
 const STORAGE_KEY = "pt_schedule_state_v3";
+// 앱이 읽지 않는 별도 키 — smoke 초기화 스크립트가 시드를 넣었는지 탐색마다 기록한다.
+const SEED_LOG_KEY = "__smoke_seed_log__";
+// 실패 진단 기록(스크린샷·저장값·콘솔). CI가 실패 시 아티팩트로 올린다.
+const ARTIFACT_DIR = path.join(ROOT, "test-artifacts");
 const FULL_BUDGET_A = process.env.SMOKE_FULL_BUDGET_A === "1";
 const A_BUDGET_SCALE = Number(process.env.SMOKE_A_BUDGET_SCALE || "0.005");
 
@@ -512,13 +516,25 @@ async function main() {
     // 수동 편집·설정 입력의 화면 연결(판정 정책 자체는 unit이 맡는다): 드래그를 놓으면 근무 시간 검사가 적용되고,
     // 메뉴로 회원을 교체하면 카드의 미배정 표시가 바뀌고, 입력칸·선택창은 보정된 값을 보여준다.
     const me = await browser.newPage();
-    me.on("pageerror", (err) => failures.push("수동 편집 페이지 런타임 에러: " + err.message));
+    // 교체·새로고침 검사가 실패하면 원인을 볼 수 있도록 단계별 저장값·화면·콘솔과 시드 주입 기록을 남긴다
+    // (CI에서는 test-artifacts/를 아티팩트로 올린다).
+    const meConsole = [];
+    me.on("console", (msg) => meConsole.push({ type: msg.type(), text: msg.text() }));
+    me.on("pageerror", (err) => {
+      meConsole.push({ type: "pageerror", text: err.message });
+      failures.push("수동 편집 페이지 런타임 에러: " + err.message);
+    });
     const meSeed = buildManualEditSeedState();
     await me.addInitScript(
-      ({ key, data }) => {
-        if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(data));
+      ({ key, data, logKey }) => {
+        // 초기화 스크립트는 탐색(새로고침 포함)마다 돈다. 시드를 넣었는지 매번 기록해 재주입 여부를 확인한다.
+        const injected = !localStorage.getItem(key);
+        if (injected) localStorage.setItem(key, JSON.stringify(data));
+        const log = JSON.parse(localStorage.getItem(logKey) || "[]");
+        log.push({ at: new Date().toISOString(), injected });
+        localStorage.setItem(logKey, JSON.stringify(log));
       },
-      { key: STORAGE_KEY, data: meSeed }
+      { key: STORAGE_KEY, data: meSeed, logKey: SEED_LOG_KEY }
     );
     await me.goto(INDEX_URL);
     await me.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
@@ -532,13 +548,59 @@ async function main() {
     assert(JSON.stringify((await meCard()).assigned) === assignedBefore, "근무하지 않는 화요일로 드래그한 수업이 옮겨짐");
     assert((await toastTexts()).some((t) => t.includes("근무 가능 시간 밖")), "근무 시간 밖 드래그에 안내가 없음: " + JSON.stringify(await toastTexts()));
     const cardText = () => me.locator("#candidates3 .candidate-card").first().innerText();
-    assert(/미배정 1명/.test(await cardText()), "교체 전 카드에 '미배정 1명'이 없음(픽스처 확인)");
+    const swapFailuresBefore = failures.length;
+    const swapStages = [];
+    const recordStage = async (stage) => {
+      const raw = await me.evaluate((key) => localStorage.getItem(key), STORAGE_KEY);
+      const st = raw ? JSON.parse(raw) : null;
+      const snap = {
+        stage,
+        stored: st && {
+          inputKey: st.schedule3Result && st.schedule3Result.inputKey,
+          candidateAList: st.schedule3Result && st.schedule3Result.candidateAList,
+          candidates: st.candidates,
+        },
+        seedLog: JSON.parse((await me.evaluate((k) => localStorage.getItem(k), SEED_LOG_KEY)) || "[]"),
+        cardText: await cardText(),
+        consoleSoFar: meConsole.length,
+        screenshot: await me.screenshot({ fullPage: true }),
+      };
+      swapStages.push(snap);
+      return snap;
+    };
+    // 저장된 B 슬롯의 배정 id·미배정 id·확정 id
+    const summarize = (snap) => {
+      const c = snap.stored && snap.stored.candidates && snap.stored.candidates[0];
+      return c ? { assigned: c.assigned.map((a) => a.id), unassigned: (c.unassignedMembers || []).map((m) => m.id), confirmedIds: c.confirmedIds } : null;
+    };
+    const SWAPPED = { assigned: ["A0_0", "B2_0"], unassigned: [], confirmedIds: ["B2_0"] };
+    const before = await recordStage("교체 전");
+    assert(JSON.stringify(summarize(before)) === JSON.stringify({ assigned: ["A0_0", "A2_0"], unassigned: ["B"], confirmedIds: [] }), "교체 전 저장값이 픽스처와 다름: " + JSON.stringify(summarize(before)));
+    assert(/미배정 1명/.test(before.cardText), "교체 전 카드에 '미배정 1명'이 없음(픽스처 확인)");
     await me.locator("#candidates3 .cal-block", { hasText: "회원A" }).nth(1).evaluate((el) => el.click());
     await me.locator(".block-context-menu-item", { hasText: "회원B(으)로 교체" }).first().evaluate((el) => el.click());
-    assert(!/미배정 \d+명/.test(await cardText()), "미배정 회원으로 교체했는데 카드에 미배정이 남음: " + (await cardText()));
+    const afterSwap = await recordStage("교체 직후");
+    assert(JSON.stringify(summarize(afterSwap)) === JSON.stringify(SWAPPED), "교체 직후 저장값(배정·미배정·확정)이 다름: " + JSON.stringify(summarize(afterSwap)));
+    assert(!/미배정 \d+명/.test(afterSwap.cardText), "미배정 회원으로 교체했는데 카드에 미배정이 남음: " + afterSwap.cardText);
     await me.reload();
     await me.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
-    assert(!/미배정 \d+명/.test(await cardText()), "교체 뒤 새로고침하자 카드에 미배정이 다시 나타남");
+    const afterReload = await recordStage("새로고침 후");
+    assert(JSON.stringify(summarize(afterReload)) === JSON.stringify(SWAPPED), "교체 뒤 새로고침하자 저장값(배정·미배정·확정)이 달라짐: " + JSON.stringify(summarize(afterReload)));
+    assert(!/미배정 \d+명/.test(afterReload.cardText), "교체 뒤 새로고침하자 카드에 미배정이 다시 나타남");
+    assert(JSON.stringify(afterReload.seedLog.map((e) => e.injected)) === JSON.stringify([true, false]), "새로고침 때 초기 시드가 다시 주입됨: " + JSON.stringify(afterReload.seedLog));
+    if (failures.length > swapFailuresBefore) {
+      const dir = path.join(ARTIFACT_DIR, "swap-reload");
+      fs.mkdirSync(dir, { recursive: true });
+      swapStages.forEach((snap, i) => fs.writeFileSync(path.join(dir, i + "-" + snap.stage + ".png"), snap.screenshot));
+      const report = {
+        failures: failures.slice(swapFailuresBefore),
+        expectedAfterSwap: SWAPPED,
+        stages: swapStages.map(({ screenshot, ...rest }) => ({ ...rest, summary: summarize(rest) })),
+        console: meConsole,
+      };
+      fs.writeFileSync(path.join(dir, "report.json"), JSON.stringify(report, null, 2));
+      console.error("교체·새로고침 진단 기록: " + dir);
+    }
     await me.click('.nav-item[data-page="settings"]');
     const travelInput = me.locator(".travel-min-input").first();
     await travelInput.fill("");

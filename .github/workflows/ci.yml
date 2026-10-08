@@ -26,3 +26,10 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: 스모크 테스트 (후보A는 시간 예산을 축소해 검증 — tests/smoke.js 참고)
         run: npm test
+      - name: 스모크 실패 진단 기록 업로드
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-diagnostics
+          path: test-artifacts/
+          if-no-files-found: ignore
