@@ -13,7 +13,8 @@
     "test:csp-static": "node tests/cspStatic.js",
     "test:golden": "node tests/golden.js",
     "test:fuzz": "node tests/fuzz.js",
-    "fuzz:stress": "node tests/fuzz.js --start 1000 --count 5000 --a-every 50"
+    "fuzz:stress": "node tests/fuzz.js --start 1000 --count 5000 --a-every 50",
+    "diversity": "node tests/diversity.js"
   },
   "keywords": [],
   "author": "",
