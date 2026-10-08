@@ -1163,7 +1163,11 @@ body {
 .reopt-worse b { color: var(--danger); }
 .reopt-proposal .candidate-pool-pager { margin: 8px 0; }
 .reopt-variant-btn { height: 28px; padding: 0 10px; font-size: 12px; }
-.reopt-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.reopt-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.reopt-choices { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.reopt-choice { height: auto; min-height: 30px; padding: 4px 10px; font-size: 12px; white-space: normal; text-align: left; }
+.reopt-choice[aria-pressed="true"] { border-color: var(--primary); box-shadow: inset 0 0 0 1px var(--primary); background: var(--primary-soft); font-weight: 700; }
+.reopt-notice { margin: 10px 0 0; font-size: 13px; color: var(--text-mute); }
 @media (max-width: 480px) {
   .candidate-compare { padding: 12px 10px; }
   .candidate-compare-table { font-size: 12px; }

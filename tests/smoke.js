@@ -45,19 +45,24 @@ function buildSeedState() {
   };
 }
 
-// 재최적화: 상담 회원 3명(주 1회, 30분)이 월 12:00~18:00 어디든 가능하다. 사용자가 손댄 카드는
-// A(12:00, 확정) · B(12:30) · C(16:00)라 B 뒤 빈 시간이 3시간이다 — A를 그대로 두고 다시 짜면 어떤
-// 엔진이든 C를 당겨 빈 시간을 없애므로 제안이 반드시 나온다.
-function buildReoptSeedState() {
+// 재최적화(5b-2b): 상담 회원(주 1회, 30분)이 월 12:00~18:00 어디든 가능하다. 기본 카드는 B(12:30) · A(14:00, 확정)
+// · C(16:00) · D(16:30)라 빈 시간이 150분이다. L1(A 바로 앞뒤 B·C만 움직임, D는 임시 고정)은 B를 A 앞으로 당겨
+// 빈 시간 −60분인 변경 최소화 제안을 내고, 전체 탐색은 C·D까지 당겨 빈 시간 0을 만든다(더 나은 결과 → 비교).
+// tight: A(12:00, 확정) · B(12:30) · C(13:00) — 빈 시간이 없어 어느 범위에서도 더 나은 배치가 없다.
+function buildReoptSeedState(layout = "default") {
   const cells = [];
   for (let slot = 0; slot < 36; slot++) cells.push("0-" + slot);
-  const ids = ["A", "B", "C"];
+  const ids = layout === "tight" ? ["A", "B", "C"] : ["A", "B", "C", "D"];
   const requests = [];
   ids.forEach((m) => {
     for (let slot = 0; slot <= 33; slot++)
       requests.push({ id: m + "_" + slot, memberId: m, day: 0, startSlot: slot, duration: 30 });
   });
   const at = (m, slot) => ({ id: m + "_" + slot, memberId: m, day: 0, startSlot: slot, duration: 30, locationId: "loc1" });
+  const card =
+    layout === "tight"
+      ? { assigned: [at("A", 0), at("B", 3), at("C", 6)], unassignedMembers: [], confirmedIds: ["A_0"] }
+      : { assigned: [at("B", 3), at("A", 12), at("C", 24), at("D", 27)], unassignedMembers: [], confirmedIds: ["A_12"] };
   return {
     locations: [{ id: "loc1", name: "테스트지점" }],
     travelTimes: {},
@@ -68,7 +73,7 @@ function buildReoptSeedState() {
     availableCells: cells,
     currentPage: "schedule3",
     startMinBase: 720,
-    candidates: [{ assigned: [at("A", 0), at("B", 3), at("C", 24)], unassignedMembers: [], confirmedIds: ["A_0"] }],
+    candidates: [card],
     schedule3Result: { candidateAList: [null, null, null] },
   };
 }
@@ -288,22 +293,29 @@ async function main() {
       await mob.close();
     }
 
-    // 재최적화: 실행 → 취소(카드 그대로) → 제안 미리보기 → 버리기(카드 그대로) → 적용 → 되돌리기.
-    const ro = await browser.newPage();
-    ro.on("pageerror", (err) => failures.push("재최적화 페이지 런타임 에러: " + err.message));
-    ro.on("console", (msg) => {
-      if (msg.type() === "error") failures.push("재최적화 콘솔 에러: " + msg.text());
-    });
-    const reoptSeed = buildReoptSeedState();
-    await ro.addInitScript(
-      ({ key, data, scale }) => {
-        if (scale) window.__PT_TEST_BUDGET_SCALE__ = scale;
-        if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(data));
-      },
-      { key: STORAGE_KEY, data: reoptSeed, scale: FULL_BUDGET_A ? 0 : A_BUDGET_SCALE }
-    );
-    await ro.goto(INDEX_URL);
-    await ro.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    // 재최적화(5b-2b): 취소(카드 그대로) → L1 변경 최소화 제안(전체 자동 실행 없음) → 버리기 → 다시 → 전체 일정
+    // 다시 탐색(더 나은 결과는 기존 제안과 함께 비교) → 넓은 결과 적용(확정은 사용자 고정만) → 되돌리기 → 새로고침.
+    const openReoptPage = async (layout) => {
+      const page = await browser.newPage();
+      const log = [];
+      page.on("pageerror", (err) => failures.push("재최적화 페이지 런타임 에러: " + err.message));
+      page.on("console", (msg) => {
+        if (msg.type() === "error") failures.push("재최적화 콘솔 에러: " + msg.text());
+        if (msg.text().startsWith("[재최적화]")) log.push(JSON.parse(msg.text().slice("[재최적화] ".length)));
+      });
+      const seed = buildReoptSeedState(layout);
+      await page.addInitScript(
+        ({ key, data, scale }) => {
+          if (scale) window.__PT_TEST_BUDGET_SCALE__ = scale;
+          if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(data));
+        },
+        { key: STORAGE_KEY, data: seed, scale: FULL_BUDGET_A ? 0 : A_BUDGET_SCALE }
+      );
+      await page.goto(INDEX_URL);
+      await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+      return { page, log, seed };
+    };
+    const { page: ro, log: reoptLog, seed: reoptSeed } = await openReoptPage("default");
     const editedCard = async () => (await readState(ro)).candidates[0];
     const seedJson = JSON.stringify(reoptSeed.candidates[0].assigned.map((a) => a.id).sort());
     const editedIds = async () => JSON.stringify((await editedCard()).assigned.map((a) => a.id).sort());
@@ -312,8 +324,9 @@ async function main() {
     assert((await reoptBtn.count()) === 1, "수정 카드에 '나머지 일정 다시 최적화' 버튼이 없음");
     const hintText = await ro.locator("#candidates3 .reopt-hint").innerText().catch(() => "");
     assert(hintText.includes("유지할 수업 1개"), "유지할 수업 수 안내가 다름: " + hintText);
-    const waitIdle = () =>
-      ro.waitForFunction(() => !document.querySelector("#generateBtn3").disabled, null, { timeout: generateTimeout });
+    const waitIdle = (page = ro) =>
+      page.waitForFunction(() => !document.querySelector("#generateBtn3").disabled, null, { timeout: generateTimeout });
+    const levelsRun = (log) => log.map((e) => e.level + "×" + e.budgetScale).join(",");
 
     await reoptBtn.click();
     await ro.click("#generateBtn3Cancel");
@@ -321,15 +334,20 @@ async function main() {
     assert(!(await reoptPanel.isVisible()), "재최적화를 취소했는데 제안이 나타남");
     assert((await editedIds()) === seedJson, "재최적화 취소 뒤 카드가 바뀜");
 
+    reoptLog.length = 0;
     await reoptBtn.click();
     await waitIdle();
     const proposalText = (await reoptPanel.isVisible()) ? await reoptPanel.innerText() : "";
-    assert(proposalText.includes("재최적화 제안"), "재최적화 제안 패널이 나타나지 않음: " + (await ro.locator("#generateHint3").innerText()));
-    assert(proposalText.includes("유지할 수업 1개"), "제안에 유지할 수업 수가 없음");
+    assert(proposalText.includes("변경 최소화 제안"), "변경 최소화 제안 패널이 나타나지 않음: " + (await ro.locator("#generateHint3").innerText()) + " / " + levelsRun(reoptLog));
+    assert(levelsRun(reoptLog) === "L1×0.1", "L1에서 개선을 찾았으면 그 Level에서 멈춰야 함(전체 자동 실행 금지): " + levelsRun(reoptLog));
+    assert(proposalText.includes("유지할 수업 1개") && proposalText.includes("고정한 수업 바로 앞뒤 범위"), "제안에 유지할 수업 수·범위가 없음");
+    assert(proposalText.includes("가장 좋은 일정이라는 뜻은 아닙니다"), "변경 최소화 제안이 최선이 아님을 알리지 않음");
     assert(/좋아지는 것\s*빈 시간 -\d+분/.test(proposalText), "제안 요약에 빈 시간 개선이 없음: " + proposalText);
     assert(proposalText.includes("나빠지는 것"), "제안 요약에 나빠지는 것 줄이 없음");
     assert((await reoptPanel.locator("tbody tr").count()) === 10, "제안 지표가 10개가 아님");
-    assert(/회원 \d+명의 일정이 바뀝니다/.test(proposalText) && proposalText.includes("배정 차이"), "변경 회원 수·상세가 없음");
+    assert(/회원 1명\(수업 1개\)의 일정이 바뀝니다/.test(proposalText) && proposalText.includes("배정 차이"), "변경 회원·세션 수·상세가 없음");
+    // L2·L3 범위는 전체와 같아 국소로 다시 돌리지 않으므로 다음 단계는 전체 탐색이다.
+    assert((await reoptPanel.locator(".reopt-widen").innerText()) === "전체 일정 다시 탐색", "다음 단계 버튼이 전체 일정 다시 탐색이 아님");
     assert((await editedIds()) === seedJson, "제안을 보여주기만 했는데 카드가 바뀜");
 
     await ro.setViewportSize({ width: 320, height: 800 });
@@ -346,15 +364,28 @@ async function main() {
     assert(!(await reoptPanel.isVisible()), "버리기 뒤에도 제안 패널이 남음");
     assert((await editedIds()) === seedJson, "버리기 뒤 카드가 바뀜");
 
+    reoptLog.length = 0;
     await reoptBtn.click();
     await waitIdle();
+    await ro.click("#reoptimize3 .reopt-widen");
+    await waitIdle();
+    assert(levelsRun(reoptLog) === "L1×0.1,full×1", "전체 탐색은 버튼을 눌렀을 때 운영 예산으로 한 번만 돌아야 함: " + levelsRun(reoptLog));
+    const choices = reoptPanel.locator(".reopt-choice");
+    const widerText = (await reoptPanel.isVisible()) ? await reoptPanel.innerText() : "";
+    assert((await choices.count()) === 2, "더 넓게 찾은 더 나은 결과와 변경 최소화 제안을 함께 보여주지 않음: " + widerText);
+    assert((await choices.first().getAttribute("aria-pressed")) === "true", "더 넓은 결과가 변경 최소화 제안 선택을 자동으로 덮어씀");
+    assert(widerText.includes("변경 최소화 제안과 더 넓은 탐색 결과 비교") && widerText.includes("두 제안의 배정 차이"), "두 제안 비교가 없음");
+    assert((await reoptPanel.locator(".reopt-widen").count()) === 0, "전체 탐색 뒤에도 더 넓게 찾기 버튼이 남음");
+    assert((await editedIds()) === seedJson, "더 넓게 찾기만 했는데 카드가 바뀜");
+    if (process.env.SMOKE_SHOT_DIR) await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-compare.png") });
+    await choices.nth(1).click();
     await ro.click("#reoptimize3 .reopt-apply");
     let applied = await editedCard();
     assert((await editedIds()) !== seedJson, "적용했는데 카드가 그대로임");
     assert(
-      applied.assigned.some((a) => a.id === "A_0" && a.locationId === "loc1") &&
-        JSON.stringify(applied.confirmedIds) === JSON.stringify(["A_0"]),
-      "적용 뒤 유지할 수업(A 12:00)이 그대로·확정 상태가 아님: " + JSON.stringify(applied)
+      applied.assigned.some((a) => a.id === "A_12" && a.locationId === "loc1") &&
+        JSON.stringify(applied.confirmedIds) === JSON.stringify(["A_12"]),
+      "적용 뒤 유지할 수업(A 14:00)만 확정 상태여야 함(임시 고정 제외): " + JSON.stringify(applied)
     );
     assert(!(await reoptPanel.isVisible()), "적용 뒤에도 제안 패널이 남음");
     const undoBtn = ro.locator('#candidates3 button[aria-label="편집 취소"]');
@@ -364,6 +395,22 @@ async function main() {
     await ro.reload();
     await ro.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
     assert((await editedIds()) === seedJson, "되돌린 카드가 새로고침 뒤 유지되지 않음");
+
+    // 국소 범위에서 모두 실패: 전체 탐색을 자동으로 시작하지 않고 안내 + 전체 일정 다시 탐색 버튼만 보인다.
+    const { page: tp, log: tightLog } = await openReoptPage("tight");
+    const tightPanel = tp.locator("#reoptimize3");
+    await tp.click("#candidates3 .reopt-btn");
+    await waitIdle(tp);
+    const tightText = (await tightPanel.isVisible()) ? await tightPanel.innerText() : "";
+    assert(tightText.includes("변경 범위를 제한한 탐색에서는 더 나은 일정을 찾지 못했습니다."), "국소 실패 안내가 없음: " + tightText);
+    assert(!levelsRun(tightLog).includes("full"), "국소 실패 뒤 전체 탐색이 자동으로 시작됨: " + levelsRun(tightLog));
+    assert((await tightPanel.locator(".reopt-apply").count()) === 0, "제안이 없는데 적용 버튼이 있음");
+    if (process.env.SMOKE_SHOT_DIR) await tightPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-local-exhausted.png") });
+    await tp.click("#reoptimize3 .reopt-widen");
+    await waitIdle(tp);
+    assert(levelsRun(tightLog).endsWith("full×1"), "전체 일정 다시 탐색이 운영 예산으로 돌지 않음: " + levelsRun(tightLog));
+    assert(!(await tightPanel.isVisible()), "전체 탐색에서도 나은 결과가 없으면 패널을 닫아야 함");
+    assert((await tp.locator("#generateHint3").innerText()).includes("지금보다 나은 배치를 찾지 못했습니다"), "전체 탐색 실패 안내가 없음");
   } finally {
     await browser.close();
   }
@@ -375,7 +422,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·제안·버리기·적용·되돌리기, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 

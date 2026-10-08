@@ -1918,6 +1918,160 @@ test("후보A 예산 배율: 생략하거나 1이면 운영 예산 그대로이�
   }
 });
 
+// 국소 재최적화 앱 흐름(5b-2b). reoptimize 가짜: Level별 결과를 정해 두고 호출 순서를 기록한다.
+function fakeLevels(byLevel) {
+  const calls = [];
+  const fn = async (pins, level) => {
+    calls.push(level);
+    const r = byLevel[level];
+    if (r instanceof Error) throw r;
+    return { status: r || "no-better", reason: r ? null : "equal-quality", level };
+  };
+  return { calls, fn };
+}
+const improved = (o) => o.status === "improved";
+testAsync("국소 탐색: L1에서 개선안을 찾으면 그 Level에서 멈추고 L2를 자동으로 돌리지 않는다", async () => {
+  const f = impactFixture();
+  const search = lib.createLocalSearch(f.current, f.userPins, f.origins);
+  const fake = fakeLevels({ L1: "improved", L2: "improved" });
+  const found = await lib.continueLocalSearch(search, fake.fn, improved);
+  assertEqual([found.level, fake.calls], ["L1", ["L1"]]);
+  assertEqual(lib.nextLocalLevel(search), "L2");
+});
+testAsync("국소 탐색: 더 넓게 찾아보기는 다음 Level부터 이어서 한 Level씩 돌리고, 끝낸 Level은 다시 생성하지 않는다", async () => {
+  const f = impactFixture();
+  const search = lib.createLocalSearch(f.current, f.userPins, []);
+  const fake = fakeLevels({ L1: "improved" });
+  await lib.continueLocalSearch(search, fake.fn, improved);
+  const widen = () => lib.continueLocalSearch(search, fake.fn, () => true);
+  assertEqual((await widen()).level, "L2");
+  assertEqual((await widen()).level, "L3");
+  assertEqual(await widen(), null, "국소 Level을 다 보면 null(전체는 따로)");
+  assertEqual(fake.calls, ["L1", "L2", "L3"]);
+  assertEqual(lib.nextLocalLevel(search), null);
+});
+testAsync("국소 탐색: L1~L3가 모두 실패해도 전체 재최적화를 자동으로 돌리지 않는다", async () => {
+  const f = impactFixture();
+  const search = lib.createLocalSearch(f.current, f.userPins, []);
+  const fake = fakeLevels({});
+  assertEqual(await lib.continueLocalSearch(search, fake.fn, improved), null);
+  assertEqual(fake.calls, ["L1", "L2", "L3"]);
+  // 원래 위치를 알면 이 픽스처의 L3는 전체와 같은 범위라 국소로 돌리지 않는다(전체는 사용자가 고를 때만).
+  const known = lib.createLocalSearch(f.current, f.userPins, f.origins);
+  const fake2 = fakeLevels({});
+  assertEqual(await lib.continueLocalSearch(known, fake2.fn, improved), null);
+  assertEqual([fake2.calls, known.steps[2].skipped], [["L1", "L2"], "same-as-full"]);
+});
+testAsync("국소 탐색: 범위가 비었거나 앞 Level과 같거나 전체와 같으면 그 Level은 생성하지 않는다", async () => {
+  const s = (memberId, day, startSlot) => ({ id: memberId + day, memberId, day, startSlot, duration: 60, locationId: "L1" });
+  // 월: C(고정) X, 화: Y — L1·L2·L3 = {X}(L2·L3는 앞과 같음), 전체 = {X, Y}.
+  const current = { assigned: [s("C", 0, 0), s("X", 0, 6), s("Y", 1, 0)], unassignedMembers: [] };
+  const search = lib.createLocalSearch(current, [s("C", 0, 0)], []);
+  const fake = fakeLevels({});
+  await lib.continueLocalSearch(search, fake.fn, improved);
+  assertEqual(fake.calls, ["L1"]);
+  assertEqual(search.steps.map((x) => x.skipped || x.status), ["no-better", "same-as-previous", "same-as-previous"]);
+  // 월: C(고정) X만 — L1부터 전체와 같은 범위라 국소 Level을 돌리지 않는다(전체 탐색만 남음).
+  const only = { assigned: [s("C", 0, 0), s("X", 0, 6)], unassignedMembers: [] };
+  const search2 = lib.createLocalSearch(only, [s("C", 0, 0)], []);
+  assertEqual(lib.nextLocalLevel(search2), null);
+  const fake2 = fakeLevels({});
+  assertEqual(await lib.continueLocalSearch(search2, fake2.fn, improved), null);
+  assertEqual(fake2.calls, []);
+});
+testAsync("국소 탐색: 취소하면 이후 Level을 돌리지 않고, 취소한 Level은 끝나지 않은 것으로 남는다", async () => {
+  const f = impactFixture();
+  const search = lib.createLocalSearch(f.current, f.userPins, f.origins);
+  const cancel = new lib.GenerationCancelledError();
+  const fake = fakeLevels({ L2: cancel });
+  let caught = null;
+  try {
+    await lib.continueLocalSearch(search, fake.fn, improved);
+  } catch (e) {
+    caught = e;
+  }
+  assert(caught === cancel, "취소가 그대로 올라와야 함");
+  assertEqual(fake.calls, ["L1", "L2"]);
+  assertEqual(lib.nextLocalLevel(search), "L2");
+});
+testAsync("국소 Level은 외부 후보B·C를 부르지 않고 후보A만 국소 예산 배율로 부른다", async () => {
+  assertEqual(lib.LOCAL_REOPTIMIZE_BUDGET_SCALE, 0.1);
+  for (const level of lib.LOCAL_LEVELS) {
+    const calls = [];
+    const gen = await lib.generateForLevel(level, ["p"], {
+      bc: async () => (calls.push("bc"), ["b"]),
+      a: async (pins, scale) => (calls.push("a×" + scale), ["a"]),
+    });
+    assertEqual([calls, gen], [["a×0.1"], { bc: [], a: ["a"] }], level);
+  }
+});
+testAsync("전체 재최적화는 후보B·C와 후보A를 모두 운영 예산(배율 생략)으로 부른다", async () => {
+  const calls = [];
+  const gen = await lib.generateForLevel("full", ["p"], {
+    bc: async () => (calls.push("bc"), ["b"]),
+    a: async (pins, scale) => (calls.push("a×" + scale), ["a"]),
+  });
+  assertEqual([calls, gen], [["bc", "a×undefined"], { bc: ["b"], a: ["a"] }]);
+  assertEqual(lib.groupBudgets(lib.levelPlan("full").budgetScale), lib.groupBudgets(1), "배율 생략 = 운영 예산");
+});
+test("더 넓게 찾은 결과가 지금 제안보다 엄격히 낫지 않으면 기존 국소 제안을 그대로 둔다", () => {
+  const f = reoptFixture();
+  const local = { level: "L1", variants: [{ result: f.better }], variantIdx: 0 };
+  const proposals = [local];
+  for (const r of [f.current, f.betterVariant]) {
+    assertEqual(lib.addWiderProposal(proposals, { level: "L2", variants: [{ result: r }] }), false);
+    assertEqual(proposals, [local]);
+  }
+});
+test("더 넓게 찾은 결과가 더 좋아도 기존 국소 제안을 덮어쓰지 않고 둘 다 남겨 사용자가 고르게 한다", () => {
+  const f = reoptFixture();
+  const fewer = { assigned: [at("A", 0, 0, "L1"), at("B", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 10, "L3")], unassignedMembers: [] };
+  const best = { assigned: f.better.assigned.concat([at("S", 0, 12, "L1")]), unassignedMembers: [] };
+  assert(lib.isSchedule2ResultBetter(best, fewer), "픽스처 확인");
+  const local = { level: "L1", variants: [{ result: fewer }], variantIdx: 0 };
+  const proposals = [local];
+  assertEqual(lib.addWiderProposal(proposals, { level: "L2", variants: [{ result: best }] }), true);
+  assert(proposals[0] === local && proposals[0].variants[0].result === fewer, "첫 제안(변경 최소화)은 그대로");
+  assertEqual(proposals.map((p) => p.level), ["L1", "L2"]);
+  // 그다음 넓힌 결과는 지금까지 가장 좋은 제안(L2)보다 나아야 더해진다.
+  assertEqual(lib.addWiderProposal(proposals, { level: "L3", variants: [{ result: f.better }] }), false);
+});
+test("재최적화 적용: 확정(confirmedIds)에는 사용자가 고정한 수업만 남고 국소 탐색의 임시 고정은 들어가지 않는다", () => {
+  const f = reoptFixture();
+  // 사용자 고정은 화요일 S뿐. 제안은 월요일 A·B(임시 고정되었던 자리)를 그대로 두고 C만 옮겼다.
+  const target = { ...f.current, confirmedIds: [at("S", 1, 0, "L1").id] };
+  const out = lib.reoptimizedCard(target, f.better);
+  assertEqual(out.confirmedIds, [at("S", 1, 0, "L1").id]);
+  assertEqual(lib.layoutSignature(out), lib.layoutSignature(f.better));
+  assert(out.assigned !== f.better.assigned && out.assigned[0] !== f.better.assigned[0], "제안 객체를 복사");
+});
+testAsync("원래 위치를 모르면(되돌리기 기록 없음) 현재 위치만으로 국소 탐색이 정상 동작한다", async () => {
+  const f = impactFixture();
+  assertEqual(lib.originsFromUndo(f.current, f.userPins, undefined), []);
+  const search = lib.createLocalSearch(f.current, f.userPins, lib.originsFromUndo(f.current, f.userPins, undefined));
+  const seen = [];
+  const found = await lib.continueLocalSearch(
+    search,
+    async (pins, level) => (seen.push(lib.impactRegion(f.current, f.userPins, level).movable.length), { status: "improved" }),
+    improved,
+  );
+  assertEqual([found.level, found.region.movable.map((a) => a.id).sort(), seen], ["L1", ["B0", "D0"], [2]]);
+});
+test("원래 위치: 되돌리기 기록의 가장 오래된 상태에서 고정한 회원이 비운 자리만 꺼낸다", () => {
+  const f = impactFixture();
+  const s = (memberId, day, startSlot) => ({ id: memberId + day, memberId, day, startSlot, duration: 60, locationId: "L1" });
+  // 편집 전: C는 수요일 6, A는 화요일 0(A는 고정 회원이 아니라 원래 위치로 보지 않는다).
+  const snapshot = { assigned: f.current.assigned.filter((a) => a.id !== "C0" && a.id !== "A0").concat([s("C", 2, 6), s("A", 1, 0)]) };
+  assertEqual(lib.originsFromUndo(f.current, f.userPins, snapshot), [{ day: 2, startSlot: 6 }]);
+});
+test("계측: 제안 배치를 만든 엔진(후보A / B·C / 둘 다 / 되돌리기)을 구분한다", () => {
+  const f = reoptFixture();
+  assertEqual(lib.proposalSource(f.better, { a: [f.better], bc: [] }), "A");
+  assertEqual(lib.proposalSource(f.better, { a: [], bc: [f.better] }), "BC");
+  assertEqual(lib.proposalSource(f.better, { a: [f.better], bc: [f.better] }), "A+BC");
+  assertEqual(lib.proposalSource(f.better, { a: [f.current], bc: [] }), "R");
+});
+
 function fakeWorkerFactory(reply) {
   const created = [];
   return {

@@ -89,6 +89,7 @@ export {
   dropStaleCandidates,
   validateMove,
   prepareSwap,
+  reoptimizedCard,
 } from "../../src/schedule3.js";
 export { candidateAPools, candidatePools } from "../../src/engine/greedy.js";
 export {
@@ -118,4 +119,18 @@ export {
   saveState,
 } from "../../src/state.js";
 export { pinKey, pinsFromResult, missingPins } from "../../src/engine/pins.js";
-export { IMPACT_LEVELS, impactRegion, runImpactLevels } from "../../src/engine/localReoptimize.js";
+export {
+  IMPACT_LEVELS,
+  impactRegion,
+  runImpactLevels,
+  LOCAL_LEVELS,
+  LOCAL_REOPTIMIZE_BUDGET_SCALE,
+  levelPlan,
+  generateForLevel,
+  proposalSource,
+  originsFromUndo,
+  createLocalSearch,
+  nextLocalLevel,
+  continueLocalSearch,
+  addWiderProposal,
+} from "../../src/engine/localReoptimize.js";
