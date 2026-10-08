@@ -5,7 +5,9 @@
 // 검사한다. 특정 정답 배치가 아니라 "어떤 입력이든 규칙은 지킨다"만 본다.
 // 재최적화(5a): 시드마다 생성한 결과에서 세션 1~3개(절반은 같은 요일 2개 이상)를 고정으로 골라 같은
 // 입력을 고정 세션과 함께 다시 생성하고, 그 결과 전부가 하드 제약에 더해 고정 유지(pinKept)·고정
-// 회원 횟수(pinQuota)를 지키는지 본다.
+// 회원 횟수(pinQuota)를 지키는지 본다. 고정을 고른 결과를 "지금 카드"로 두고 selectReoptimization이
+// 내준 제안·동점 variant·개선 목록 전부가 고정 유지·하드 제약·총 수업 수와 미배정 수 유지를 지키고 지금
+// 카드보다 엄격히 나은지(reoptProposal)도 본다.
 //
 // 모든 입력은 시드 하나로 결정되고 후보A도 가짜 시계라, 같은 시드는 항상 같은 결과를 낸다.
 //
@@ -251,12 +253,15 @@ const { lib } = runner;
 const PIN_RULES = {
   pinKept: "고정 세션은 같은 회원·요일·시작 시각·지점에 그대로 남는다",
   pinQuota: "고정 세션도 회원 최대 횟수와 하루 1회에 포함한다",
+  reoptProposal:
+    "재최적화 제안은 고정·하드 제약을 지키고, 총 수업 수를 줄이거나 미배정을 늘리지 않으며, 지금 카드보다 낫다",
 };
 const RULES = Object.keys(lib.HARD_RULES).concat(Object.keys(PIN_RULES));
 const ruleText = (r) => lib.HARD_RULES[r] || PIN_RULES[r];
 
 // 시드 입력에서 결정적으로 고정 세션을 고른다: 생성된 결과 하나에서 1~3개, 절반은 세션이 2개 이상인
 // 요일에서 2개를 함께 고른다(그리디가 같은 날 고정 사이를 채우지 않는 경로를 지나가게).
+// 반환 { pins, source } — source는 고정을 고른 결과(재최적화의 "지금 카드").
 function pinsFor(input, generated) {
   let h = 0;
   for (const ch of input.id) h = (Math.imul(h, 31) + ch.charCodeAt(0)) | 0;
@@ -264,8 +269,9 @@ function pinsFor(input, generated) {
   const sources = Object.keys(generated)
     .sort()
     .filter((k) => generated[k].result.assigned.length);
-  if (!sources.length) return [];
-  const assigned = generated[sources[Math.floor(rand() * sources.length)]].result.assigned
+  if (!sources.length) return { pins: [], source: null };
+  const source = generated[sources[Math.floor(rand() * sources.length)]].result;
+  const assigned = source.assigned
     .slice()
     .sort((a, b) => a.day - b.day || a.startSlot - b.startSlot);
   const pick = (list) => list.splice(Math.floor(rand() * list.length), 1)[0];
@@ -285,7 +291,7 @@ function pinsFor(input, generated) {
     if (!left.length) break;
     pins.push(pick(left));
   }
-  return pins.map((a) => ({ ...a }));
+  return { pins: pins.map((a) => ({ ...a })), source };
 }
 
 // 고정 회원별 [최대 횟수 초과 또는 같은 날 2회인 결과 수, 횟수 압박 기회]. 기회: 고정 회원이 고정한
@@ -320,6 +326,33 @@ async function pinQuotaCheck(input, pins, results) {
     },
   );
   return { bad, opp };
+}
+
+// [selectReoptimization이 내준 결과 중 규칙을 어긴 수, 기회]. 기회: 고정·하드 제약을 통과해 제안 후보가
+// 된 결과 수. "수업을 줄였지만 비교 기준으로는 더 나은" 결과는 무작위 입력에서 거의 나오지 않아(gate를
+// 빼는 변이도 여기서는 잡히지 않았다) 그 경로는 단위 테스트("수업을 줄여 공강을 줄인 결과는…")가 지킨다.
+async function reoptProposalCheck(input, current, pins, results) {
+  const assignedMembers = (r) => new Set(r.assigned.map((a) => a.memberId)).size;
+  const keeps = (r) =>
+    r.assigned.length >= current.assigned.length &&
+    assignedMembers(r) >= assignedMembers(current);
+  return lib.withSelectionOverride(
+    input.excludedMemberIds3,
+    input.onceLimitedMemberIds3,
+    async () => {
+      const out = lib.selectReoptimization(current, results, pins);
+      const bad = out.variants
+        .concat(out.improving)
+        .filter(
+          ({ result: r }) =>
+            lib.missingPins(r.assigned, pins).length ||
+            lib.scheduleViolations(r).length ||
+            !keeps(r) ||
+            !lib.isSchedule2ResultBetter(r, current),
+        ).length;
+      return { bad, opp: out.stats.passed || 0 };
+    },
+  );
 }
 
 // 프로퍼티가 헛돌지 않았는지(위반할 기회 자체가 있었는지) 규칙별로 센다 — 기회가 0이면 그
@@ -411,8 +444,8 @@ async function check(input, withA) {
     const opts = { attempts, withA, aAttempts: FUZZ_A_GREEDY_ATTEMPTS };
     const generated = await runner.generate(input, opts);
     const violations = await runner.violationsOf(input, generated);
-    const pins = pinsFor(input, generated);
-    const pinOps = { pinKept: 0, pinQuota: 0 };
+    const { pins, source } = pinsFor(input, generated);
+    const pinOps = { pinKept: 0, pinQuota: 0, reoptProposal: 0 };
     if (pins.length) {
       const pinnedRaw = await runner.generate(input, { ...opts, pins });
       const pinned = Object.fromEntries(
@@ -442,8 +475,16 @@ async function check(input, withA) {
           tie: 0,
           violation: { rule: "pinQuota", message: PIN_RULES.pinQuota },
         });
+      const reopt = await reoptProposalCheck(input, source, pins, results);
+      for (let i = 0; i < reopt.bad; i++)
+        violations.push({
+          key: "재최적화 제안",
+          tie: 0,
+          violation: { rule: "reoptProposal", message: PIN_RULES.reoptProposal },
+        });
       pinOps.pinKept = results.length;
       pinOps.pinQuota = quota.opp;
+      pinOps.reoptProposal = reopt.opp;
     }
     return { generated, violations, pinOps };
   } catch (err) {

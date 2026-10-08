@@ -7,6 +7,9 @@
 //   - 같은 날 고정 2개(sameDay)와 다른 날 고정 2개(otherDay)에서 후보B·C가 후보A보다 얼마나 못한지
 //     (그리디는 같은 날 고정 세션 사이 빈 시간을 채우지 않는다 — greedy.js 고정 처리 주석)
 //   - 고정 개수(1/2/3개)별 생성 시간
+//   - [5] 5b-1 안정성 측정(앱 미반영): 같은 개선 풀(selectReoptimization의 improving)에서 품질 최선(Q)과
+//     안정성 정렬 S1(변경 회원 우선)·S2(변경 심각도 우선), 각각의 되돌리기 패스(+R)가 고른 결과의
+//     변경량·품질, 풀 크기, (품질, 안정성) Pareto 대안 수, 되돌리기 처리 순서 민감도
 // 측정만 한다 — 실패 조건이 없어 CI에서 돌리지 않는다.
 //
 //   node tests/reoptimize.js                  기본 예산(아래 상수)
@@ -57,6 +60,49 @@ const COLUMNS = [
   ["travelCount", "이동"],
   ["idleMinutes", "빈시간"],
 ];
+// 5b-1 측정 대상 안정성 정렬(사전식, 작을수록 안정). 같으면 품질(추천 비교 기준) → 이동 시간 → 배치 서명.
+const STABILITY_ORDERS = {
+  S1: ["members", "sessions", "dayChanges", "locationChanges", "startOnly"],
+  S2: [
+    "statusChanges",
+    "dayChanges",
+    "locationChanges",
+    "members",
+    "sessions",
+    "startOnly",
+  ],
+};
+// Q·S1/Q·S2(참고): 품질은 Q와 같은 동률 그룹 안에서만 안정성 정렬로 고른다(품질 희생 0).
+const POLICIES = ["Q", "S1", "S2", "S1+R", "S2+R", "Q+R", "Q·S1", "Q·S2"];
+const CHANGE_COLUMNS = [
+  ["members", "변경 회원"],
+  ["sessions", "변경 세션"],
+  ["dayChanges", "요일 변경"],
+  ["locationChanges", "지점 변경"],
+  ["startOnly", "시작 시각만"],
+  ["newlyAssigned", "신규 배정"],
+  ["added", "수업 추가"],
+  ["removed", "수업 제거"],
+  ["membersFewer", "횟수 감소 회원"],
+  ["membersMore", "횟수 증가 회원"],
+  ["sessionCountShift", "횟수 증감 총량"],
+  ["newlyUnassigned", "배정→미배정"],
+];
+const QUALITY_COLUMNS = [
+  ["idleMinutes", "빈 시간"],
+  ["travelCount", "이동 횟수"],
+  ["travelMinutes", "이동 시간"],
+  ["spanMinutes", "체류 시간"],
+  ["sessions", "수업"],
+];
+// 되돌리기 순서 민감도: 기본(회원 id 오름차순) 외에 내림차순과 시드 셔플 이만큼.
+const REVERT_SHUFFLES = 6;
+const quantile = (xs, q) => {
+  if (!xs.length) return 0;
+  const s = xs.slice().sort((a, b) => a - b);
+  return s[Math.min(s.length - 1, Math.ceil(q * s.length) - 1)];
+};
+const dist = (xs) => `${fmt(avg(xs))}/${fmt(quantile(xs, 0.5))}/${fmt(quantile(xs, 0.9))}`;
 const pct = (n, d) => (d ? Math.round((n / d) * 1000) / 10 + "%" : "-");
 const avg = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 const fmt = (x) => (Math.round(x * 100) / 100).toString();
@@ -202,6 +248,8 @@ function summarize(report) {
     });
   });
 
+  summarizeStability(runs);
+
   console.log("\n[4] 생성 시간 (같은 예산, 고정 없음 대비)");
   console.log("시나리오\t고정 수\tB·C ms(고정 없음)\tA ms(고정 없음)");
   SCENARIOS.forEach((sc) => {
@@ -212,6 +260,126 @@ function summarize(report) {
         fmt(avg(list.map((r) => r.pins))),
         `${Math.round(avg(list.map((r) => r.ms.bc)))} (${Math.round(avg(list.map((r) => r.ms.bcFree)))})`,
         `${Math.round(avg(list.map((r) => r.ms.a)))} (${Math.round(avg(list.map((r) => r.ms.aFree)))})`,
+      ].join("\t"),
+    );
+  });
+}
+
+function summarizeStability(runs) {
+  const list = runs.filter((r) => r.stab);
+  console.log(
+    `\n[5] 5b-1 안정성 측정 — 개선 풀이 있는 실행 ${list.length}건 / 전체 ${runs.length}건 (지금 카드 대비, 평균/중앙값/p90)`,
+  );
+  console.log(
+    `제안 자격: 수업 유지 gate(총 수업 ≥, 미배정 ≤) 개선 ${pct(runs.filter((r) => r.status === "improved").length, runs.length)} · 회원별 횟수 감소까지 금지했다면 ${pct(runs.filter((r) => r.perMemberImproved).length, runs.length)} · gate 없음 ${pct(runs.filter((r) => r.oldImproved).length, runs.length)}`,
+  );
+  if (!list.length) return;
+  const pool = list.map((r) => r.stab.pool);
+  console.log(
+    `개선 풀(서로 다른 배치) 크기 ${dist(pool)}, 풀이 1개뿐이라 S1/S2가 고를 여지가 없던 실행 ${pct(pool.filter((n) => n === 1).length, list.length)}`,
+  );
+  console.log(
+    "현재 카드(0-change 기준점) 절대값: " +
+      QUALITY_COLUMNS.map(
+        ([k, label]) => `${label} ${dist(list.map((r) => r.stab.current[k]))}`,
+      ).join(", "),
+  );
+  console.log(
+    "\n[5-1] 변경량 (정책별, 평균/중앙값/p90)\n정책\t" +
+      CHANGE_COLUMNS.map((c) => c[1]).join("\t"),
+  );
+  console.log(["현재(0)"].concat(CHANGE_COLUMNS.map(() => "0/0/0")).join("\t"));
+  POLICIES.forEach((p) =>
+    console.log(
+      [p]
+        .concat(
+          CHANGE_COLUMNS.map(([k]) =>
+            dist(list.map((r) => r.stab.policies[p].change[k])),
+          ),
+        )
+        .join("\t"),
+    ),
+  );
+  console.log(
+    "\n[5-1b] 회원 간 재배분 발생 비율\n정책\t횟수 감소 회원 있음\t배정→미배정 있음(신규 배정과 맞바뀜)",
+  );
+  POLICIES.forEach((p) =>
+    console.log(
+      [
+        p,
+        pct(list.filter((r) => r.stab.policies[p].change.membersFewer > 0).length, list.length),
+        pct(list.filter((r) => r.stab.policies[p].change.newlyUnassigned > 0).length, list.length),
+      ].join("\t"),
+    ),
+  );
+  console.log(
+    "\n[5-2] 품질 변화 (정책 - 지금 카드, 평균/중앙값/p90)\n정책\t" +
+      QUALITY_COLUMNS.map((c) => c[1]).join("\t"),
+  );
+  POLICIES.forEach((p) =>
+    console.log(
+      [p]
+        .concat(
+          QUALITY_COLUMNS.map(([k]) =>
+            dist(
+              list.map((r) => r.stab.policies[p].metrics[k] - r.stab.current[k]),
+            ),
+          ),
+        )
+        .join("\t"),
+    ),
+  );
+  console.log(
+    "\n[5-3] Q 대비 (같은 실행)\n정책\tQ와 다른 배치\tQ가 품질상 엄격히 나음\t" +
+      QUALITY_COLUMNS.map((c) => c[1] + "(정책-Q)").join("\t"),
+  );
+  POLICIES.filter((p) => p !== "Q").forEach((p) =>
+    console.log(
+      [
+        p,
+        pct(list.filter((r) => r.stab.policies[p].sig !== r.stab.policies.Q.sig).length, list.length),
+        pct(list.filter((r) => r.stab.policies[p].qBetter).length, list.length),
+      ]
+        .concat(
+          QUALITY_COLUMNS.map(([k]) =>
+            dist(
+              list.map(
+                (r) => r.stab.policies[p].metrics[k] - r.stab.policies.Q.metrics[k],
+              ),
+            ),
+          ),
+        )
+        .join("\t"),
+    ),
+  );
+  console.log("\n[5-4] (품질, 안정성) Pareto 대안 — 첫 장 = 가장 안정적인 개선안, 이후는 덜 안정적이지만 품질이 엄격히 나은 것만");
+  console.log("정렬\t앞면 크기(평균/중앙값/p90)\t대안 있음(2개 이상)\t3개 초과(잘림)\t앞면 끝이 Q 품질이면서 Q보다 변경 회원 적음");
+  ["S1", "S2"].forEach((p) => {
+    const f = list.map((r) => r.stab.front[p]);
+    console.log(
+      [
+        p,
+        dist(f.map((x) => x.size)),
+        pct(f.filter((x) => x.size >= 2).length, list.length),
+        pct(f.filter((x) => x.size > 3).length, list.length),
+        pct(f.filter((x) => x.lastFewerMembersThanQ).length, list.length),
+      ].join("\t"),
+    );
+  });
+  console.log("\n[5-5] 되돌리기 패스(R) — 기본 순서: 회원 id 오름차순, 바뀐 것이 없을 때까지 반복");
+  console.log(
+    `기준\t1명 이상 되돌린 실행\t되돌린 회원 수\t줄어든 변경 세션\t순서 민감도: 결과가 순서마다 다른 실행\t순서 간 변경 회원 수 최대 차이(평균/최대)`,
+  );
+  ["S1", "S2", "Q"].forEach((p) => {
+    const rv = list.map((r) => r.stab.revert[p]);
+    console.log(
+      [
+        p + "+R",
+        pct(rv.filter((x) => x.reverted > 0).length, list.length),
+        dist(rv.map((x) => x.reverted)),
+        dist(rv.map((x) => x.sessionsSaved)),
+        pct(rv.filter((x) => x.orderVariants > 1).length, list.length),
+        `${fmt(avg(rv.map((x) => x.memberSpread)))}/${Math.max(...rv.map((x) => x.memberSpread))}`,
       ].join("\t"),
     );
   });
@@ -320,6 +488,172 @@ function editedCard(recommended, sc, rand) {
   return card;
 }
 
+// 지금 카드 → 결과의 변경량(5b-1 안정성 지표). 짝짓기는 candidateDiff.assignmentDiff 그대로다.
+function changeOf(current, result) {
+  const d = lib.assignmentDiff(current, result);
+  const changes = d.members.flatMap((m) => m.changes);
+  return {
+    members: d.counts.changedMembers,
+    sessions: changes.length,
+    statusChanges: d.counts.newlyAssigned + d.counts.newlyUnassigned,
+    dayChanges: d.counts.dayChanges,
+    locationChanges: d.counts.locationChanges,
+    startOnly: changes.filter(
+      (x) =>
+        x.from && x.to && x.startChanged && !x.dayChanged && !x.locationChanged,
+    ).length,
+    newlyAssigned: d.counts.newlyAssigned,
+    added: d.counts.sessionsAdded,
+    removed: d.counts.sessionsRemoved,
+    membersFewer: d.counts.membersFewer,
+    membersMore: d.counts.membersMore,
+    sessionCountShift: d.counts.sessionCountShift,
+    newlyUnassigned: d.counts.newlyUnassigned,
+  };
+}
+const changedMemberIds = (current, result) =>
+  lib.assignmentDiff(current, result).members.map((m) => m.memberId);
+// 품질 순서(추천 비교 기준 → 이동 시간 → 배치 서명). 음수면 x가 앞.
+const byQuality = (x, y) =>
+  lib.isSchedule2ResultBetter(x.result, y.result)
+    ? -1
+    : lib.isSchedule2ResultBetter(y.result, x.result)
+      ? 1
+      : lib.byTravelThenSignature(x, y);
+const byQualityClass = (x, y) =>
+  lib.isSchedule2ResultBetter(x.result, y.result)
+    ? -1
+    : lib.isSchedule2ResultBetter(y.result, x.result)
+      ? 1
+      : 0;
+const byStability = (keys) => (x, y) => {
+  for (const k of keys) if (x.change[k] !== y.change[k]) return x.change[k] - y.change[k];
+  return 0;
+};
+
+// 되돌리기 패스: 결과에서 바뀐 회원을 order 순서로 하나씩 지금 카드의 원래 배치로 되돌려 보고, 고정 유지·
+// 하드 제약·수업 유지 gate(keepsSessions)·base보다 품질이 나빠지지 않음을 모두 만족할 때만 유지한다. 바뀐 것이
+// 없을 때까지 반복한다.
+function revertPass(current, pins, base, order) {
+  let result = base;
+  for (let progress = true; progress; ) {
+    progress = false;
+    for (const id of order(changedMemberIds(current, result))) {
+      const cand = {
+        assigned: result.assigned
+          .filter((a) => a.memberId !== id)
+          .concat(current.assigned.filter((a) => a.memberId === id)),
+        unassignedMembers: result.unassignedMembers
+          .filter((m) => m.id !== id)
+          .concat(current.unassignedMembers.filter((m) => m.id === id)),
+      };
+      if (
+        lib.missingPins(cand.assigned, pins).length ||
+        lib.scheduleViolations(cand).length ||
+        !lib.keepsSessions(current, cand) ||
+        lib.isSchedule2ResultBetter(base, cand)
+      )
+        continue;
+      result = cand;
+      progress = true;
+    }
+  }
+  return result;
+}
+
+// 개선 풀(out.improving)에서 정책별 선택·되돌리기·Pareto 앞면을 잰다. 선택 상태 안에서 호출한다.
+function stabilityMeasure(card, pins, out, rand) {
+  const entryOf = (result) => ({
+    result,
+    metrics: lib.scheduleMetrics(result),
+    change: changeOf(card, result),
+  });
+  const pool = out.improving.map((e) => entryOf(e.result));
+  const picked = {
+    Q: entryOf(out.proposal.result),
+  };
+  Object.entries(STABILITY_ORDERS).forEach(([p, keys]) => {
+    picked[p] = pool.slice().sort((x, y) => byStability(keys)(x, y) || byQuality(x, y))[0];
+    picked["Q·" + p] = pool
+      .slice()
+      .sort(
+        (x, y) =>
+          byQualityClass(x, y) ||
+          byStability(keys)(x, y) ||
+          lib.byTravelThenSignature(x, y),
+      )[0];
+  });
+  const shuffle = (list) =>
+    list
+      .map((x) => [rand(), x])
+      .sort((a, b) => a[0] - b[0])
+      .map((p) => p[1]);
+  const orders = [
+    (ids) => ids.slice().sort(),
+    (ids) => ids.slice().sort().reverse(),
+  ];
+  for (let i = 0; i < REVERT_SHUFFLES; i++) orders.push((ids) => shuffle(ids));
+  const revert = {};
+  ["S1", "S2", "Q"].forEach((p) => {
+    const finals = orders.map((order) => entryOf(revertPass(card, pins, picked[p].result, order)));
+    const r = finals[0];
+    // S+R은 S보다 어떤 변경 지표도 늘면 안 된다(되돌린 회원의 변경만 사라진다).
+    finals.forEach((f) =>
+      Object.keys(f.change).forEach((k) => {
+        if (f.change[k] > picked[p].change[k])
+          throw new Error(`${p}+R이 ${k}를 늘림: ${picked[p].change[k]} → ${f.change[k]}`);
+      }),
+    );
+    if (lib.isSchedule2ResultBetter(picked[p].result, r.result))
+      throw new Error(p + "+R이 품질을 낮춤");
+    picked[p + "+R"] = r;
+    const members = finals.map((f) => f.change.members);
+    revert[p] = {
+      reverted: picked[p].change.members - r.change.members,
+      sessionsSaved: picked[p].change.sessions - r.change.sessions,
+      orderVariants: new Set(finals.map((f) => lib.layoutSignature(f.result))).size,
+      memberSpread: Math.max(...members) - Math.min(...members),
+    };
+  });
+  // Pareto 앞면: 안정성 순으로 훑으며 지금까지 고른 것보다 품질이 엄격히 나은 것만 더한다.
+  const front = {};
+  Object.entries(STABILITY_ORDERS).forEach(([p, keys]) => {
+    const kept = [];
+    pool
+      .slice()
+      .sort((x, y) => byStability(keys)(x, y) || byQuality(x, y))
+      .forEach((e) => {
+        if (!kept.length || lib.isSchedule2ResultBetter(e.result, kept[kept.length - 1].result))
+          kept.push(e);
+      });
+    const last = kept[kept.length - 1];
+    front[p] = {
+      size: kept.length,
+      lastFewerMembersThanQ:
+        !lib.isSchedule2ResultBetter(picked.Q.result, last.result) &&
+        last.change.members < picked.Q.change.members,
+    };
+  });
+  const qSig = lib.layoutSignature(picked.Q.result);
+  return {
+    pool: pool.length,
+    current: lib.scheduleMetrics(card),
+    policies: Object.fromEntries(
+      POLICIES.map((p) => [
+        p,
+        {
+          change: picked[p].change,
+          metrics: picked[p].metrics,
+          sig: p === "Q" ? qSig : lib.layoutSignature(picked[p].result) === qSig ? qSig : "other",
+          qBetter: lib.isSchedule2ResultBetter(picked.Q.result, picked[p].result),
+        },
+      ]),
+    ),
+    front,
+    revert,
+  };
+}
+
 function dayIdle(result, day) {
   return lib.scheduleMetrics({
     assigned: result.assigned.filter((a) => a.day === day),
@@ -401,6 +735,25 @@ function dayIdle(result, day) {
           );
           const oldImproved =
             gated.length > 0 && lib.isSchedule2ResultBetter(bestOf(gated), card);
+          // 회원별 횟수 감소까지 금지했다면 개선이었는지(재배분 허용 결정의 영향 확인용).
+          const memberGated = gated.filter((r) => {
+            const left = new Map();
+            card.assigned.forEach((a) => left.set(a.memberId, (left.get(a.memberId) || 0) + 1));
+            r.assigned.forEach((a) => left.has(a.memberId) && left.set(a.memberId, left.get(a.memberId) - 1));
+            return [...left.values()].every((n) => n <= 0);
+          });
+          const perMemberImproved =
+            memberGated.length > 0 &&
+            lib.isSchedule2ResultBetter(bestOf(memberGated), card);
+          const stab =
+            out.status === "improved"
+              ? stabilityMeasure(
+                  card,
+                  pins,
+                  out,
+                  lib.mulberry32(hashSeed(c.id + "|" + sc.id + "|" + seed + "|revert")),
+                )
+              : null;
           // 제안이 지금 카드에서 얼마나 바뀌는지(5b "현재 스케줄과의 차이" 비용 판단용).
           let change = null;
           if (out.proposal) {
@@ -456,6 +809,8 @@ function dayIdle(result, day) {
             proposal: out.proposal ? out.proposal.metrics : null,
             variants: out.variants.length,
             oldImproved,
+            perMemberImproved,
+            stab,
             change,
             vsA,
             ms: {

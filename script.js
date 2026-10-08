@@ -2821,6 +2821,7 @@
     const a = byMember(base), b = byMember(other);
     const ids = [.../* @__PURE__ */ new Set([...a.keys(), ...b.keys()])].sort();
     const members = [];
+    const countShift = [];
     ids.forEach((memberId) => {
       const from = a.get(memberId) || [], to = b.get(memberId) || [];
       const changes = pairSessions(from, to).map(([x, y]) => ({
@@ -2831,6 +2832,7 @@
         locationChanged: !!(x && y) && x.locationId !== y.locationId
       }));
       if (!changes.length) return;
+      countShift.push(to.length - from.length);
       const status = !from.length ? "assigned" : !to.length ? "unassigned" : "moved";
       members.push({ memberId, status, changes });
     });
@@ -2846,7 +2848,12 @@
         newlyAssigned: members.filter((m) => m.status === "assigned").length,
         newlyUnassigned: members.filter((m) => m.status === "unassigned").length,
         sessionsAdded: countOf((c) => !c.from),
-        sessionsRemoved: countOf((c) => !c.to)
+        sessionsRemoved: countOf((c) => !c.to),
+        // 회원 간 수업 재배분: 수업 횟수가 줄어든/늘어난 회원 수(미배정 전환·신규 배정 포함)와 회원별
+        // 횟수 증감의 절대값 합. 총 수업이 같아도 A -1회·B +1회면 각 1명, 증감 총량 2.
+        membersFewer: countShift.filter((d) => d < 0).length,
+        membersMore: countShift.filter((d) => d > 0).length,
+        sessionCountShift: countShift.reduce((n, d) => n + Math.abs(d), 0)
       }
     };
   }
@@ -5086,6 +5093,9 @@
       }
     };
   }
+  function keepsSessions(current, result) {
+    return result.unassignedMembers.length <= current.unassignedMembers.length && result.assigned.length >= current.assigned.length;
+  }
   function selectReoptimization(current, results, pins) {
     const stats = { results: results.length, missingPins: 0, hardViolations: 0, fewerSessions: 0 };
     const passed = results.filter((r) => {
@@ -5094,27 +5104,27 @@
       return true;
     });
     stats.passed = passed.length;
-    const none = (reason) => ({ status: "no-better", reason, proposal: null, variants: [], stats });
+    const none = (reason) => ({ status: "no-better", reason, proposal: null, variants: [], improving: [], stats });
     if (!passed.length) return none("none");
-    const keepsSessions = (r) => r.unassignedMembers.length <= current.unassignedMembers.length && r.assigned.length >= current.assigned.length;
-    const eligible = passed.filter(keepsSessions);
+    const eligible = passed.filter((r) => keepsSessions(current, r));
     stats.fewerSessions = passed.length - eligible.length;
     const bestIn = (list) => list.reduce((x, y) => isSchedule2ResultBetter(y, x) ? y : x);
     const best = eligible.length ? bestIn(eligible) : null;
     if (!best || !isSchedule2ResultBetter(best, current)) {
-      if (passed.some((r) => !keepsSessions(r) && isSchedule2ResultBetter(r, current)))
+      if (passed.some((r) => !keepsSessions(current, r) && isSchedule2ResultBetter(r, current)))
         return none("fewer-sessions");
       if (!best || isSchedule2ResultBetter(current, best)) return none("worse");
       const cur = layoutSignature(current);
       return none(eligible.some((r) => layoutSignature(r) === cur) ? "same-layout" : "equal-quality");
     }
     const seen = /* @__PURE__ */ new Set();
-    const group = eligible.filter((r) => !isSchedule2ResultBetter(best, r)).filter((r) => {
+    const improving = eligible.filter((r) => isSchedule2ResultBetter(r, current)).filter((r) => {
       const sig = layoutSignature(r);
       return !seen.has(sig) && seen.add(sig);
-    }).map((result) => ({ result, metrics: scheduleMetrics(result) })).sort(byTravelThenSignature);
+    }).map((result) => ({ result, metrics: scheduleMetrics(result) }));
+    const group = improving.filter((e) => !isSchedule2ResultBetter(best, e.result)).sort(byTravelThenSignature);
     const { kept } = pickVariants(group);
-    return { status: "improved", reason: null, proposal: kept[0], variants: kept, stats };
+    return { status: "improved", reason: null, proposal: kept[0], variants: kept, improving, stats };
   }
 
   // src/pages/memberSchedule.js

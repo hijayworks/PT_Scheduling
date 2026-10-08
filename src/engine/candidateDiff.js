@@ -114,6 +114,7 @@ const place = (r) =>
 //   status: "assigned"(미배정 → 배정) | "unassigned"(배정 → 미배정) | "moved"(배정 유지, 세션 변경)
 //   changes: [{from, to, dayChanged, startChanged, locationChanged}] — from/to는 {day, startSlot,
 //     locationId} 또는 null(세션 추가·삭제). 세 플래그는 from·to가 모두 있을 때만 의미가 있다.
+//   counts.newlyUnassigned: 기존 배정 회원이 미배정이 된 수 — 미배정 총수가 같아도 신규 배정과 맞바뀌면 0이 아니다.
 export function assignmentDiff(base, other) {
   const byMember = (result) => {
     const map = new Map();
@@ -127,6 +128,7 @@ export function assignmentDiff(base, other) {
     b = byMember(other);
   const ids = [...new Set([...a.keys(), ...b.keys()])].sort();
   const members = [];
+  const countShift = [];
   ids.forEach((memberId) => {
     const from = a.get(memberId) || [],
       to = b.get(memberId) || [];
@@ -138,6 +140,7 @@ export function assignmentDiff(base, other) {
       locationChanged: !!(x && y) && x.locationId !== y.locationId,
     }));
     if (!changes.length) return;
+    countShift.push(to.length - from.length);
     const status = !from.length
       ? "assigned"
       : !to.length
@@ -158,6 +161,11 @@ export function assignmentDiff(base, other) {
       newlyUnassigned: members.filter((m) => m.status === "unassigned").length,
       sessionsAdded: countOf((c) => !c.from),
       sessionsRemoved: countOf((c) => !c.to),
+      // 회원 간 수업 재배분: 수업 횟수가 줄어든/늘어난 회원 수(미배정 전환·신규 배정 포함)와 회원별
+      // 횟수 증감의 절대값 합. 총 수업이 같아도 A -1회·B +1회면 각 1명, 증감 총량 2.
+      membersFewer: countShift.filter((d) => d < 0).length,
+      membersMore: countShift.filter((d) => d > 0).length,
+      sessionCountShift: countShift.reduce((n, d) => n + Math.abs(d), 0),
     },
   };
 }

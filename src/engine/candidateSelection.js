@@ -262,18 +262,30 @@ export function selectCandidates(entries) {
 // 더 잘 정리"이므로 제안 자격(업무 정책)은 다음 순서로 본다.
 //   1) 최종 gate: 고정 세션을 하나라도 같은 자리에 두지 않았거나(missingPins) 하드 제약을 어긴 결과는
 //      버린다. 엔진의 고정 처리와 별개로 여기서 다시 확인한다.
-//   2) 수업 유지: 미배정이 current보다 많거나 총 수업 수가 current보다 적은 결과는 버린다 — 기존 비교
-//      기준은 수업 1건을 빈 시간 SESSION_VALUE_MINUTES분과 바꿔 주므로, 수업을 빼고 공강을 크게 줄인
-//      결과도 "더 낫다"가 된다.
+//   2) 수업 유지(keepsSessions): 미배정이 current보다 많거나 총 수업 수가 current보다 적은 결과는 버린다
+//      — 기존 비교 기준은 수업 1건을 빈 시간 SESSION_VALUE_MINUTES분과 바꿔 주므로, 수업을 빼고 공강을
+//      크게 줄인 결과도 "더 낫다"가 된다. 회원 간 재배분(A -1회, B +1회)은 총수가 유지되면 허용한다
+//      (사용자 결정 2026-10-07). 재배분 정도는 assignmentDiff counts(membersFewer 등)로 측정한다.
 //   3) 남은 결과 중 기존 추천 비교 기준(isSchedule2ResultBetter)으로 current보다 엄격히 나은 최선만
 //      제안한다. 같은 품질의 다른 배치는 개선이 아니다. 개별 지표는 나빠질 수 있다 — 예를 들어 수업
 //      1건이 늘면 빈 시간이 20분 늘어도 더 나은 결과다.
 // variants: 제안과 비교 기준으로 완전히 같은 품질의 다른 배치(pickVariants, 제안이 첫 번째).
 // state(회원·선택 상태)를 읽으므로 생성 때와 같은 선택 상태에서, 빈 시간 최소화 모드를 끈 채 호출한다.
-// 반환 { status: "improved" | "no-better", reason, proposal, variants, stats }
+// 반환 { status: "improved" | "no-better", reason, proposal, variants, improving, stats }
+//   improving: 자격을 통과하고 current보다 엄격히 나은 서로 다른 배치 전부({result, metrics}, 순서 무관).
+//   지금은 측정(tests/reoptimize.js의 안정성 정렬 비교)만 쓴다.
 //   reason(no-better): "fewer-sessions"(비교 기준으로 더 나은 결과는 있었지만 모두 수업이 줄거나 미배정이
 //   늘었음) | "same-layout"(current와 같은 배치를 다시 찾음) | "equal-quality"(다른 배치지만 비교 기준으로
 //   동점) | "worse"(자격을 통과한 결과가 모두 더 나쁨) | "none"(gate 통과 결과 없음)
+// 재최적화 제안 자격의 수업 유지 조건: 총 수업 수가 current보다 적지 않고 미배정 회원 수가 current보다
+// 많지 않다. 회원별 횟수는 보지 않는다.
+export function keepsSessions(current, result) {
+  return (
+    result.unassignedMembers.length <= current.unassignedMembers.length &&
+    result.assigned.length >= current.assigned.length
+  );
+}
+
 export function selectReoptimization(current, results, pins) {
   const stats = { results: results.length, missingPins: 0, hardViolations: 0, fewerSessions: 0 };
   const passed = results.filter((r) => {
@@ -282,31 +294,28 @@ export function selectReoptimization(current, results, pins) {
     return true;
   });
   stats.passed = passed.length;
-  const none = (reason) => ({ status: "no-better", reason, proposal: null, variants: [], stats });
+  const none = (reason) => ({ status: "no-better", reason, proposal: null, variants: [], improving: [], stats });
   if (!passed.length) return none("none");
-  const keepsSessions = (r) =>
-    r.unassignedMembers.length <= current.unassignedMembers.length &&
-    r.assigned.length >= current.assigned.length;
-  const eligible = passed.filter(keepsSessions);
+  const eligible = passed.filter((r) => keepsSessions(current, r));
   stats.fewerSessions = passed.length - eligible.length;
   const bestIn = (list) => list.reduce((x, y) => (isSchedule2ResultBetter(y, x) ? y : x));
   const best = eligible.length ? bestIn(eligible) : null;
   if (!best || !isSchedule2ResultBetter(best, current)) {
-    if (passed.some((r) => !keepsSessions(r) && isSchedule2ResultBetter(r, current)))
+    if (passed.some((r) => !keepsSessions(current, r) && isSchedule2ResultBetter(r, current)))
       return none("fewer-sessions");
     if (!best || isSchedule2ResultBetter(current, best)) return none("worse");
     const cur = layoutSignature(current);
     return none(eligible.some((r) => layoutSignature(r) === cur) ? "same-layout" : "equal-quality");
   }
   const seen = new Set();
-  const group = eligible
-    .filter((r) => !isSchedule2ResultBetter(best, r))
+  const improving = eligible
+    .filter((r) => isSchedule2ResultBetter(r, current))
     .filter((r) => {
       const sig = layoutSignature(r);
       return !seen.has(sig) && seen.add(sig);
     })
-    .map((result) => ({ result, metrics: scheduleMetrics(result) }))
-    .sort(byTravelThenSignature);
+    .map((result) => ({ result, metrics: scheduleMetrics(result) }));
+  const group = improving.filter((e) => !isSchedule2ResultBetter(best, e.result)).sort(byTravelThenSignature);
   const { kept } = pickVariants(group);
-  return { status: "improved", reason: null, proposal: kept[0], variants: kept, stats };
+  return { status: "improved", reason: null, proposal: kept[0], variants: kept, improving, stats };
 }
