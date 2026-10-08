@@ -114,25 +114,11 @@ function caseText(c) {
       withA,
       aAttempts: A_GREEDY_ATTEMPTS,
     });
-    // knownViolations: 이미 알고 아직 못 고친 위반([{candidates, rule, reason}]). 그 위반은 실패로
-    // 세지 않되 표시하고, 더 이상 나오지 않으면 실패시켜 목록을 지우게 한다.
-    const known = c.knownViolations || [];
-    const knownHit = new Set();
-    (await runner.violationsOf(c, gen)).forEach(({ key, tie, violation }) => {
-      const label = `${c.id} ${key}${tie ? " 동점#" + tie : ""}: ${violation.message}`;
-      const k = known.findIndex(
-        (kv) => kv.rule === violation.rule && kv.candidates.includes(key),
-      );
-      if (k < 0) return failures.push(label);
-      knownHit.add(k);
-      console.log(`  알려진 위반(${known[k].reason}): ${label}`);
-    });
-    known.forEach((kv, k) => {
-      if (!knownHit.has(k) && kv.candidates.some((key) => gen[key]))
-        failures.push(
-          `${c.id}: 알려진 위반 ${kv.rule}(${kv.candidates})이 더 이상 나오지 않음 — knownViolations에서 지우세요`,
-        );
-    });
+    (await runner.violationsOf(c, gen)).forEach(({ key, tie, violation }) =>
+      failures.push(
+        `${c.id} ${key}${tie ? " 동점#" + tie : ""}: ${violation.message}`,
+      ),
+    );
     report.cases[c.id] = {};
     const floorsAttempts = c.expect && c.expect.attempts;
     for (const [key, { result, ms }] of Object.entries(gen)) {

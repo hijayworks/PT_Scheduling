@@ -1108,6 +1108,28 @@ test("세 지점 회원 앞에 확정 세션 이전 체인을 붙여 이동-회�
   );
 });
 
+test("세 지점 회원 규칙: 이동으로 도착해 이동으로 떠나는 자리만 위반이다", () => {
+  qualityFixture();
+  lib.state.travelTimes[lib.pairKey("L2", "L3")] = 30;
+  const solo = lib.soloTravelMemberIds();
+  const chain = (...pairs) => pairs.map(([memberId, locationId]) => ({ memberId, locationId }));
+  assert(lib.chainBreaksSoloTravel(chain(["A", "L1"], ["S", "L3"], ["B", "L2"]), solo), "이동-S-이동");
+  assert(!lib.chainBreaksSoloTravel(chain(["A", "L3"], ["S", "L3"], ["B", "L2"]), solo), "같은 지점 도착");
+  assert(!lib.chainBreaksSoloTravel(chain(["A", "L1"], ["B", "L3"], ["C", "L2"]), solo), "세 지점 회원 아님");
+  assert(!lib.chainBreaksSoloTravel(chain(["A", "L1"], ["S", "L3"]), solo), "끝 자리는 떠나는 이동 없음");
+});
+test("체인DP는 세 지점 회원을 이동-회원-이동 자리에 배정하지 않는다", () => {
+  qualityFixture();
+  lib.state.travelTimes[lib.pairKey("L2", "L3")] = 30;
+  const chain = lib.runChainDP([
+    node({ id: "a", memberId: "A", startSlot: 0, duration: 60, locationId: "L1" }),
+    node({ id: "s", memberId: "S", startSlot: 9, duration: 60, locationId: "L3" }),
+    node({ id: "b", memberId: "B", startSlot: 18, duration: 60, locationId: "L2" }),
+  ]);
+  assert(chain.length >= 2, "규칙을 지키는 2인 체인은 있음");
+  assert(!lib.chainBreaksSoloTravel(chain, lib.soloTravelMemberIds()), chain.map((n) => n.id).join("→"));
+});
+
 /* ---------------- goldenFloors.js: 골든 품질 하한 래칫 ---------------- */
 const goldenFloors = require("./goldenFloors.js");
 function floorSet(sessions, travel) {

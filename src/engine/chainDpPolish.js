@@ -1,7 +1,12 @@
 import { SLOT_MIN, MAX_TRAVELS_PER_DAY } from "../constants.js";
 import { durationToSlots } from "../utils.js";
 import { state } from "../state.js";
-import { memberById, inefficientRoundTripLocationInfo } from "../domain.js";
+import {
+  memberById,
+  inefficientRoundTripLocationInfo,
+  soloTravelMemberIds,
+  chainBreaksSoloTravel,
+} from "../domain.js";
 import { currentExcludedIds2 } from "../selectionOverride.js";
 import {
   yieldToUI,
@@ -78,6 +83,27 @@ export async function runSchedule2Pipeline(
   // 비효율 이동(A→B→A 왕복 중 마포점↔여의도점이 아닌 것) 판정에 쓸 지점 정보 — 파이프라인
   // 실행 동안 바뀌지 않으므로 한 번만 구해 모든 runChainDP 호출에 그대로 넘긴다.
   const ineffInfo = inefficientRoundTripLocationInfo();
+  // 하루 체인을 바꾸는 모든 다듬기 경로(삽입·제거·교환·연쇄 이동)가 새 체인을 채택하기 전에
+  // 거치는 공통 검증: 이웃 수업 간 이동 간격, 하루 이동 상한, 세 지점 회원 규칙. 회원을 빼기만
+  // 해도 앞뒤가 새로 이어지며 이동시간이 모자라거나(누락된 지점 쌍이면 연결 불가) 이동-회원-이동이
+  // 생길 수 있으므로, 삽입한 체인뿐 아니라 남은 체인도 여기를 거친다(퍼즈로 확인됨). 체인DP
+  // (runChainDP)가 만든 체인은 DP 안에서 같은 규칙을 지킨다.
+  const soloIds = soloTravelMemberIds();
+  function dayChainAllowed(chain) {
+    for (let i = 1; i < chain.length; i++) {
+      const prev = chain[i - 1],
+        cur = chain[i];
+      if (
+        (cur.startSlot - prev.end) * SLOT_MIN <
+        requiredGapMin2(prev.locationId, cur.locationId)
+      )
+        return false;
+    }
+    return (
+      dailyTravelCount(chain) <= MAX_TRAVELS_PER_DAY &&
+      !chainBreaksSoloTravel(chain, soloIds)
+    );
+  }
   // 아래 다듬기 루프들(특히 담금질 기법)은 동기로 몇 초~몇십 초씩 돌면 탭이 완전히
   // 멈춰버리므로, 주기적으로 yieldToUI에 제어권을 넘겨준다. 다만 그 시간도 실제 시계
   // (performance.now())에는 그대로 흐르므로, 아무 보정 없이 넘기기만 하면 같은 시간
@@ -334,7 +360,7 @@ export async function runSchedule2Pipeline(
         };
         const newChain = chain0.slice();
         newChain.splice(insertAt, 0, newNode);
-        if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) continue; // 하루 이동 최대 MAX_TRAVELS_PER_DAY회 제한
+        if (!dayChainAllowed(newChain)) continue;
         commit(day, newNode);
         dayChains.set(day, newChain);
         return true;
@@ -420,7 +446,7 @@ export async function runSchedule2Pipeline(
         };
         const newChain = remainingChain.slice();
         newChain.splice(insertAt, 0, newNode);
-        if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) continue; // 하루 이동 최대 MAX_TRAVELS_PER_DAY회 제한
+        if (!dayChainAllowed(newChain)) continue;
 
         uncommit(day, otherNode);
         commit(day, newNode);
@@ -943,9 +969,12 @@ export async function runSchedule2Pipeline(
         ineffInfo,
       );
       let bestMove = null; // { sameDay, targetDay, newTargetChain, deltaTravel, deltaIdle, deltaIneff }
+      // 다른 요일로 옮기면 원래 요일에는 이 회원을 뺀 체인이 남는다 — 그 체인도 공통 검증을 거친다.
+      const leavingAllowed = dayChainAllowed(currentChainWithout);
 
       daysWithReqs.forEach((day) => {
         if (day !== currentDay) {
+          if (!leavingAllowed) return;
           // 이 회원이 그 요일에 이미 다른 세션을 갖고 있으면(있을 리 없지만 안전하게) 건너뛴다.
           if ((dayChains.get(day) || []).some((n) => n.memberId === memberId))
             return;
@@ -1008,7 +1037,7 @@ export async function runSchedule2Pipeline(
           };
           const newChain = baseChain.slice();
           newChain.splice(insertAt, 0, newNode);
-          if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) return;
+          if (!dayChainAllowed(newChain)) return;
 
           let deltaTravel, deltaIdle, deltaIneff;
           if (day === currentDay) {
@@ -1107,7 +1136,7 @@ export async function runSchedule2Pipeline(
       }
       const newChain = chainWithout.slice();
       newChain.splice(insertAt, 0, cand);
-      if (dailyTravelCount(newChain) > MAX_TRAVELS_PER_DAY) return null;
+      if (!dayChainAllowed(newChain)) return null;
       return newChain;
     }
 
@@ -1384,7 +1413,11 @@ export async function runSchedule2Pipeline(
         touchedDays,
         memberId,
       );
-      if (!placed) {
+      // 사슬 도중에 회원을 빼기만 하고 다시 채우지 않은 요일도 있으므로 건드린 요일 전부를 검증한다.
+      const allowed =
+        placed &&
+        [...touchedDays].every((d) => dayChainAllowed(dayChains.get(d) || []));
+      if (!allowed) {
         restoreChainState(snap);
         return false;
       }
@@ -1469,7 +1502,11 @@ export async function runSchedule2Pipeline(
         touchedDays,
         null,
       );
-      if (!placed) {
+      // 사슬 도중에 회원을 빼기만 하고 다시 채우지 않은 요일도 있으므로 건드린 요일 전부를 검증한다.
+      const allowed =
+        placed &&
+        [...touchedDays].every((d) => dayChainAllowed(dayChains.get(d) || []));
+      if (!allowed) {
         restoreChainState(snap);
         return false;
       }
@@ -1572,6 +1609,8 @@ export async function runSchedule2Pipeline(
         });
         if (options.length === 0) return null;
         const picked = options[Math.floor(randomFn() * options.length)];
+        if (picked.day !== currentDay && !dayChainAllowed(currentChainWithout))
+          return null; // 원래 요일에 남는 체인도 공통 검증을 거친다
         const locOptions = locationsForReq(picked.req);
         if (locOptions.length === 0) return null;
         const locationId =

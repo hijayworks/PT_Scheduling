@@ -13,6 +13,7 @@ import {
   travelMinutes,
   isInefficientRoundTrip,
   roundTripOriginLoc,
+  soloTravelMemberIds,
 } from "../domain.js";
 import {
   currentExcludedIds2,
@@ -220,6 +221,11 @@ export function runChainDP(
   const W = Math.max(1, Math.ceil(memberIndex.size / 32));
   const memberBits = new Uint32Array(n * W);
   const memberIdxOf = nodes.map((nd) => memberIndex.get(nd.memberId));
+  // 세 지점 회원 규칙(domain.js의 breaksSoloTravel)을 전이 단계에서 지킨다: j가 세 지점 회원이고
+  // 이동으로 도착했다면(j까지의 최선 체인 기준) j에서 또 이동으로 떠나는 전이는 막는다. 안쪽
+  // 루프에서 쓰려고 정의를 노드별 플래그로 풀어둔 것이다.
+  const soloIds = soloTravelMemberIds();
+  const noTravelOut = new Uint8Array(n);
 
   for (let i = 0; i < n; i++) {
     const node = nodes[i];
@@ -247,6 +253,7 @@ export function runChainDP(
       const newTc = tc[j] + addsTravel;
       if (newTc > maxTravelsPerDay) continue;
       if (memberBits[j * W + mWord] & mMask) continue; // 회원당 1일 최대 1회
+      if (addsTravel && noTravelOut[j]) continue; // 이동-회원-이동 금지
       const newDp = dp[j] + node.weight;
       const newTm = tm[j] + travel;
       const newIdle = idle[j] + (gapActual - gapNeed);
@@ -290,6 +297,12 @@ export function runChainDP(
     // 왕복을 판정할 수 있다. prev[i]가 여기서 확정되므로 i마다 한 번만 구한다.
     const twoBack = roundTripOriginLoc(i, prevOrNull, locOfIndex);
     twoBackLocIdx[i] = twoBack === null ? L : locIndex.get(twoBack);
+    noTravelOut[i] =
+      bestPrev !== -1 &&
+      soloIds.has(node.memberId) &&
+      travelOf[locIdxOf[bestPrev] * L + locIdxOf[i]] > 0
+        ? 1
+        : 0;
     if (bestPrev !== -1)
       memberBits.set(
         memberBits.subarray(bestPrev * W, bestPrev * W + W),
