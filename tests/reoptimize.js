@@ -87,7 +87,7 @@ function summarize(report) {
     "\n[2] 지금 카드 대비 제안 (selectReoptimization, 비교 기준 isSchedule2ResultBetter)",
   );
   console.log(
-    "시나리오\t실행\t개선\t같은 배치\t동점(다른 배치)\t더 나쁨\tgate 통과 없음",
+    "시나리오\t실행\t개선\t(이전 정책 개선)\t수업 감소만 개선\t같은 배치\t동점(다른 배치)\t더 나쁨\tgate 통과 없음",
   );
   SCENARIOS.forEach((sc) => {
     const list = runs.filter((r) => r.scenario === sc.id);
@@ -98,6 +98,14 @@ function summarize(report) {
         list.length,
         pct(
           n((r) => r.status === "improved"),
+          list.length,
+        ),
+        pct(
+          n((r) => r.oldImproved),
+          list.length,
+        ),
+        pct(
+          n((r) => r.reason === "fewer-sessions"),
           list.length,
         ),
         pct(
@@ -143,6 +151,32 @@ function summarize(report) {
           .join(", "),
     );
   }
+
+  console.log("\n[2-1] 고정 수별 개선 성공률과 지금 카드 대비 변경량(개선된 실행 평균)");
+  console.log(
+    "고정 수\t실행\t개선\t변경 회원\t변경 세션\t요일 변경\t시작 시각만 변경\t수업 추가/빠짐\tB·C ms\tA ms",
+  );
+  [...new Set(runs.map((r) => r.pins))]
+    .sort((a, b) => a - b)
+    .forEach((p) => {
+      const list = runs.filter((r) => r.pins === p);
+      const ok = list.filter((r) => r.change);
+      const c = (k) => fmt(avg(ok.map((r) => r.change[k])));
+      console.log(
+        [
+          p,
+          list.length,
+          `${ok.length} (${pct(ok.length, list.length)})`,
+          c("members"),
+          c("sessions"),
+          c("dayChanges"),
+          c("startOnly"),
+          `${c("added")}/${c("removed")}`,
+          Math.round(avg(list.map((r) => r.ms.bc))),
+          Math.round(avg(list.map((r) => r.ms.a))),
+        ].join("\t"),
+      );
+    });
 
   console.log(
     "\n[3] 후보B·C가 후보A보다 못한 정도 (같은 날 고정 2 vs 다른 날 고정 2)",
@@ -359,6 +393,35 @@ function dayIdle(result, day) {
                 ),
               )
             : null;
+          // 이전 정책(수업 유지 조건 없이 비교 기준만)으로도 개선이었는지 — 같은 시드의 이전 측정과 비교용.
+          const gated = all.filter(
+            (r) =>
+              !lib.missingPins(r.assigned, pins).length &&
+              !lib.scheduleViolations(r).length,
+          );
+          const oldImproved =
+            gated.length > 0 && lib.isSchedule2ResultBetter(bestOf(gated), card);
+          // 제안이 지금 카드에서 얼마나 바뀌는지(5b "현재 스케줄과의 차이" 비용 판단용).
+          let change = null;
+          if (out.proposal) {
+            const d = lib.assignmentDiff(card, out.proposal.result);
+            const changes = d.members.flatMap((m) => m.changes);
+            change = {
+              members: d.counts.changedMembers,
+              sessions: changes.length,
+              dayChanges: d.counts.dayChanges,
+              startOnly: changes.filter(
+                (x) =>
+                  x.from &&
+                  x.to &&
+                  x.startChanged &&
+                  !x.dayChanged &&
+                  !x.locationChanged,
+              ).length,
+              added: d.counts.sessionsAdded,
+              removed: d.counts.sessionsRemoved,
+            };
+          }
           const aBest = bestOf(
             ["A1", "A2", "A3"].flatMap((e) => resultsOf(pinned, e)),
           );
@@ -392,6 +455,8 @@ function dayIdle(result, day) {
             current: lib.scheduleMetrics(card),
             proposal: out.proposal ? out.proposal.metrics : null,
             variants: out.variants.length,
+            oldImproved,
+            change,
             vsA,
             ms: {
               bc: pinned.B.ms,

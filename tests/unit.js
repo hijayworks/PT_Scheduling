@@ -1716,6 +1716,24 @@ test("재최적화 제안: 나빠지지 않음은 개별 지표가 아니라 추
   assertEqual(out.status, "improved");
   assert(out.proposal.metrics.idleMinutes > lib.scheduleMetrics(f.current).idleMinutes, "빈 시간은 늘었어야 함(픽스처 확인)");
 });
+test("재최적화 제안: 수업을 줄여 공강을 줄인 결과는 비교 기준으로 더 나아도 제안하지 않는다", () => {
+  const f = reoptFixture();
+  // 지금 카드: 월요일 S(14:00, B 뒤 빈 80분)를 더 넣은 카드. 그 1건을 빼면 수업 -1·빈 시간 -80분.
+  const current = { assigned: f.current.assigned.concat([at("S", 0, 20, "L1")]), unassignedMembers: [] };
+  const dropped = f.current;
+  assert(lib.isSchedule2ResultBetter(dropped, current), "비교 기준으로는 더 나아야 함(픽스처 확인)");
+  const out = lib.selectReoptimization(current, [dropped], f.pins);
+  assertEqual([out.status, out.reason, out.proposal], ["no-better", "fewer-sessions", null]);
+  assertEqual(out.stats.fewerSessions, 1);
+  // 수업 수를 지킨 더 나은 결과가 함께 있으면 그것을 제안한다(S를 B 바로 뒤로).
+  const kept = { assigned: f.current.assigned.concat([at("S", 0, 12, "L1")]), unassignedMembers: [] };
+  const mixed = lib.selectReoptimization(current, [dropped, kept], f.pins);
+  assertEqual(mixed.status, "improved");
+  assertEqual(lib.layoutSignature(mixed.proposal.result), lib.layoutSignature(kept));
+  // 미배정이 늘어난 결과도 같은 이유로 제안하지 않는다.
+  const unassignedMore = { assigned: f.current.assigned.filter((x) => x.memberId !== "B"), unassignedMembers: [lib.memberById("B")] };
+  assertEqual(lib.selectReoptimization(f.current, [unassignedMore], f.pins).reason, "worse");
+});
 
 function fakeWorkerFactory(reply) {
   const created = [];

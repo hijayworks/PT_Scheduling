@@ -45,6 +45,34 @@ function buildSeedState() {
   };
 }
 
+// 재최적화: 상담 회원 3명(주 1회, 30분)이 월 12:00~18:00 어디든 가능하다. 사용자가 손댄 카드는
+// A(12:00, 확정) · B(12:30) · C(16:00)라 B 뒤 빈 시간이 3시간이다 — A를 그대로 두고 다시 짜면 어떤
+// 엔진이든 C를 당겨 빈 시간을 없애므로 제안이 반드시 나온다.
+function buildReoptSeedState() {
+  const cells = [];
+  for (let slot = 0; slot < 36; slot++) cells.push("0-" + slot);
+  const ids = ["A", "B", "C"];
+  const requests = [];
+  ids.forEach((m) => {
+    for (let slot = 0; slot <= 33; slot++)
+      requests.push({ id: m + "_" + slot, memberId: m, day: 0, startSlot: slot, duration: 30 });
+  });
+  const at = (m, slot) => ({ id: m + "_" + slot, memberId: m, day: 0, startSlot: slot, duration: 30, locationId: "loc1" });
+  return {
+    locations: [{ id: "loc1", name: "테스트지점" }],
+    travelTimes: {},
+    members: ids.map((id) => ({ id, name: "회원" + id, locationIds: ["loc1"], category: "상담" })),
+    requests,
+    onceLimitedMemberIds3: [],
+    excludedMemberIds3: [],
+    availableCells: cells,
+    currentPage: "schedule3",
+    startMinBase: 720,
+    candidates: [{ assigned: [at("A", 0), at("B", 3), at("C", 24)], unassignedMembers: [], confirmedIds: ["A_0"] }],
+    schedule3Result: { candidateAList: [null, null, null] },
+  };
+}
+
 async function readState(page) {
   const raw = await page.evaluate((key) => localStorage.getItem(key), STORAGE_KEY);
   return raw ? JSON.parse(raw) : null;
@@ -259,6 +287,83 @@ async function main() {
       assert(scrollWidth <= width, `${width}px 화면에서 페이지가 가로로 스크롤됨 (scrollWidth ${scrollWidth})`);
       await mob.close();
     }
+
+    // 재최적화: 실행 → 취소(카드 그대로) → 제안 미리보기 → 버리기(카드 그대로) → 적용 → 되돌리기.
+    const ro = await browser.newPage();
+    ro.on("pageerror", (err) => failures.push("재최적화 페이지 런타임 에러: " + err.message));
+    ro.on("console", (msg) => {
+      if (msg.type() === "error") failures.push("재최적화 콘솔 에러: " + msg.text());
+    });
+    const reoptSeed = buildReoptSeedState();
+    await ro.addInitScript(
+      ({ key, data, scale }) => {
+        if (scale) window.__PT_TEST_BUDGET_SCALE__ = scale;
+        if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(data));
+      },
+      { key: STORAGE_KEY, data: reoptSeed, scale: FULL_BUDGET_A ? 0 : A_BUDGET_SCALE }
+    );
+    await ro.goto(INDEX_URL);
+    await ro.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    const editedCard = async () => (await readState(ro)).candidates[0];
+    const seedJson = JSON.stringify(reoptSeed.candidates[0].assigned.map((a) => a.id).sort());
+    const editedIds = async () => JSON.stringify((await editedCard()).assigned.map((a) => a.id).sort());
+    const reoptBtn = ro.locator("#candidates3 .reopt-btn");
+    const reoptPanel = ro.locator("#reoptimize3");
+    assert((await reoptBtn.count()) === 1, "수정 카드에 '나머지 일정 다시 최적화' 버튼이 없음");
+    const hintText = await ro.locator("#candidates3 .reopt-hint").innerText().catch(() => "");
+    assert(hintText.includes("유지할 수업 1개"), "유지할 수업 수 안내가 다름: " + hintText);
+    const waitIdle = () =>
+      ro.waitForFunction(() => !document.querySelector("#generateBtn3").disabled, null, { timeout: generateTimeout });
+
+    await reoptBtn.click();
+    await ro.click("#generateBtn3Cancel");
+    await waitIdle();
+    assert(!(await reoptPanel.isVisible()), "재최적화를 취소했는데 제안이 나타남");
+    assert((await editedIds()) === seedJson, "재최적화 취소 뒤 카드가 바뀜");
+
+    await reoptBtn.click();
+    await waitIdle();
+    const proposalText = (await reoptPanel.isVisible()) ? await reoptPanel.innerText() : "";
+    assert(proposalText.includes("재최적화 제안"), "재최적화 제안 패널이 나타나지 않음: " + (await ro.locator("#generateHint3").innerText()));
+    assert(proposalText.includes("유지할 수업 1개"), "제안에 유지할 수업 수가 없음");
+    assert(/좋아지는 것\s*빈 시간 -\d+분/.test(proposalText), "제안 요약에 빈 시간 개선이 없음: " + proposalText);
+    assert(proposalText.includes("나빠지는 것"), "제안 요약에 나빠지는 것 줄이 없음");
+    assert((await reoptPanel.locator("tbody tr").count()) === 10, "제안 지표가 10개가 아님");
+    assert(/회원 \d+명의 일정이 바뀝니다/.test(proposalText) && proposalText.includes("배정 차이"), "변경 회원 수·상세가 없음");
+    assert((await editedIds()) === seedJson, "제안을 보여주기만 했는데 카드가 바뀜");
+
+    await ro.setViewportSize({ width: 320, height: 800 });
+    const reoptScroll = await ro.evaluate(() => document.documentElement.scrollWidth);
+    assert(reoptScroll <= 320, `320px 화면에서 재최적화 제안 때문에 페이지가 가로로 스크롤됨 (scrollWidth ${reoptScroll})`);
+    if (process.env.SMOKE_SHOT_DIR) {
+      await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-320.png") });
+      await ro.setViewportSize({ width: 1280, height: 900 });
+      await ro.locator("#candidates3 .candidate-card").first().screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-card.png") });
+      await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-desktop.png") });
+    }
+    await ro.setViewportSize({ width: 1280, height: 720 });
+    await ro.click("#reoptimize3 .reopt-discard");
+    assert(!(await reoptPanel.isVisible()), "버리기 뒤에도 제안 패널이 남음");
+    assert((await editedIds()) === seedJson, "버리기 뒤 카드가 바뀜");
+
+    await reoptBtn.click();
+    await waitIdle();
+    await ro.click("#reoptimize3 .reopt-apply");
+    let applied = await editedCard();
+    assert((await editedIds()) !== seedJson, "적용했는데 카드가 그대로임");
+    assert(
+      applied.assigned.some((a) => a.id === "A_0" && a.locationId === "loc1") &&
+        JSON.stringify(applied.confirmedIds) === JSON.stringify(["A_0"]),
+      "적용 뒤 유지할 수업(A 12:00)이 그대로·확정 상태가 아님: " + JSON.stringify(applied)
+    );
+    assert(!(await reoptPanel.isVisible()), "적용 뒤에도 제안 패널이 남음");
+    const undoBtn = ro.locator('#candidates3 button[aria-label="편집 취소"]');
+    if (await undoBtn.isEnabled()) await undoBtn.click();
+    else failures.push("적용 뒤 편집 취소(되돌리기) 버튼이 비활성");
+    assert((await editedIds()) === seedJson, "되돌리기로 재최적화 전 카드가 복원되지 않음");
+    await ro.reload();
+    await ro.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    assert((await editedIds()) === seedJson, "되돌린 카드가 새로고침 뒤 유지되지 않음");
   } finally {
     await browser.close();
   }
@@ -270,7 +375,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·제안·버리기·적용·되돌리기, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 
