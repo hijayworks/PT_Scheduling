@@ -1441,7 +1441,7 @@ test("후보 무효화: inputKey가 없는 기존 저장 후보는 하드 제약
   assert(!lib.dropStaleCandidates() && hasAnyCandidate());
   assertEqual(lib.runtime.schedule3Result.inputKey, lib.candidateInputKey());
 });
-test("후보 무효화: inputKey가 없는 기존 저장 후보가 현재 입력으로 하드 제약을 어기면 수정 후보까지 비운다", () => {
+toastTest("후보 무효화: inputKey가 없는 기존 저장 후보가 모두 현재 입력으로 하드 제약을 어기면 모두 비운다", () => {
   staleFixture(undefined);
   lib.state.requests = lib.state.requests.filter((r) => r.id !== at("A", 0, 0, "L1").id); // 배정된 신청이 사라짐
   assert(lib.dropStaleCandidates() && !hasAnyCandidate());
@@ -1663,6 +1663,58 @@ toastTest("저장 후보: 새로고침(loadState) 후에도 근무 시간 밖 �
   const list = lib.runtime.schedule3Result.candidateAList;
   assertEqual([list[0], !!list[1]], [null, true], "위반 후보만 비움");
   assertEqual(lib.state.requests.length, JSON.parse(saved).requests.length, "신청 원본 유지");
+});
+
+toastTest("저장 후보: inputKey가 없는 저장분도 후보별로 검사해 근무 시간 위반 후보만 비우고, 정상 수정·확정 후보는 새로고침 후에도 남는다", () => {
+  qualityFixture();
+  for (let s = 30; s <= 40; s++) lib.runtime.availableCells.delete("1-" + s); // 화 17:00 이후 근무 없음
+  const editedIds = [at("A", 0, 0, "L1").id];
+  const edited = { ...validQualityResult(), confirmedIds: editedIds };
+  const invalid = {
+    assigned: [at("A", 1, 28, "L1"), at("B", 0, 6, "L1"), at("S", 1, 0, "L1"), at("C", 1, 12, "L3")],
+    unassignedMembers: [],
+    confirmedIds: [at("A", 1, 28, "L1").id],
+  };
+  // inputKey 없음 = 무효화 정책 이전 저장분
+  const legacy = { ...lib.state, schemaVersion: 1, startMinBase: 12 * 60, availableCells: [...lib.runtime.availableCells], schedule3Result: { candidateAList: [edited, invalid, null] }, candidates: [validQualityResult(), invalid] };
+  const originalGetItem = globalThis.localStorage.getItem;
+  const originalSetItem = globalThis.localStorage.setItem;
+  let stored = JSON.stringify(legacy);
+  globalThis.localStorage.getItem = () => stored;
+  globalThis.localStorage.setItem = (k, v) => (stored = v);
+  try {
+    lib.loadState();
+    assertEqual(lib.runtime.schedule3Result.inputKey, undefined, "픽스처 확인: 키 없음");
+    assert(lib.dropStaleCandidates(), "위반 후보를 비웠다고 알려야 함");
+    const check = (when) => {
+      const list = lib.runtime.schedule3Result.candidateAList;
+      assertEqual(list.map(Boolean), [true, false, false], when + ": 위반 후보만 비움");
+      assertEqual(list[0].confirmedIds, editedIds, when + ": 확정 상태 유지");
+      assertEqual(list[0].assigned, edited.assigned, when + ": 수정 배치 유지");
+      assertEqual(lib.runtime.candidates.length, 1, when + ": 정상 B/C 후보 유지");
+      assertEqual(lib.runtime.schedule3Result.inputKey, lib.candidateInputKey(), when + ": 현재 입력 키 기록");
+    };
+    check("정리 직후");
+    assertEqual(JSON.parse(stored).schedule3Result.inputKey, lib.candidateInputKey(), "키까지 저장");
+    lib.loadState(); // 새로고침
+    assert(!lib.dropStaleCandidates(), "새로고침 뒤에는 더 비울 후보가 없음");
+    check("새로고침 후");
+  } finally {
+    globalThis.localStorage.getItem = originalGetItem;
+    globalThis.localStorage.setItem = originalSetItem;
+  }
+});
+toastTest("저장 후보: inputKey가 없고 위반 후보도 없으면 현재 입력 키를 기록해 저장한다", () => {
+  staleFixture(undefined);
+  const originalSetItem = globalThis.localStorage.setItem;
+  let stored = null;
+  globalThis.localStorage.setItem = (k, v) => (stored = v);
+  try {
+    assert(!lib.dropStaleCandidates() && hasAnyCandidate());
+  } finally {
+    globalThis.localStorage.setItem = originalSetItem;
+  }
+  assertEqual(stored && JSON.parse(stored).schedule3Result.inputKey, lib.candidateInputKey());
 });
 
 /* ---------------- 설정: 이동 시간·근무 가능 시간 입력 ---------------- */

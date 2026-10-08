@@ -7985,14 +7985,10 @@
     });
     const key = candidateInputKey();
     const saved = runtime.schedule3Result.inputKey;
-    if (saved === key) {
-      if (dropInvalidCandidates()) return true;
-      if (repaired) saveState();
-      return false;
-    }
-    if (saved === void 0 && slots.every((r) => scheduleViolations(r).length === 0)) {
+    if (saved === key || saved === void 0) {
       runtime.schedule3Result.inputKey = key;
-      saveState();
+      if (dropInvalidCandidates()) return true;
+      if (repaired || saved === void 0) saveState();
       return false;
     }
     clearRuntimeScheduleCandidates();
@@ -8027,7 +8023,8 @@
     renderSchedule3Result();
     saveState();
     const reasons = [...rules].map((rule) => HARD_RULES[rule]).join(", ");
-    generateHint3El.textContent = `필수 조건(${reasons})을 어긴 후보 ${dropped}개를 초기화했습니다. 나머지 후보는 그대로 두었습니다. 필요하면 후보를 다시 생성해주세요.`;
+    const kept = runtime.schedule3Result.candidateAList.some(Boolean) || runtime.candidates.length > 0;
+    generateHint3El.textContent = kept ? `저장된 후보 중 필수 조건(${reasons})을 어긴 후보 ${dropped}개만 초기화했습니다. 나머지 후보(내가 수정한 후보 포함)는 그대로 두었습니다.` : `저장된 후보가 모두 필수 조건(${reasons})을 어겨 초기화되었습니다. 후보를 다시 생성해주세요.`;
     showToast(`필수 조건을 어긴 후보 ${dropped}개를 초기화했습니다`, "error");
     return true;
   }

@@ -1046,9 +1046,9 @@ export function isUserEdited(result) {
 
 // 후보는 생성 당시 입력(schedule3Result.inputKey)과 현재 입력(candidateInputKey)이 같을 때만 유효하다.
 // 다르면 사용자가 수정한 후보까지 모두 비운다 — 사람이 손댔다고 해서 더 이상 맞지 않는 스케줄을 남기지
-// 않는다. inputKey가 없는 저장분(이 정책 이전 데이터)은 현재 입력으로 하드 제약을 다시 검사해 모두
-// 통과하면 현재 입력 기준으로 인정하고, 하나라도 위반하면 비운다. 입력이 같아도 수동 편집 검사가
-// 빠져 있던 시절의 저장분이 하드 제약을 어길 수 있으므로 dropInvalidCandidates를 거친다. 비웠으면 true.
+// 않는다. inputKey가 없는 저장분(이 정책 이전 데이터)은 현재 입력 키를 기록하고, 입력이 같은 경우와
+// 똑같이 후보마다 하드 제약을 다시 검사한다. 입력이 같아도 수동 편집 검사가 빠져 있던 시절의 저장분이
+// 하드 제약을 어길 수 있으므로 dropInvalidCandidates로 위반 후보만 비운다. 비웠으면 true.
 export function dropStaleCandidates() {
   const slots = runtime.schedule3Result.candidateAList
     .concat(runtime.candidates)
@@ -1070,17 +1070,11 @@ export function dropStaleCandidates() {
   });
   const key = candidateInputKey();
   const saved = runtime.schedule3Result.inputKey;
-  if (saved === key) {
-    if (dropInvalidCandidates()) return true;
-    if (repaired) saveState();
-    return false;
-  }
-  if (
-    saved === undefined &&
-    slots.every((r) => scheduleViolations(r).length === 0)
-  ) {
+  if (saved === key || saved === undefined) {
+    // 키가 없으면 생성 당시 입력을 알 수 없으니 현재 입력 기준으로 후보마다 다시 검사한다.
     runtime.schedule3Result.inputKey = key;
-    saveState();
+    if (dropInvalidCandidates()) return true;
+    if (repaired || saved === undefined) saveState();
     return false;
   }
   clearRuntimeScheduleCandidates();
@@ -1121,9 +1115,14 @@ function dropInvalidCandidates() {
   renderSchedule3Result();
   saveState();
   const reasons = [...rules].map((rule) => HARD_RULES[rule]).join(", ");
-  generateHint3El.textContent =
-    `필수 조건(${reasons})을 어긴 후보 ${dropped}개를 초기화했습니다. ` +
-    "나머지 후보는 그대로 두었습니다. 필요하면 후보를 다시 생성해주세요.";
+  // 입력 변경 무효화(dropStaleCandidates)와 구분되게, 입력은 그대로이고 위반 후보만 비웠다고 알린다.
+  const kept =
+    runtime.schedule3Result.candidateAList.some(Boolean) ||
+    runtime.candidates.length > 0;
+  generateHint3El.textContent = kept
+    ? `저장된 후보 중 필수 조건(${reasons})을 어긴 후보 ${dropped}개만 초기화했습니다. ` +
+      "나머지 후보(내가 수정한 후보 포함)는 그대로 두었습니다."
+    : `저장된 후보가 모두 필수 조건(${reasons})을 어겨 초기화되었습니다. 후보를 다시 생성해주세요.`;
   showToast(`필수 조건을 어긴 후보 ${dropped}개를 초기화했습니다`, "error");
   return true;
 }

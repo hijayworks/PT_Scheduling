@@ -312,6 +312,8 @@ async function main() {
       titles.length === 0,
       "신청이 바뀐 뒤 새로고침하자 옛 후보가 남음 (실제: " + JSON.stringify(titles) + ")"
     );
+    const staleHint = await page.locator("#generateHint3").innerText();
+    assert(staleHint.includes("회원·신청·설정이 변경되어") && !staleHint.includes("필수 조건"), "입력 변경 안내가 다름: " + staleHint);
 
 
     const cspViolations = await page.evaluate(() => window.__PT_CSP_VIOLATIONS__ || []);
@@ -551,6 +553,38 @@ async function main() {
     const endShown = await monSelects.nth(1).evaluate((sel) => (sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : ""));
     assert(endShown === "18:00", "근무 종료를 시작보다 이르게 고르면 선택창이 18:00을 보여야 함 (실제: '" + endShown + "')");
     await me.close();
+
+    // inputKey가 없는 옛 저장분에 정상 수정·확정 후보와 근무 시간 위반 후보(근무 안 하는 화요일)가 섞여 있으면
+    // 위반 후보만 비우고, 정상 후보는 확정 상태 그대로 새로고침 뒤에도 남는다. 안내는 입력 변경이 아니라 필수 조건 위반이다.
+    const lg = await browser.newPage();
+    lg.on("pageerror", (err) => failures.push("옛 저장분 페이지 런타임 에러: " + err.message));
+    const lgSeed = buildManualEditSeedState();
+    const lgAt = (day) => ({ id: "A" + day + "_0", memberId: "A", day, startSlot: 0, duration: 60, locationId: "loc1" });
+    const lgMemberB = lgSeed.members[1];
+    lgSeed.schedule3Result = { candidateAList: [{ assigned: [lgAt(0), lgAt(2)], unassignedMembers: [lgMemberB], confirmedIds: ["A0_0"] }, null, null] };
+    lgSeed.candidates = [{ assigned: [lgAt(0), lgAt(1)], unassignedMembers: [lgMemberB], confirmedIds: ["A1_0"], strategyIndex: 0 }];
+    await lg.addInitScript(
+      ({ key, data }) => {
+        if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify(data));
+      },
+      { key: STORAGE_KEY, data: lgSeed }
+    );
+    await lg.goto(INDEX_URL);
+    await lg.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    const lgHint = await lg.locator("#generateHint3").innerText();
+    assert(lgHint.includes("필수 조건(근무 가능 시간에만 배정한다)을 어긴 후보 1개만") && !lgHint.includes("변경되어"), "옛 저장분 위반 안내가 다름: " + lgHint);
+    for (const when of ["로드 직후", "새로고침 후"]) {
+      const st = await readState(lg);
+      const kept = st.schedule3Result.candidateAList[0];
+      assert(st.candidates.length === 0 && kept && JSON.stringify(kept.confirmedIds) === JSON.stringify(["A0_0"]), when + ": 위반 후보만 비우고 정상 확정 후보를 남겨야 함: " + JSON.stringify(st.schedule3Result) + JSON.stringify(st.candidates));
+      assert(typeof st.schedule3Result.inputKey === "string", when + ": 현재 입력 키가 저장되지 않음");
+      assert((await lg.locator("#candidates3 .candidate-card").count()) === 1, when + ": 정상 후보 카드가 보이지 않음");
+      if (when === "로드 직후") {
+        await lg.reload();
+        await lg.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+      }
+    }
+    await lg.close();
   } finally {
     await browser.close();
   }
@@ -562,7 +596,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 
