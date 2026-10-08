@@ -198,7 +198,6 @@ rangeAddBtn.addEventListener("click", () => {
     r.startSel.value = "";
     r.endSel.value = "";
   });
-  runtime.requestsChangedSinceGenerate3 = true;
   saveState();
   renderRequestList();
   showToast("일정이 추가 되었습니다.", "success");
@@ -207,7 +206,6 @@ rangeAddBtn.addEventListener("click", () => {
 export function resetAllRequests() {
   if (state.requests.length === 0) return;
   state.requests = [];
-  runtime.requestsChangedSinceGenerate3 = true;
   saveState();
   renderRequestList();
 }
@@ -992,7 +990,6 @@ bulkImportApplyBtn.addEventListener("click", () => {
     }
   });
 
-  runtime.requestsChangedSinceGenerate3 = true;
   saveState();
   renderMemberTable();
   renderRequestList();
@@ -1234,7 +1231,6 @@ export function deleteMember(member) {
   state.excludedMemberIds3 = state.excludedMemberIds3.filter(
     (id) => id !== member.id,
   );
-  runtime.requestsChangedSinceGenerate3 = true;
   saveState();
   renderMemberTable();
   renderRequestList();
@@ -1257,7 +1253,6 @@ export function setMemberCategory(member, category) {
   state.requests.forEach((r) => {
     if (r.memberId === member.id) r.duration = newDuration;
   });
-  runtime.requestsChangedSinceGenerate3 = true;
   saveState();
   renderRequestList();
   showToast("회원 구분이 변경되었습니다", "success");
@@ -1869,7 +1864,6 @@ export function addDesiredRange(member, day, startSlot, endSlot, locationId) {
 export function removeRequests(reqIds) {
   const idSet = new Set(reqIds);
   state.requests = state.requests.filter((r) => !idSet.has(r.id));
-  runtime.requestsChangedSinceGenerate3 = true;
   renderRequestList();
   saveState();
 }
@@ -2003,7 +1997,6 @@ export function addExtraLocationToRun(run, locId) {
   const current = requestRunExtraLocationIds(run);
   if (current.includes(locId)) return;
   setRunExtraLocationIds(run, current.concat([locId]));
-  runtime.requestsChangedSinceGenerate3 = true;
   saveState();
   renderRequestList();
   showToast("지점이 추가되었습니다", "success");
@@ -2014,7 +2007,6 @@ export function removeExtraLocationFromRun(run, locId) {
     run,
     requestRunExtraLocationIds(run).filter((id) => id !== locId),
   );
-  runtime.requestsChangedSinceGenerate3 = true;
   saveState();
   renderRequestList();
   showToast("지점이 제거되었습니다", "info");
@@ -2036,7 +2028,6 @@ export function excludeBaseLocationFromRun(run, locId) {
   const current = requestRunExcludedLocationIds(run);
   if (current.includes(locId)) return;
   setRunExcludedLocationIds(run, current.concat([locId]));
-  runtime.requestsChangedSinceGenerate3 = true;
   saveState();
   renderRequestList();
   showToast("지점이 제거되었습니다", "info");
@@ -2047,7 +2038,6 @@ export function restoreBaseLocationToRun(run, locId) {
     run,
     requestRunExcludedLocationIds(run).filter((id) => id !== locId),
   );
-  runtime.requestsChangedSinceGenerate3 = true;
   saveState();
   renderRequestList();
   showToast("지점이 복원되었습니다", "success");

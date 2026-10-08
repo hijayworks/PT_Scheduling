@@ -1260,6 +1260,73 @@ test("후보 풀: 사용자가 손댄 슬롯은 수정 후보로 넣고, 그 슬
   lib.runtime.schedule3Result = { candidateAList: [null, null, null] };
 });
 
+/* ---------------- schedule3.js: 입력이 바뀌면 후보(수정 후보 포함)를 무효화 ---------------- */
+// 생성 당시 입력과 현재 입력이 다르면 사람이 수정한 후보도 남기지 않는다.
+function staleFixture(inputKey) {
+  qualityFixture();
+  const edited = { ...validQualityResult(), confirmedIds: [at("A", 0, 0, "L1").id] };
+  lib.runtime.schedule3Result = { candidateAList: [edited, validQualityResult(), null] };
+  if (inputKey !== undefined) lib.runtime.schedule3Result.inputKey = inputKey;
+  lib.runtime.candidates = [validQualityResult()];
+}
+const hasAnyCandidate = () => lib.runtime.schedule3Result.candidateAList.some(Boolean) || lib.runtime.candidates.length > 0;
+const CANDIDATE_INPUT_CHANGES = {
+  "회원 신청": () => lib.state.requests.pop(),
+  "회원 지점": () => lib.state.members[0].locationIds.push("L2"),
+  "회원 구분": () => (lib.state.members[0].category = "상담"),
+  "지점": () => lib.state.locations.push({ id: "L4", name: "새 지점" }),
+  "지점 이름(세 지점·비효율 이동 규칙이 읽음)": () => (lib.state.locations[2].name = "새 이름"),
+  "이동시간": () => (lib.state.travelTimes[lib.pairKey("L1", "L2")] = 40),
+  "근무 가능 시간": () => lib.runtime.availableCells.delete("0-40"),
+  "제외 회원": () => lib.state.excludedMemberIds3.push("B"),
+  "1회 제한 회원": () => lib.state.onceLimitedMemberIds3.push("A"),
+};
+Object.entries(CANDIDATE_INPUT_CHANGES).forEach(([what, change]) => {
+  test(`후보 무효화: ${what}이(가) 바뀌면 내가 수정한 후보도 기존 후보와 함께 비운다`, () => {
+    qualityFixture();
+    staleFixture(lib.candidateInputKey());
+    assert(!lib.dropStaleCandidates() && hasAnyCandidate(), "입력이 같으면 그대로 둔다");
+    change();
+    assert(lib.dropStaleCandidates(), "비웠다고 알려야 한다");
+    assert(!hasAnyCandidate(), "수정 후보까지 모두 비운다");
+  });
+});
+test("후보 무효화: 회원 이름·메모나 배열 순서만 바뀌면 입력이 같은 것으로 본다", () => {
+  qualityFixture();
+  const key = lib.candidateInputKey();
+  lib.state.members[0].name = "새 이름";
+  lib.state.members[0].memo = "메모";
+  lib.state.requests.reverse();
+  lib.state.members.reverse();
+  lib.runtime.availableCells = new Set([...lib.runtime.availableCells].reverse());
+  assertEqual(lib.candidateInputKey(), key);
+});
+test("후보 무효화: inputKey가 없는 기존 저장 후보는 하드 제약을 지키면 현재 입력 기준으로 인정한다", () => {
+  staleFixture(undefined);
+  assert(!lib.dropStaleCandidates() && hasAnyCandidate());
+  assertEqual(lib.runtime.schedule3Result.inputKey, lib.candidateInputKey());
+});
+test("후보 무효화: inputKey가 없는 기존 저장 후보가 현재 입력으로 하드 제약을 어기면 수정 후보까지 비운다", () => {
+  staleFixture(undefined);
+  lib.state.requests = lib.state.requests.filter((r) => r.id !== at("A", 0, 0, "L1").id); // 배정된 신청이 사라짐
+  assert(lib.dropStaleCandidates() && !hasAnyCandidate());
+});
+test("후보 무효화: 저장된 inputKey는 새로고침(loadState) 후에도 남고, 없거나 문자열이 아니면 '모름'으로 읽는다", () => {
+  const originalGetItem = globalThis.localStorage.getItem;
+  const load = (schedule3Result) => {
+    globalThis.localStorage.getItem = () => JSON.stringify({ schemaVersion: 1, startMinBase: 12 * 60, locations: [{ id: "L1", name: "마포점" }], schedule3Result });
+    lib.loadState();
+    return lib.runtime.schedule3Result.inputKey;
+  };
+  try {
+    assertEqual(load({ candidateAList: [null, null, null], inputKey: "k1" }), "k1");
+    assertEqual(load({ candidateAList: [null, null, null] }), undefined);
+    assertEqual(load({ candidateAList: [null, null, null], inputKey: 3 }), undefined);
+  } finally {
+    globalThis.localStorage.getItem = originalGetItem;
+  }
+});
+
 /* ---------------- schedule3.js: 수동 이동·맞바꾸기의 하드 제약 ---------------- */
 // 수동 편집은 옮기는 회원 본인만이 아니라, 수업이 빠진 요일과 들어간 요일의 최종 체인 전체가
 // 자동 생성과 같은 하드 제약을 지켜야 한다.

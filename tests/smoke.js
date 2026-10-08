@@ -197,6 +197,20 @@ async function main() {
     const memberRowCount = await page.locator("#memberTableBody tr").count();
     assert(memberRowCount === 1, "회원관리 표에 회원이 정상적으로 표시되지 않음 (실제: " + memberRowCount + "행)");
 
+    // 신청이 바뀌면(전체 스케줄 초기화) 새로고침을 거쳐도 '내가 수정한 후보'까지 비워진다. 예전에는
+    // 런타임 플래그로만 표시해서 새로고침하면 플래그가 사라지고 옛 수정 후보가 남았다.
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    page.once("dialog", (d) => d.accept());
+    await page.click("#resetAllSchedulesBtn");
+    await page.reload();
+    await page.click('.nav-item[data-page="schedule3"]');
+    await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    titles = await cardTitles();
+    assert(
+      titles.length === 0,
+      "신청이 바뀐 뒤 새로고침하자 옛 후보가 남음 (실제: " + JSON.stringify(titles) + ")"
+    );
+
 
     const cspViolations = await page.evaluate(() => window.__PT_CSP_VIOLATIONS__ || []);
     assert(
@@ -214,7 +228,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 회원 목록 렌더링 확인됨)"
   );
 }
 
