@@ -28,7 +28,10 @@ const browserGlobals = {
   URL: "readonly",
   Blob: "readonly",
   btoa: "readonly",
-  atob: "readonly"
+  atob: "readonly",
+  Worker: "readonly",
+  self: "readonly",
+  __PT_POLISH_WORKER_SOURCE__: "readonly" // scripts/build.js의 esbuild define
 };
 
 const nodeGlobals = {

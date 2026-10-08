@@ -12,8 +12,43 @@ import {
 } from "./constants.js";
 import { currentOnceLimitIds } from "./selectionOverride.js";
 
+// 생성 엔진이 신청·노드마다 아주 많이 부르므로 id → 배열 위치 색인을 둔다. 회원 목록은
+// 추가(unshift)·삭제(filter 재할당) 등 어떤 식으로든 바뀔 수 있으므로 색인을 믿지 않고, 찾은
+// 위치의 회원 id가 실제로 같은지 매번 확인한다 — 다르거나 색인에 없으면 원래대로 배열을 훑고,
+// 찾았으면 색인을 다시 만든다. 그래서 결과는 항상 state.members.find와 같다.
+let memberPosIndex = { list: null, posById: new Map() };
 export function memberById(id) {
-  return state.members.find((m) => m.id === id);
+  const list = state.members;
+  if (memberPosIndex.list === list) {
+    const pos = memberPosIndex.posById.get(id);
+    const m = pos === undefined ? undefined : list[pos];
+    if (m && m.id === id) return m;
+  }
+  const found = list.find((m) => m.id === id);
+  if (found) {
+    const posById = new Map();
+    list.forEach((m, i) => {
+      if (m && !posById.has(m.id)) posById.set(m.id, i);
+    });
+    memberPosIndex = { list, posById };
+  }
+  return found;
+}
+
+// 현재 등록된 지점 id 집합. 후보 지점 계산이 신청마다 불려 매번 Set을 새로 만들던 비용을
+// 없애려고 캐시하되, 지점은 몇 개뿐이라 호출마다 id 목록이 그대로인지 전부 확인한다(지점
+// 추가·삭제·교체 어느 경우든 바로 다시 만든다).
+let knownLocationCache = { ids: [], set: new Set() };
+export function knownLocationIdSet() {
+  const list = state.locations;
+  const ids = knownLocationCache.ids;
+  let same = ids.length === list.length;
+  for (let i = 0; same && i < list.length; i++) same = list[i].id === ids[i];
+  if (!same) {
+    const nextIds = list.map((l) => l.id);
+    knownLocationCache = { ids: nextIds, set: new Set(nextIds) };
+  }
+  return knownLocationCache.set;
 }
 
 // 상담 회원은 확보 시간이 짧다(30분) — 그 외(등록 회원)는 기본 수업 시간(60분).
@@ -110,8 +145,12 @@ export function locationColor(locId) {
   return idx === -1 ? null : MEMBER_COLORS[idx % MEMBER_COLORS.length];
 }
 
+// 체인DP 안쪽 루프에서 travelMinutes를 통해 아주 많이 불리므로 배열 생성·정렬 없이 만든다
+// ([a, b].sort().join("|")와 같은 결과 — 기본 sort도 문자열 코드 단위 비교다).
 export function pairKey(idA, idB) {
-  return [idA, idB].sort().join("|");
+  const a = String(idA),
+    b = String(idB);
+  return a < b ? a + "|" + b : b + "|" + a;
 }
 
 export function travelMinutes(locIdA, locIdB) {

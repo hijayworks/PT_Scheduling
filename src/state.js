@@ -94,11 +94,14 @@ export async function releaseWakeLock() {
     }
   }
 }
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && runtime.generationInProgress) {
-    acquireWakeLock();
-  }
-});
+// 다듬기 Web Worker(engine/polishWorker.js)도 이 모듈을 불러오는데 워커에는 document가 없다.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && runtime.generationInProgress) {
+      acquireWakeLock();
+    }
+  });
+}
 
 export const PAGE_IDS = ["settings", "schedule3", "members", "memberSchedule"];
 // Pages from before the sidebar redesign ("requests"/"candidates"/"confirm"), and "schedule"/"schedule2"

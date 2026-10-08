@@ -18,6 +18,7 @@ import {
 } from "../state.js";
 import {
   memberById,
+  knownLocationIdSet,
   maxSessionsFor,
   soloTravelMemberIds,
   travelMinutes,
@@ -62,7 +63,7 @@ export function isAdjacentDay(day, days) {
 export function candidateLocationsFor(memberId) {
   const member = memberById(memberId);
   if (!member || !Array.isArray(member.locationIds)) return [];
-  const knownLocationIds = new Set(state.locations.map((l) => l.id));
+  const knownLocationIds = knownLocationIdSet();
   return member.locationIds.filter((id) => knownLocationIds.has(id));
 }
 
@@ -74,7 +75,7 @@ export function candidateLocationsForRequest(req) {
   const base = candidateLocationsFor(req.memberId).filter(
     (id) => id !== null && !excluded.includes(id),
   );
-  const knownLocationIds = new Set(state.locations.map((l) => l.id));
+  const knownLocationIds = knownLocationIdSet();
   const extra = (req.extraLocationIds || []).filter(
     (id) => knownLocationIds.has(id) && !base.includes(id),
   );
@@ -232,8 +233,56 @@ export function greedyAssign(eligibleReqs, options, pinned) {
   });
   const days = [...byDay.keys()].sort((a, b) => a - b);
   const allLocIds = state.locations.map((l) => l.id).concat([null]);
+  // 요일별 신청 회원 집합은 이 호출 동안 바뀌지 않고, 호출하는 쪽은 모두 읽기만 하므로 한 번만 만든다.
+  const memberIdsByDay = new Map();
   function allMemberIdsForDay(day) {
-    return new Set((byDay.get(day) || []).map((r) => r.memberId));
+    let ids = memberIdsByDay.get(day);
+    if (!ids) {
+      ids = new Set((byDay.get(day) || []).map((r) => r.memberId));
+      memberIdsByDay.set(day, ids);
+    }
+    return ids;
+  }
+  // 신청별 후보 지점도 이 호출 동안 바뀌지 않는데, 체인을 짤 때마다 같은 신청에 대해 다시
+  // 계산되던 비용이 그리디 시간의 약 10%였다(실측). 이 호출 안에서만 쓰고 버린다.
+  const locationsByReq = new Map();
+  function locationsForReq(r) {
+    let locs = locationsByReq.get(r);
+    if (!locs) {
+      locs = candidateLocationsForRequest(r);
+      locationsByReq.set(r, locs);
+    }
+    return locs;
+  }
+  // 지점 쌍(직전 지점 → 이번 지점)별 필요 간격·이동 시간. buildBestChain이 노드 × 직전 지점마다
+  // 반복해서 구하던 값이라 미리 행렬로 만들어둔다. allLocIds 밖의 지점이 들어오면(정상적으론
+  // 없음) 행렬 대신 원래 함수로 계산한다.
+  const locIndexOf = new Map(allLocIds.map((id, i) => [id, i]));
+  const LOCS = allLocIds.length;
+  const needOfPair = new Array(LOCS * LOCS),
+    travelOfPair = new Array(LOCS * LOCS);
+  allLocIds.forEach((a, i) =>
+    allLocIds.forEach((b, j) => {
+      needOfPair[i * LOCS + j] = requiredGapMin(a, b);
+      travelOfPair[i * LOCS + j] = travelMinutes(a, b);
+    }),
+  );
+  // buildBestChain의 "체인에 이미 들어간 회원" 집합을 노드마다 Set으로 복사하던 대신 비트셋으로
+  // 들고 다닌다(회원 → 비트 위치). 회원 수가 32명을 넘으면 word를 늘린다.
+  const memberBitOf = new Map();
+  eligibleReqs.forEach((r) => {
+    if (!memberBitOf.has(r.memberId)) memberBitOf.set(r.memberId, memberBitOf.size);
+  });
+  const MEMBER_WORDS = Math.max(1, Math.ceil(memberBitOf.size / 32));
+  function pairNeed(predIdx, predLoc, locId, locIdx) {
+    return locIdx === undefined
+      ? requiredGapMin(predLoc, locId)
+      : needOfPair[predIdx * LOCS + locIdx];
+  }
+  function pairTravel(predIdx, predLoc, locId, locIdx) {
+    return locIdx === undefined
+      ? travelMinutes(predLoc, locId)
+      : travelOfPair[predIdx * LOCS + locIdx];
   }
 
   // 하루치 배정을 처음부터 끝까지 한 번 실행한다(1~3단계 전체). stage1Order로 1단계에서
@@ -310,7 +359,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       );
       const nodes = [];
       cands.forEach((cand) => {
-        const memberLocs = candidateLocationsForRequest(cand);
+        const memberLocs = locationsForReq(cand);
         const locs = onlyLocationId
           ? memberLocs.includes(onlyLocationId)
             ? [onlyLocationId]
@@ -342,15 +391,25 @@ export function greedyAssign(eligibleReqs, options, pinned) {
       // groupByLocation 옵션이 켜지면 그다음으로 같은 지점이 연달아 이어지는(지점을 덜
       // 옮겨다니는) 체인을 우선한다. 그래서 색인은 이 값들을 옵션에 맞는 순서로 정렬해둔다 —
       // 맨 앞이 항상 "이 시각·지점에서 끝나는 세션 중 가장 좋은 것"이 되게.
-      const index = new Map(); // `${end}|${locId}` -> node[] (가장 좋은 것부터)
-      const key = (end, locId) => end + "|" + locId;
+      const index = new Map(); // locId -> (end -> node[], 가장 좋은 것부터)
+      function indexList(end, locId) {
+        const byEnd = index.get(locId);
+        return byEnd && byEnd.get(end);
+      }
       function timeCostOf(n) {
         return n.travelMinutesSum + n.idleMinutesSum;
       }
       function addToIndex(node) {
-        const k = key(node.end, node.locationId);
-        if (!index.has(k)) index.set(k, []);
-        const list = index.get(k);
+        let byEnd = index.get(node.locationId);
+        if (!byEnd) {
+          byEnd = new Map();
+          index.set(node.locationId, byEnd);
+        }
+        let list = byEnd.get(node.end);
+        if (!list) {
+          list = [];
+          byEnd.set(node.end, list);
+        }
         list.push(node);
         list.sort((a, b) =>
           travelFirst
@@ -450,9 +509,14 @@ export function greedyAssign(eligibleReqs, options, pinned) {
         return false;
       }
 
+      const usedBits = new Uint32Array(nodes.length * MEMBER_WORDS);
       let best = null;
-      nodes.forEach((node) => {
-        // 회원 중복 금지는 "바로 앞 세션"뿐 아니라 체인 전체를 봐야 하므로(usedMembers), 각
+      nodes.forEach((node, nodeIdx) => {
+        const memberBit = memberBitOf.get(node.cand.memberId);
+        const memberWord = memberBit >>> 5,
+          memberMask = 1 << (memberBit & 31);
+        node.bitBase = nodeIdx * MEMBER_WORDS;
+        // 회원 중복 금지는 "바로 앞 세션"뿐 아니라 체인 전체를 봐야 하므로(usedBits), 각
         // predLoc(어느 지점에서 왔는지)마다 그 버킷에서 가장 좋은(색인이 이미 그 순서로 정렬된)
         // 항목부터 훑어 회원이 겹치지 않는 첫 항목을 취하고, predLoc들 사이에서는 결과
         // (dp, 이동 횟수, 이동시간+빈시간 합, 정렬 점수, 낮 시간대 점수, 지점 묶기 점수)를
@@ -469,9 +533,15 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           bestResultIneffCount = Infinity,
           bestTransitionMin = 0,
           bestSlackMin = 0;
-        allLocIds.forEach((predLoc) => {
-          const need = requiredGapMin(predLoc, node.locationId);
-          const transitionMin = travelMinutes(predLoc, node.locationId);
+        const nodeLocIdx = locIndexOf.get(node.locationId);
+        allLocIds.forEach((predLoc, predIdx) => {
+          const need = pairNeed(predIdx, predLoc, node.locationId, nodeLocIdx);
+          const transitionMin = pairTravel(
+            predIdx,
+            predLoc,
+            node.locationId,
+            nodeLocIdx,
+          );
           // 필요한 간격(need)보다 최대 allowGapMin분까지 더 벌어져도(=설명 안 되는
           // 빈 시간이 그만큼 생겨도) 이어붙일 수 있다 — 10분 단위 슬롯마다 하나씩 확인한다.
           for (
@@ -480,10 +550,10 @@ export function greedyAssign(eligibleReqs, options, pinned) {
             slackMin += SLOT_MIN
           ) {
             const reqEnd = node.cand.startSlot - (need + slackMin) / SLOT_MIN;
-            const list = index.get(key(reqEnd, predLoc));
+            const list = indexList(reqEnd, predLoc);
             if (!list) continue;
             for (const prevNode of list) {
-              if (prevNode.usedMembers.has(node.cand.memberId)) continue;
+              if (usedBits[prevNode.bitBase + memberWord] & memberMask) continue;
               // 숨김 하드 로직: 세 지점을 모두 다니는 회원이 이동으로 도착한 세션이면, 거기서
               // 또 이동으로 이어지는 연결은 막는다("이동-회원-이동" 금지). 같은 지점에서 다른
               // 회원에게 이어지는 것(이동-회원-다른회원-이동)은 transitionMin이 0이라 여기 걸리지 않는다.
@@ -513,19 +583,13 @@ export function greedyAssign(eligibleReqs, options, pinned) {
                   ? slackMin
                   : 0;
               const resultSlackPen = prevNode.soloSlackPenalty + slackPenalty;
-              // 2칸 전 지점(prevNode가 도착하기 전에 있던 지점)까지 알아야 지금 완성되는
-              // A→B→A 왕복(prevNode 이전 지점 → prevNode의 지점 → 이번 node의 지점)을 판정할
-              // 수 있다 — prevNode 자신이 하루의 첫 세션이면(prev 없음) 왕복이 성립할 수 없다.
-              const prevTwoBackLoc = roundTripOriginLoc(
-                prevNode,
-                (n) => n.prev,
-                (n) => n.locationId,
-              );
+              // 2칸 전 지점(prevNode가 도착하기 전에 있던 지점, 노드 확정 시 미리 구해둠 —
+              // 아래 twoBackLoc 참고)까지 알아야 지금 완성되는 A→B→A 왕복을 판정할 수 있다.
               const resultIneffCount =
                 prevNode.ineffCount +
                 (isInefficientRoundTrip(
                   ineffInfo,
-                  prevTwoBackLoc,
+                  prevNode.twoBackLoc,
                   prevNode.locationId,
                   node.locationId,
                 )
@@ -587,8 +651,11 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           node.groupScore =
             bestPrev.groupScore +
             (bestPrev.locationId === node.locationId ? 1 : 0); // 지점을 바꾸지 않고 이어지면 +1
-          node.usedMembers = new Set(bestPrev.usedMembers);
-          node.usedMembers.add(node.cand.memberId);
+          usedBits.copyWithin(
+            node.bitBase,
+            bestPrev.bitBase,
+            bestPrev.bitBase + MEMBER_WORDS,
+          );
           node.arrivedViaTravel = bestPrev.locationId !== node.locationId;
         } else {
           node.dp = weightFn(node.cand.memberId);
@@ -601,9 +668,17 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           node.soloSlackPenalty = 0;
           node.daytimeScore = daytimeBonus;
           node.groupScore = 0;
-          node.usedMembers = new Set([node.cand.memberId]);
           node.arrivedViaTravel = false; // 하루의 첫 세션은 "이동해서 도착"이 아니라 그냥 시작
         }
+        usedBits[node.bitBase + memberWord] |= memberMask;
+        // 2칸 전 지점(이 노드가 도착하기 전에 있던 지점) — prev가 여기서 확정되므로 노드마다 한
+        // 번만 구해, 이 노드 뒤에 이어지는 전이들의 A→B→A 왕복 판정에 재사용한다. 하루의 첫
+        // 세션이면(prev 없음) 왕복이 성립할 수 없다.
+        node.twoBackLoc = roundTripOriginLoc(
+          node,
+          (n) => n.prev,
+          (n) => n.locationId,
+        );
         if (node.dp > -Infinity) {
           addToIndex(node);
           const nodeTimeCost = timeCostOf(node);
@@ -663,7 +738,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
             slackMin += SLOT_MIN
           ) {
             const gapSlots = (need + slackMin) / SLOT_MIN;
-            const list = index.get(key(endBefore.slot - gapSlots, loc));
+            const list = indexList(endBefore.slot - gapSlots, loc);
             if (!list || list.length === 0) continue;
             // 이미 버킷 안에서 가장 좋은 순으로 정렬되어 있으니 첫 유효 항목을 쓴다 — 다만
             // 숨김 하드 로직에 걸리는 회원이면("이동-회원-이동") 다음 후보를 본다.
@@ -680,16 +755,11 @@ export function greedyAssign(eligibleReqs, options, pinned) {
             // 왕복을 완성시키는지(node 이전 지점 → node의 지점 → endBefore의 지점)까지 반영해
             // 비교용으로만 더해준다(기존에도 이 블록은 마지막 전이 비용을 완벽히 반영하진
             // 않는 근사라, 그 패턴을 그대로 따른다).
-            const nodeTwoBackLoc = roundTripOriginLoc(
-              node,
-              (n) => n.prev,
-              (n) => n.locationId,
-            );
             const nodeIneffCount =
               node.ineffCount +
               (isInefficientRoundTrip(
                 ineffInfo,
-                nodeTwoBackLoc,
+                node.twoBackLoc,
                 node.locationId,
                 endBefore.locationId,
               )
@@ -782,7 +852,7 @@ export function greedyAssign(eligibleReqs, options, pinned) {
           )
             return;
           let bestLoc = null;
-          candidateLocationsForRequest(cand).forEach((locId) => {
+          locationsForReq(cand).forEach((locId) => {
             const need = requiredGapMin(chainEnd.locationId, locId);
             const actual =
               (cand.startSlot -
@@ -1525,7 +1595,8 @@ export function shuffledDayOrder(randomFn) {
 // 브라우저가 아예 실행하지 않으므로, 그때는 setTimeout만으로 양보해 생성이 멈추지 않고
 // (다소 느려지더라도) 계속 진행되게 한다.
 export function yieldToUI() {
-  if (document.hidden) {
+  // 다듬기 Web Worker 안에는 document(그릴 화면)가 없다 — 이벤트 루프에만 한 번 양보한다.
+  if (typeof document === "undefined" || document.hidden) {
     return new Promise((resolve) => setTimeout(resolve, 0));
   }
   return new Promise((resolve) =>
