@@ -24,6 +24,7 @@ function createCaseRunner({ aScale = 0.01, realClock = false } = {}) {
     state.members = c.members;
     state.onceLimitedMemberIds3 = c.onceLimitedMemberIds3 || [];
     state.excludedMemberIds3 = c.excludedMemberIds3 || [];
+    state.noConsecutiveDayMemberIds = c.noConsecutiveDayMemberIds || [];
     runtime.candidates = [];
     if (c.availableCells) runtime.availableCells = new Set(c.availableCells);
     else {

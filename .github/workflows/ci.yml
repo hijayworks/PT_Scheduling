@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 스모크의 구버전 호환 검사가 구버전 앱 커밋(tests/smoke.js LEGACY_APP_COMMIT)을 git archive로 꺼낸다.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 20

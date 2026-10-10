@@ -235,7 +235,7 @@ test("backup password: 새 백업은 12자 이상만 허용", () => {
 
 test("restore recovery: session snapshot에서 기존 localStorage를 복원", () => {
   const sessionData = new Map();
-  const localData = new Map([["pt_schedule_state_v3", "new-state"]]);
+  const localData = new Map([[lib.STORAGE_KEY, "new-state"]]);
   const fakeSession = {
     getItem: (k) => sessionData.has(k) ? sessionData.get(k) : null,
     setItem: (k, v) => sessionData.set(k, v),
@@ -252,13 +252,13 @@ test("restore recovery: session snapshot에서 기존 localStorage를 복원", (
   );
   assertEqual(lib.readRestoreRecoverySnapshot(fakeSession).state, "old-state");
   assert(lib.restoreRecoverySnapshot(fakeSession, fakeLocal));
-  assertEqual(fakeLocal.getItem("pt_schedule_state_v3"), "old-state");
+  assertEqual(fakeLocal.getItem(lib.STORAGE_KEY), "old-state");
   assertEqual(fakeSession.getItem(lib.RESTORE_RECOVERY_KEY), null);
 });
 
 test("restore recovery: 이전에 저장 데이터가 없던 상태도 되돌릴 수 있음", () => {
   const sessionData = new Map();
-  const localData = new Map([["pt_schedule_state_v3", "restored-state"]]);
+  const localData = new Map([[lib.STORAGE_KEY, "restored-state"]]);
   const fakeSession = {
     getItem: (k) => sessionData.has(k) ? sessionData.get(k) : null,
     setItem: (k, v) => sessionData.set(k, v),
@@ -274,7 +274,7 @@ test("restore recovery: 이전에 저장 데이터가 없던 상태도 되돌릴
     JSON.stringify({ createdAt: 1, state: null }),
   );
   assert(lib.restoreRecoverySnapshot(fakeSession, fakeLocal));
-  assertEqual(fakeLocal.getItem("pt_schedule_state_v3"), null);
+  assertEqual(fakeLocal.getItem(lib.STORAGE_KEY), null);
 });
 
 test("saveState: localStorage 쓰기 실패를 밖으로 던지지 않고 false 반환", () => {
@@ -290,6 +290,128 @@ test("saveState: localStorage 쓰기 실패를 밖으로 던지지 않고 false 
     lib.runtime.storageError = null;
   }
   assertEqual(result, false);
+});
+
+/* ---------------- 저장 키 분리·이관 (schemaVersion 2) ---------------- */
+// 구버전 앱은 LEGACY_STORAGE_KEY만 읽고 쓴다. 신버전은 STORAGE_KEY만 쓰고, 그 키가 없을 때만 구버전 저장분을 복사해 읽는다.
+function withFakeStorage(entries, fn) {
+  const data = new Map(Object.entries(entries));
+  const original = { ...globalThis.localStorage };
+  Object.assign(globalThis.localStorage, {
+    getItem: (k) => (data.has(k) ? data.get(k) : null),
+    setItem: (k, v) => data.set(k, String(v)),
+    removeItem: (k) => data.delete(k),
+  });
+  try {
+    fn(data);
+  } finally {
+    Object.assign(globalThis.localStorage, original);
+    lib.runtime.loadError = null;
+    lib.runtime.storageError = null;
+  }
+}
+function legacySavedState() {
+  const data = validBackupFixture();
+  data.schemaVersion = 1;
+  data.startMinBase = 12 * 60;
+  data.onceLimitedMemberIds3 = ["M1"];
+  data.schedule3Result = {
+    candidateAList: [{ assigned: [{ ...data.requests[0], locationId: "L1" }], unassignedMembers: [], confirmedIds: ["R1"] }, null, null],
+  };
+  return data;
+}
+
+test("저장 이관: 구버전 키(schemaVersion 1)의 회원·신청·설정·수정 확정 후보를 신버전 키로 옮기고 구버전 저장분은 건드리지 않는다", () => {
+  const legacyRaw = JSON.stringify(legacySavedState());
+  withFakeStorage({ [lib.LEGACY_STORAGE_KEY]: legacyRaw }, (data) => {
+    lib.loadState();
+    assertEqual(lib.state.members.map((m) => m.id), ["M1"]);
+    assertEqual(lib.state.requests.map((r) => r.id), ["R1"]);
+    assertEqual(lib.state.onceLimitedMemberIds3, ["M1"]);
+    assertEqual(lib.state.noConsecutiveDayMemberIds, [], "새 설정은 빈 목록으로 이관");
+    assertEqual(lib.runtime.schedule3Result.candidateAList[0].confirmedIds, ["R1"], "수정 확정 후보 유지");
+    assert(lib.saveState(), "이관 뒤 저장 가능");
+    const saved = JSON.parse(data.get(lib.STORAGE_KEY));
+    assertEqual(saved.schemaVersion, 2);
+    assertEqual(saved.members.map((m) => m.id), ["M1"]);
+    assertEqual(data.get(lib.LEGACY_STORAGE_KEY), legacyRaw, "구버전 저장분은 그대로");
+  });
+});
+
+test("저장 분리: 신버전 키가 있으면 구버전 탭이 나중에 쓴 구버전 키는 읽지 않는다", () => {
+  const legacy = legacySavedState();
+  const current = { ...legacySavedState(), schemaVersion: 2, noConsecutiveDayMemberIds: ["M1"] };
+  legacy.members = []; // 구버전 탭이 다른 내용으로 자동 저장
+  withFakeStorage({ [lib.STORAGE_KEY]: JSON.stringify(current), [lib.LEGACY_STORAGE_KEY]: JSON.stringify(legacy) }, (data) => {
+    lib.loadState();
+    assertEqual(lib.state.members.map((m) => m.id), ["M1"]);
+    assertEqual(lib.state.noConsecutiveDayMemberIds, ["M1"], "새 설정 유지");
+    lib.saveState();
+    assertEqual(JSON.parse(data.get(lib.LEGACY_STORAGE_KEY)).members, [], "신버전은 구버전 키에 쓰지 않음");
+  });
+});
+
+test("저장 보호: 신버전 키의 저장분을 읽지 못하면(미래 schemaVersion·손상) 기본값으로 덮어쓰지 않고 저장을 막는다", () => {
+  for (const raw of [JSON.stringify({ ...legacySavedState(), schemaVersion: lib.CURRENT_SCHEMA_VERSION + 1 }), "{broken"]) {
+    withFakeStorage({ [lib.STORAGE_KEY]: raw }, (data) => {
+      lib.loadState();
+      assert(lib.runtime.storageError, "저장 불가 상태를 알려야 함");
+      assertEqual(lib.saveState(), false);
+      assertEqual(data.get(lib.STORAGE_KEY), raw, "저장분 보존");
+    });
+  }
+  // 구버전 키는 신버전이 쓰지 않으므로 읽지 못해도 저장을 막지 않는다(구버전 키도 그대로).
+  withFakeStorage({ [lib.LEGACY_STORAGE_KEY]: "{broken" }, (data) => {
+    lib.loadState();
+    assert(lib.saveState(), "구버전 키 손상은 신버전 저장을 막지 않음");
+    assertEqual(data.get(lib.LEGACY_STORAGE_KEY), "{broken");
+  });
+});
+
+test("저장 보호: 신버전 키가 있는데 최상위 값이 객체가 아니면(null·빈 문자열·false·0·배열) 구버전을 이관하지 않고 원문을 지킨다", () => {
+  const legacyRaw = JSON.stringify(legacySavedState());
+  for (const raw of ["null", "", "false", "0", "[]"]) {
+    withFakeStorage({ [lib.STORAGE_KEY]: raw, [lib.LEGACY_STORAGE_KEY]: legacyRaw }, (data) => {
+      lib.state.members = []; // 새 페이지처럼 비운 상태에서 읽는다(이전 테스트의 회원이 남지 않게)
+      lib.loadState();
+      assert(lib.runtime.loadError && lib.runtime.storageError, JSON.stringify(raw) + ": 읽기 실패로 처리해야 함");
+      assert(!lib.state.members.some((m) => m.id === "M1"), JSON.stringify(raw) + ": 구버전 저장분을 이관하면 안 됨");
+      assertEqual(lib.saveState(), false, JSON.stringify(raw) + ": 저장 차단");
+      assertEqual(data.get(lib.STORAGE_KEY), raw, JSON.stringify(raw) + ": 원문 보존");
+      assertEqual(data.get(lib.LEGACY_STORAGE_KEY), legacyRaw, JSON.stringify(raw) + ": 구버전 저장분 보존");
+    });
+  }
+});
+
+test("저장 보호: 차단된 상태에서도 정상 백업을 복원하면(새로고침 후) 저장 차단이 풀린다", () => {
+  withFakeStorage({ [lib.STORAGE_KEY]: "null" }, (data) => {
+    lib.loadState();
+    assertEqual(lib.saveState(), false, "픽스처 확인: 차단");
+    // 복원 흐름: 검증한 백업을 저장소에 직접 쓰고 새로고침(loadState)
+    const backup = lib.createPortableBackupState({ ...legacySavedState(), schemaVersion: 2, noConsecutiveDayMemberIds: ["M1"] });
+    data.set(lib.STORAGE_KEY, JSON.stringify(lib.prepareBackupStateForRestore(backup)));
+    lib.loadState();
+    assertEqual(lib.runtime.loadError, null, "차단 해제");
+    assertEqual(lib.state.noConsecutiveDayMemberIds, ["M1"]);
+    assert(lib.saveState(), "복원 뒤 저장 가능");
+    assertEqual(JSON.parse(data.get(lib.STORAGE_KEY)).schemaVersion, 2);
+  });
+});
+
+test("백업: 신버전 백업은 schemaVersion 2로 새 설정을 담고, 구버전 백업(1)은 복원 후 새 설정을 빈 목록으로 이관한다", () => {
+  const current = { ...legacySavedState(), schemaVersion: 2, noConsecutiveDayMemberIds: ["M1"] };
+  const portable = lib.createPortableBackupState(current);
+  assertEqual([portable.schemaVersion, portable.noConsecutiveDayMemberIds], [2, ["M1"]]);
+  const legacyBackup = { ...portable, schemaVersion: 1 }; // 구버전이 만든 백업: 새 설정 필드 없음
+  delete legacyBackup.noConsecutiveDayMemberIds;
+  for (const [backup, expected] of [[portable, ["M1"]], [legacyBackup, []]]) {
+    const restored = lib.prepareBackupStateForRestore(JSON.parse(JSON.stringify(backup)));
+    withFakeStorage({ [lib.STORAGE_KEY]: JSON.stringify(restored) }, () => {
+      lib.loadState();
+      assertEqual(lib.state.members.map((m) => m.id), ["M1"]);
+      assertEqual(lib.state.noConsecutiveDayMemberIds, expected);
+    });
+  }
 });
 
 /* ---------------- utils.js ---------------- */
@@ -1031,6 +1153,7 @@ function qualityFixture() {
   ];
   lib.state.excludedMemberIds3 = ["X"];
   lib.state.onceLimitedMemberIds3 = [];
+  lib.state.noConsecutiveDayMemberIds = [];
   lib.runtime.availableCells = new Set();
   lib.state.requests = [];
   [0, 1].forEach((day) => {
@@ -1415,6 +1538,7 @@ const CANDIDATE_INPUT_CHANGES = {
   "근무 가능 시간": () => lib.runtime.availableCells.delete("0-40"),
   "제외 회원": () => lib.state.excludedMemberIds3.push("B"),
   "1회 제한 회원": () => lib.state.onceLimitedMemberIds3.push("A"),
+  "연속 요일 배정 제외 회원": () => lib.state.noConsecutiveDayMemberIds.push("A"),
 };
 Object.entries(CANDIDATE_INPUT_CHANGES).forEach(([what, change]) => {
   test(`후보 무효화: ${what}이(가) 바뀌면 내가 수정한 후보도 기존 후보와 함께 비운다`, () => {
@@ -2791,6 +2915,237 @@ testAsync("그리디 탐색은 워커 수와 무관하게 순차 실행과 결�
     globalThis.requestAnimationFrame = realRaf;
     lib.state.excludedMemberIds3 = [];
     lib.state.onceLimitedMemberIds3 = [];
+  }
+});
+
+/* ---------------- 연속 요일 배정 제외 회원 ---------------- */
+// N(등록, 최대 2회)은 같은 시각에 요일마다 신청한다. 지점 하나라 이동·간격은 영향이 없다.
+function noConsecutiveFixture(days) {
+  lib.state.locations = [{ id: "L1", name: "1" }];
+  lib.state.travelTimes = {};
+  lib.state.excludedMemberIds3 = [];
+  lib.state.onceLimitedMemberIds3 = [];
+  lib.state.noConsecutiveDayMemberIds = ["N"];
+  lib.state.members = [{ id: "N", name: "n", locationIds: ["L1"], category: "등록" }];
+  lib.runtime.availableCells = new Set();
+  lib.state.requests = [];
+  [0, 1, 2, 3, 4, 5].forEach((day) => {
+    for (let s = 0; s <= 40; s++) lib.runtime.availableCells.add(day + "-" + s);
+  });
+  days.forEach((day) =>
+    lib.state.requests.push({ id: "N" + day, memberId: "N", day, startSlot: 12, duration: 60 }),
+  );
+  return lib.state.requests.slice();
+}
+const daysOf = (assigned, id) => assigned.filter((a) => a.memberId === id).map((a) => a.day).sort();
+const consecutiveViolations = (r) => lib.scheduleViolations(r).filter((v) => v.rule === "consecutiveDay");
+function resetNoConsecutive() {
+  lib.state.noConsecutiveDayMemberIds = [];
+  lib.state.onceLimitedMemberIds3 = [];
+}
+
+test("연속 요일 배정 제외: 월·화~금·토는 금지, 월·수·화·목·월·금·토·월은 허용, 같은 요일은 하루 1회 규칙", () => {
+  noConsecutiveFixture([]);
+  try {
+    for (let d = 0; d < 5; d++) assertEqual(lib.memberDayViolation("N", d + 1, [d]), "consecutiveDay", d + "·" + (d + 1));
+    assertEqual(lib.memberDayViolation("N", 2, [0]), null, "월·수");
+    assertEqual(lib.memberDayViolation("N", 3, [1]), null, "화·목");
+    assertEqual(lib.memberDayViolation("N", 4, new Set([0])), null, "월·금");
+    assertEqual(lib.memberDayViolation("N", 0, [5]), null, "토·월은 일요일이 끼어 연속이 아님");
+    assertEqual(lib.memberDayViolation("N", 1, [1]), "sameDay");
+    assertEqual(lib.memberDayViolation("O", 1, [0]), null, "선택하지 않은 회원은 연속 요일 허용");
+  } finally {
+    resetNoConsecutive();
+  }
+});
+test("연속 요일 배정 제외: scheduleViolations는 시간·지점이 달라도 연속 요일 배정을 위반으로 잡는다", () => {
+  noConsecutiveFixture([0, 1, 2]);
+  try {
+    const r = (days) => ({ assigned: days.map((d) => ({ ...lib.state.requests.find((q) => q.day === d), locationId: "L1" })), unassignedMembers: [] });
+    assertEqual(consecutiveViolations(r([0, 1])).length, 1, "월·화");
+    assertEqual(consecutiveViolations(r([0, 2])), [], "월·수");
+    lib.state.noConsecutiveDayMemberIds = [];
+    assertEqual(consecutiveViolations(r([0, 1])), [], "선택 회원이 없으면 위반 아님");
+  } finally {
+    resetNoConsecutive();
+  }
+});
+test("연속 요일 배정 제외: 그리디는 연속 요일만 가능하면 제한을 풀지 않고 1회만 배정한다", () => {
+  const reqs = noConsecutiveFixture([0, 1]);
+  try {
+    assertEqual(daysOf(lib.greedyAssign(reqs, {}), "N"), [0]);
+    lib.state.noConsecutiveDayMemberIds = [];
+    assertEqual(daysOf(lib.greedyAssign(reqs, {}), "N"), [0, 1], "선택하지 않으면 기존대로 월·화 2회");
+  } finally {
+    resetNoConsecutive();
+  }
+});
+test("연속 요일 배정 제외: 그리디는 월·화·수 신청이면 월·수로 2회를 배정한다", () => {
+  const reqs = noConsecutiveFixture([0, 1, 2]);
+  try {
+    assertEqual(daysOf(lib.greedyAssign(reqs, {}), "N"), [0, 2]);
+  } finally {
+    resetNoConsecutive();
+  }
+});
+test("연속 요일 배정 제외: 1회 제한 회원과 함께 선택되면 1회만 배정한다", () => {
+  const reqs = noConsecutiveFixture([0, 2]);
+  lib.state.onceLimitedMemberIds3 = ["N"];
+  try {
+    assertEqual(lib.greedyAssign(reqs, {}).length, 1);
+  } finally {
+    resetNoConsecutive();
+  }
+});
+test("연속 요일 배정 제외: 그리디는 고정 세션의 앞뒤 요일에도 추가 배정하지 않는다", () => {
+  const reqs = noConsecutiveFixture([1, 2, 4]);
+  try {
+    const pin = { ...reqs[0], locationId: "L1" }; // 화 고정
+    assertEqual(daysOf(lib.greedyAssign(reqs, {}, [pin]), "N"), [1, 4], "수는 화 다음날이라 금으로");
+  } finally {
+    resetNoConsecutive();
+  }
+});
+// 다듬기 파이프라인(후보A) 결과를 가짜 시계로 결정적으로 만든다.
+async function pipelineOnce(reqs, seedOffset, pins = []) {
+  const realNow = performance.now;
+  const realRaf = globalThis.requestAnimationFrame;
+  let fakeNow = 0;
+  performance.now = () => (fakeNow += 1);
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  try {
+    const reqsByDay = new Map();
+    reqs.forEach((r) => {
+      if (!reqsByDay.has(r.day)) reqsByDay.set(r.day, []);
+      reqsByDay.get(r.day).push(r);
+    });
+    const days = [...reqsByDay.keys()].sort((a, b) => a - b);
+    return await lib.runSchedule2Pipeline(reqs, reqsByDay, days, days, true, true, 400, seedOffset, pins);
+  } finally {
+    performance.now = realNow;
+    globalThis.requestAnimationFrame = realRaf;
+  }
+}
+testAsync("연속 요일 배정 제외: 후보A 다듬기는 연속 요일만 가능하면 1회, 월·화·수면 월·수로 배정한다", async () => {
+  try {
+    assertEqual(daysOf((await pipelineOnce(noConsecutiveFixture([0, 1]), 0)).assigned, "N"), [0]);
+    assertEqual(daysOf((await pipelineOnce(noConsecutiveFixture([0, 1, 2]), 0)).assigned, "N"), [0, 2]);
+    const pin = { ...noConsecutiveFixture([1, 2, 4])[0], locationId: "L1" };
+    assertEqual(daysOf((await pipelineOnce(lib.state.requests.slice(), 0, [pin])).assigned, "N"), [1, 4], "고정 화요일 다음날 제외");
+  } finally {
+    resetNoConsecutive();
+  }
+});
+// 여러 회원이 서로 자리를 다투는 무작위 입력에서 다듬기(이동·맞바꾸기·연쇄·담금질)가 만든 결과 전부.
+testAsync("연속 요일 배정 제외: 후보A 다듬기의 이동·맞바꾸기·연쇄 재배치도 연속 요일을 만들지 않는다", async () => {
+  const rand = lib.mulberry32(42);
+  lib.state.locations = [{ id: "L1", name: "1" }, { id: "L2", name: "2" }];
+  lib.state.travelTimes = { [lib.pairKey("L1", "L2")]: 20 };
+  lib.state.excludedMemberIds3 = [];
+  lib.state.onceLimitedMemberIds3 = [];
+  lib.state.members = [];
+  lib.state.requests = [];
+  lib.runtime.availableCells = new Set();
+  for (let day = 0; day < 6; day++) for (let s = 0; s <= 60; s++) lib.runtime.availableCells.add(day + "-" + s);
+  for (let i = 0; i < 14; i++) {
+    const locs = rand() < 0.5 ? ["L1"] : rand() < 0.5 ? ["L2"] : ["L1", "L2"];
+    lib.state.members.push({ id: "M" + i, name: "m" + i, locationIds: locs, category: "등록" });
+    for (let day = 0; day < 6; day++) {
+      if (rand() < 0.4) continue;
+      const start = 6 + Math.floor(rand() * 30);
+      for (let s = start; s < start + 8; s++)
+        lib.state.requests.push({ id: "R" + i + "_" + day + "_" + s, memberId: "M" + i, day, startSlot: s, duration: 60 });
+    }
+  }
+  lib.state.noConsecutiveDayMemberIds = lib.state.members.filter((_, i) => i % 2 === 0).map((m) => m.id);
+  try {
+    let checked = 0;
+    for (const seed of [0, 1, 2, 3]) {
+      const r = await pipelineOnce(lib.state.requests.slice(), seed);
+      assertEqual(lib.scheduleViolations(r), [], "시드 " + seed);
+      checked += r.assigned.filter((a) => lib.state.noConsecutiveDayMemberIds.includes(a.memberId)).length;
+    }
+    assert(checked > 0, "선택 회원이 실제로 배정돼야 검사한 것");
+  } finally {
+    resetNoConsecutive();
+  }
+});
+toastTest("연속 요일 배정 제외: 수동 이동은 연속 요일로 막고 하루 건너 요일로는 허용한다", () => {
+  noConsecutiveFixture([0, 1, 2, 3]);
+  try {
+    const at2 = (day) => ({ ...lib.state.requests.find((q) => q.day === day), locationId: "L1" });
+    const container = { assigned: [at2(0), at2(3)], confirmedIds: [] };
+    const r = lib.validateMove(container, container.assigned[1], 1, 12);
+    assert(!r.ok && /연속 요일/.test(r.message), "목→화는 월 다음날: " + JSON.stringify(r));
+    assert(lib.validateMove(container, container.assigned[1], 2, 12).ok, "목→수는 월과 하루 건너");
+    lib.state.noConsecutiveDayMemberIds = [];
+    assert(lib.validateMove(container, container.assigned[1], 1, 12).ok, "선택하지 않으면 허용");
+  } finally {
+    resetNoConsecutive();
+  }
+});
+toastTest("연속 요일 배정 제외: 맞바꾸기로 연속 요일이 되면 막고, 회원 교체 후보에서도 뺀다", () => {
+  noConsecutiveFixture([0, 1, 2]);
+  try {
+    lib.state.members.push({ id: "O", name: "o", locationIds: ["L1"], category: "등록" });
+    [1, 2].forEach((day) => lib.state.requests.push({ id: "O" + day, memberId: "O", day, startSlot: 12, duration: 60 }));
+    const atM = (id, day) => ({ ...lib.state.requests.find((q) => q.memberId === id && q.day === day), locationId: "L1" });
+    // N: 월·수, O: 화. N의 수요일과 O의 화요일을 맞바꾸면 N이 월·화가 된다.
+    const n0 = atM("N", 0), n2 = atM("N", 2), o1 = atM("O", 1);
+    const container = { assigned: [n0, n2, o1], unassignedMembers: [], confirmedIds: [] };
+    assertEqual(consecutiveViolations(container), [], "픽스처 확인");
+    const swap = lib.prepareSwap(container, n2, o1);
+    assert(!swap.ok && /연속 요일/.test(swap.message), JSON.stringify(swap));
+    // O의 화요일 자리를 N으로 교체하면 N이 월·화·수가 되므로 후보가 아니다(같은 시각 신청은 있음).
+    const solo = { assigned: [n0, o1], unassignedMembers: [], confirmedIds: [] };
+    assert(!lib.eligibleSwapMembersFor(solo, o1).some((m) => m.id === "N"), "월 배정된 N은 화요일 자리로 교체 불가");
+    lib.state.noConsecutiveDayMemberIds = [];
+    assert(lib.eligibleSwapMembersFor(solo, o1).some((m) => m.id === "N"), "선택하지 않으면 교체 후보");
+  } finally {
+    resetNoConsecutive();
+  }
+});
+test("연속 요일 배정 제외: 새로고침(loadState) 후 유지하고, 옛 저장분·손상값·삭제된 회원은 빈 목록·정리로 읽는다", () => {
+  const originalGetItem = globalThis.localStorage.getItem;
+  const load = (extra) => {
+    globalThis.localStorage.getItem = () => JSON.stringify({ schemaVersion: 1, startMinBase: 12 * 60, locations: [{ id: "L1", name: "마포점" }], members: [{ id: "M1", name: "a", locationIds: ["L1"], category: "등록" }], ...extra });
+    lib.loadState();
+    return lib.state.noConsecutiveDayMemberIds;
+  };
+  try {
+    assertEqual(load({ noConsecutiveDayMemberIds: ["M1"] }), ["M1"]);
+    assertEqual(load({}), [], "옛 저장분(필드 없음)은 빈 목록");
+    assertEqual(load({ noConsecutiveDayMemberIds: "M1" }), [], "배열이 아니면 비움");
+    assertEqual(load({ noConsecutiveDayMemberIds: ["M1", "gone", 3] }), ["M1"], "없는 회원·문자열 아닌 값 정리");
+  } finally {
+    globalThis.localStorage.getItem = originalGetItem;
+    resetNoConsecutive();
+  }
+});
+test("연속 요일 배정 제외: 백업에 포함되고 복원 시 유지되며, 문자열 배열이 아니면 거부한다", () => {
+  const data = { ...validBackupFixture(), noConsecutiveDayMemberIds: ["M1"] };
+  assertEqual(lib.createPortableBackupState(data).noConsecutiveDayMemberIds, ["M1"]);
+  assertEqual(lib.prepareBackupStateForRestore(lib.createPortableBackupState(data)).noConsecutiveDayMemberIds, ["M1"]);
+  assertEqual(lib.createPortableBackupState(validBackupFixture()).noConsecutiveDayMemberIds, [], "옛 백업은 빈 목록");
+  let threw = false;
+  try {
+    lib.validateBackupState({ ...validBackupFixture(), noConsecutiveDayMemberIds: [1] });
+  } catch {
+    threw = true;
+  }
+  assert(threw, "숫자 목록은 거부");
+});
+test("연속 요일 배정 제외: 선택이 없으면 입력 지문이 필드가 없을 때와 같고(기존 후보 유지), 워커에도 목록을 넘긴다", () => {
+  qualityFixture();
+  lib.state.noConsecutiveDayMemberIds = [];
+  const key = lib.candidateInputKey();
+  delete lib.state.noConsecutiveDayMemberIds;
+  assertEqual(lib.candidateInputKey(), key);
+  lib.state.noConsecutiveDayMemberIds = ["A"];
+  try {
+    assertEqual(lib.engineWorkerInit("greedy", {}).state.noConsecutiveDayMemberIds, ["A"]);
+  } finally {
+    resetNoConsecutive();
   }
 });
 

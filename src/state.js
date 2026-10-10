@@ -4,6 +4,7 @@ import {
   SLOT_SCALE,
   DAYS,
   STORAGE_KEY,
+  LEGACY_STORAGE_KEY,
   OLD_STORAGE_KEY,
   DEFAULT_LOCATION_NAMES,
   DEFAULT_BUSINESS_DAY_INDICES,
@@ -23,7 +24,8 @@ import {
 } from "./domain.js";
 
 /* ---------------- State ---------------- */
-export const CURRENT_SCHEMA_VERSION = 1;
+// 2: noConsecutiveDayMemberIds 추가 + 저장 키 분리(constants.js STORAGE_KEY). 올릴 때는 저장 키도 새로 만든다.
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export let state = {
   schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -35,6 +37,9 @@ export let state = {
   // "수업 스케줄 생성3" 전용 설정 (생성1·생성2 엔진을 withSelectionOverride로 재사용해 후보 3개를 한 화면에 보여줌)
   onceLimitedMemberIds3: [], // 스케줄 생성3에서 최대 1회만 배정되어야 하는 회원 id 목록
   excludedMemberIds3: [], // 스케줄 생성3에서 후보 생성 시 아예 제외할 회원 id 목록
+  // "회원 스케줄 추가"의 연속 요일 배정 제외 회원 id 목록 — 두 수업 사이에 최소 하루를 둔다
+  // (정책: domain.js의 memberDayViolation). 엔진이 state에서 바로 읽는다(selectionOverride 대상 아님).
+  noConsecutiveDayMemberIds: [],
 };
 
 // state 객체 자체는 절대 재대입하지 않고 항상 속성만 바꾼다(위 loadState 등 참고). candidates/
@@ -62,6 +67,8 @@ export const runtime = {
   // saveState()를 한 번 더 실행해 방금 덮어쓴 localStorage를 되돌리지 않도록 막는 플래그.
   suppressAutosave: false,
   storageError: null,
+  // 저장분이 있는데 읽지 못했으면(미래 schemaVersion·손상) 기본값으로 덮어쓰지 않도록 저장을 막는다.
+  loadError: null,
   // 재최적화 실행 계측(schedule3.js logReoptimize): 세션 한정, 저장하지 않는다.
   reoptimizeLog: [],
 };
@@ -130,6 +137,10 @@ function emitStorageStatus(ok, error = null) {
 
 export function saveState() {
   if (runtime.suppressAutosave) return true;
+  if (runtime.loadError) {
+    emitStorageStatus(false, runtime.loadError);
+    return false;
+  }
   state.schemaVersion = CURRENT_SCHEMA_VERSION;
   state.availableCells = Array.from(runtime.availableCells);
   state.candidates = runtime.candidates;
@@ -182,6 +193,11 @@ export function candidateInputKey() {
     Array.from(runtime.availableCells).sort().join(","),
     (state.excludedMemberIds3 || []).slice().sort().join(","),
     (state.onceLimitedMemberIds3 || []).slice().sort().join(","),
+    // 연속 요일 배정 제외는 비어 있으면 넣지 않는다 — 이 설정 이전에 저장된 inputKey와 같게 유지해,
+    // 업데이트만으로 기존 후보가 "입력이 바뀜"으로 지워지지 않게 한다.
+    ...((state.noConsecutiveDayMemberIds || []).length
+      ? ["noConsecutive:" + state.noConsecutiveDayMemberIds.slice().sort().join(",")]
+      : []),
   ].join("\u0001");
   // 32비트 곱셈 해시 두 개(FNV-1a 계열) — 암호용이 아니라 입력이 바뀌었는지만 본다.
   let h1 = 0x811c9dc5,
@@ -251,12 +267,32 @@ function migrateOldState(parsed) {
   };
 }
 
+// 저장분의 최상위 값은 객체여야 한다 — null·false·0·배열 등은 손상으로 본다.
+function parseSavedObject(raw) {
+  const parsed = JSON.parse(raw);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    throw new Error("saved state must be an object");
+  return parsed;
+}
+
 export function loadState() {
   let hadSavedState = false;
+  // 신버전 키가 실제로 있는지(getItem !== null)로 판단한다 — 빈 문자열·"null" 같은 값도 "있음"이다.
+  let raw = null;
+  runtime.loadError = null;
   try {
-    let raw = localStorage.getItem(STORAGE_KEY);
-    let parsed = raw ? JSON.parse(raw) : null;
-    if (!parsed) {
+    raw = localStorage.getItem(STORAGE_KEY);
+    let parsed = null;
+    if (raw !== null) {
+      parsed = parseSavedObject(raw);
+    } else {
+      // 이관: 신버전 키가 없을 때만 구버전(schemaVersion 0~1) 저장분을 복사해 읽는다. 원본은 그대로 두어
+      // 아직 열려 있는 구버전 탭은 자기 키만 계속 쓰고, 신버전 저장분은 다음 saveState부터 STORAGE_KEY에 쌓인다.
+      // schemaVersion 1 → 2는 연속 요일 배정 제외 목록이 없을 뿐이라 아래 정규화(없음 → [])가 마이그레이션이다.
+      const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (legacyRaw !== null) parsed = parseSavedObject(legacyRaw);
+    }
+    if (!parsed && raw === null) {
       const oldRaw = localStorage.getItem(OLD_STORAGE_KEY);
       if (oldRaw) {
         const oldParsed = JSON.parse(oldRaw);
@@ -284,6 +320,12 @@ export function loadState() {
       state.requests = parsed.requests || [];
       state.onceLimitedMemberIds3 = parsed.onceLimitedMemberIds3 || [];
       state.excludedMemberIds3 = parsed.excludedMemberIds3 || [];
+      // 이 설정 이전 저장분(필드 없음)은 빈 목록이다. 배열이 아니면 손상된 값이라 비운다.
+      state.noConsecutiveDayMemberIds = Array.isArray(
+        parsed.noConsecutiveDayMemberIds,
+      )
+        ? parsed.noConsecutiveDayMemberIds.filter((id) => typeof id === "string")
+        : [];
       runtime.availableCells = new Set(parsed.availableCells || []);
       runtime.candidates = parsed.candidates || [];
       // 후보A가 카드 1장(candidateA)에서 카드 3장(candidateAList)으로 바뀌기 전에 저장된
@@ -329,6 +371,11 @@ export function loadState() {
     }
   } catch (e) {
     console.warn("failed to load saved state", e);
+    // 신버전 키의 저장분만 막는다 — 구버전 키는 읽기만 하므로 읽지 못해도 덮어쓸 일이 없다.
+    if (raw !== null) {
+      runtime.loadError = e;
+      runtime.storageError = e;
+    }
   }
   // First-ever run: seed the trainer's usual branches, 지점 간 이동 시간, 근무 가능 시간
   // 이 비어있지 않도록 기본값을 채워둔다.
@@ -406,6 +453,9 @@ export function loadState() {
     isOnceLimitEligible(memberById(id)),
   );
   state.excludedMemberIds3 = state.excludedMemberIds3.filter(
+    (id) => !!memberById(id),
+  );
+  state.noConsecutiveDayMemberIds = state.noConsecutiveDayMemberIds.filter(
     (id) => !!memberById(id),
   );
   // 일요일 기능이 제거되어(DAYS에서 빠짐), 옛 요일 인덱스 6(일요일)을 가리키던 데이터가 남아있다면 정리한다.

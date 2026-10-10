@@ -113,6 +113,7 @@ export const HARD_RULES = {
   availability: "근무 가능 시간에만 배정한다",
   maxSessions: "최대 수업 횟수를 넘지 않는다",
   sameDay: "같은 회원은 하루 2회 배정되지 않는다",
+  consecutiveDay: "연속 요일 배정 제외 회원은 연속된 요일에 배정하지 않는다",
   gap: "수업끼리 겹치지 않고, 다른 지점 사이에는 이동시간을 확보한다",
   dailyTravel: `하루 이동은 ${MAX_TRAVELS_PER_DAY}회를 넘지 않는다`,
   soloTravel: "세 지점 회원은 이동-회원-이동으로 배정하지 않는다",
@@ -159,6 +160,20 @@ export function scheduleViolations(result) {
   sessionsByMember.forEach((n, id) => {
     const max = maxSessionsFor(memberById(id));
     if (n > max) add("maxSessions", `${id} ${n}회 > ${max}회`);
+  });
+
+  // 엔진의 memberDayViolation을 빌리지 않고 정책 원천(state 목록)에서 직접 본다(아래 gap과 같은 이유).
+  const noConsecutive = new Set(state.noConsecutiveDayMemberIds || []);
+  const daysByMember = new Map();
+  result.assigned.forEach((r) => {
+    if (!noConsecutive.has(r.memberId)) return;
+    if (!daysByMember.has(r.memberId)) daysByMember.set(r.memberId, new Set());
+    daysByMember.get(r.memberId).add(r.day);
+  });
+  daysByMember.forEach((days, id) => {
+    days.forEach((d) => {
+      if (days.has(d + 1)) add("consecutiveDay", `${id} ${d}·${d + 1}요일`);
+    });
   });
 
   byDaySorted(result.assigned).forEach((reqs, day) => {

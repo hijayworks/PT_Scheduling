@@ -7,6 +7,7 @@ import {
   soloTravelMemberIds,
   scheduleTargetMemberIds,
   unassignedMembersFor,
+  memberDayViolation,
 } from "../domain.js";
 import { currentExcludedIds2 } from "../selectionOverride.js";
 import {
@@ -205,11 +206,21 @@ export async function runSchedule2Pipeline(
     return buildDayNodes(dayRequests, withPins, jitterFn, locationsForReq);
   }
 
+  // 회원 요일 규칙(domain.js의 memberDayViolation — 1일 최대 1회·연속 요일 배정 제외)을 지금
+  // 배정 상태(assignedDaysByMember, commit/uncommit이 유지)로 판정한다. 하루 체인 DP·삽입·이동·
+  // 맞바꾸기 등 회원을 어떤 요일에 새로 넣는 모든 경로가 이 함수를 거친다. leavingDay는 이번
+  // 이동으로 그 회원이 비우는 요일(옮기는 자기 자리와 비교하지 않도록 뺀다).
+  function dayBlocked(memberId, day, leavingDay) {
+    const days = assignedDaysByMember.get(memberId);
+    if (!days || days.size === 0) return false;
+    const others =
+      leavingDay === undefined ? days : [...days].filter((d) => d !== leavingDay);
+    return !!memberDayViolation(memberId, day, others);
+  }
   function isEligibleForDay(memberId, day) {
     const cap = maxSessionsFor2(memberById(memberId));
     if ((assignedCountByMember.get(memberId) || 0) >= cap) return false;
-    const days = assignedDaysByMember.get(memberId);
-    return !(days && days.has(day));
+    return !dayBlocked(memberId, day);
   }
   function countSession(day, node) {
     assignedCountByMember.set(
@@ -340,12 +351,12 @@ export async function runSchedule2Pipeline(
     if (depth > MAX_EJECTION_DEPTH) return false;
     if (now() > REPAIR_DEADLINE) return false;
     // 이미 배정받은 다른 요일은 후보에서 뺀다 — 안 그러면 그 요일의 기존(자기 자신) 세션이
-    // 그대로 남아있는 것을 "새로 옮겨 넣는 데 성공"한 것으로 잘못 판단하게 된다.
-    const alreadyUsedDays = assignedDaysByMember.get(memberId) || new Set();
+    // 그대로 남아있는 것을 "새로 옮겨 넣는 데 성공"한 것으로 잘못 판단하게 된다. 연속 요일 배정
+    // 제외 회원이면 이미 배정받은 요일의 앞뒤 요일도 뺀다(dayBlocked).
     const candidateDays = daysWithReqs.filter(
       (day) =>
         !excludeDays.has(day) &&
-        !alreadyUsedDays.has(day) &&
+        !dayBlocked(memberId, day) &&
         reqsByDay.get(day).some((r) => r.memberId === memberId),
     );
     for (const day of candidateDays) {
@@ -1016,9 +1027,8 @@ export async function runSchedule2Pipeline(
       daysWithReqs.forEach((day) => {
         if (day !== currentDay) {
           if (!leavingAllowed) return;
-          // 이 회원이 그 요일에 이미 다른 세션을 갖고 있으면(있을 리 없지만 안전하게) 건너뛴다.
-          if ((dayChains.get(day) || []).some((n) => n.memberId === memberId))
-            return;
+          // 회원 요일 규칙(같은 요일·연속 요일)에 걸리는 요일은 건너뛴다.
+          if (dayBlocked(memberId, day, currentDay)) return;
         }
         const dayReqsForMember = reqsFor(memberId, day);
         if (dayReqsForMember.length === 0) return;
@@ -1206,13 +1216,11 @@ export async function runSchedule2Pipeline(
         return false;
       if (!locationsForReq(req2InDay1).includes(node1.locationId))
         return false;
-      // 회원당 1일 최대 1회 — 등록 회원은 원래 2회를 배정받으므로, member1이 day2에(그
-      // 자리를 넘겨줄 node2 말고) 이미 별도로 다른 세션을 갖고 있을 수 있다(반대도 마찬가지).
-      // 이 경우 자리를 바꾸면 그 요일에 같은 회원이 두 번 배정되므로 반드시 막아야 한다.
-      if ((dayChains.get(day2) || []).some((n) => n.memberId === member1))
-        return false;
-      if ((dayChains.get(day1) || []).some((n) => n.memberId === member2))
-        return false;
+      // 회원 요일 규칙 — 등록 회원은 원래 2회를 배정받으므로, member1이 day2에(그 자리를
+      // 넘겨줄 node2 말고) 이미 별도로 다른 세션을 갖고 있거나 연속 요일 배정 제외 회원이라
+      // day2 앞뒤 요일에 다른 세션이 있을 수 있다(반대도 마찬가지). 반드시 막아야 한다.
+      if (dayBlocked(member1, day2, day1)) return false;
+      if (dayBlocked(member2, day1, day2)) return false;
 
       const dur1 = sessionDurationFor2(memberById(member1));
       const dur2 = sessionDurationFor2(memberById(member2));
@@ -1325,10 +1333,8 @@ export async function runSchedule2Pipeline(
       if (depth > MAX_RELOCATE_EJECT_DEPTH) return false;
       for (const day of daysWithReqs) {
         if (excludeDays.has(day)) continue;
-        if (
-          (dayChains.get(day) || []).some((n) => n.memberId === placeMemberId)
-        )
-          continue;
+        if (dayBlocked(placeMemberId, day)) continue; // 같은 요일·연속 요일
+
         const reqs = reqsFor(placeMemberId, day);
         if (reqs.length === 0) continue;
         const candNodes = dayNodes(reqs, () => 1);
@@ -1653,10 +1659,7 @@ export async function runSchedule2Pipeline(
 
         const options = [];
         daysWithReqs.forEach((day) => {
-          if (
-            day !== currentDay &&
-            (dayChains.get(day) || []).some((n) => n.memberId === memberId)
-          )
+          if (day !== currentDay && dayBlocked(memberId, day, currentDay))
             return;
           reqsFor(memberId, day).forEach((r) =>
             options.push({ day, startSlot: r.startSlot, req: r }),
@@ -1777,12 +1780,10 @@ export async function runSchedule2Pipeline(
           return null;
         if (!locationsForReq(req2InDay1).includes(n1.locationId))
           return null;
-        // 회원당 1일 최대 1회 — member1이 day2에 이미 다른 세션을 갖고 있거나(반대도
-        // 마찬가지) 놓치면, 자리를 바꾼 뒤 그 요일에 같은 회원이 두 번 배정될 수 있다.
-        if ((dayChains.get(day2) || []).some((n) => n.memberId === member1))
-          return null;
-        if ((dayChains.get(day1) || []).some((n) => n.memberId === member2))
-          return null;
+        // 회원 요일 규칙 — member1이 day2에(또는 연속 요일 배정 제외 회원이면 그 앞뒤 요일에)
+        // 이미 다른 세션을 갖고 있으면(반대도 마찬가지) 자리를 바꾼 뒤 규칙이 깨진다.
+        if (dayBlocked(member1, day2, day1)) return null;
+        if (dayBlocked(member2, day1, day2)) return null;
 
         const dur1 = sessionDurationFor2(memberById(member1));
         const dur2 = sessionDurationFor2(memberById(member2));

@@ -73,6 +73,30 @@ export function maxSessionsFor(member) {
   return (member.category || "상담") === "상담" ? 1 : MAX_SESSIONS_PER_MEMBER;
 }
 
+// day가 days(회원이 이미 배정된 요일들) 중 하나와 연속된 이틀을 이루는지 확인한다.
+// 일요일은 다루지 않으므로(토~월 사이에 쉬는 일요일이 끼어 있음) 주 경계 wraparound는 연속으로 보지 않는다.
+export function isAdjacentDay(day, days) {
+  for (const d of days) {
+    if (Math.abs(d - day) === 1) return true;
+  }
+  return false;
+}
+
+// 회원 요일 규칙의 단일 정의(모든 엔진·수동 편집 공용): 같은 회원은 하루 최대 1회, "연속 요일
+// 배정 제외 회원"(state.noConsecutiveDayMemberIds)은 연속된 요일(월·화 … 금·토)에도 배정하지
+// 않는다 — 시간·지점과 무관하다. otherDays는 그 회원의 다른 수업 요일들(Set 또는 배열).
+// 위반이면 "sameDay" | "consecutiveDay", 아니면 null. scheduleViolations는 이 함수를 쓰지 않고
+// 정책 원천(같은 목록)에서 따로 검사한다.
+export function memberDayViolation(memberId, day, otherDays) {
+  for (const d of otherDays) if (d === day) return "sameDay";
+  if (
+    isAdjacentDay(day, otherDays) &&
+    (state.noConsecutiveDayMemberIds || []).includes(memberId)
+  )
+    return "consecutiveDay";
+  return null;
+}
+
 // 상담 회원은 이미 항상 최대 1회로 제한되므로(위 규칙), "1회 제한 회원" 목록에는 표시하지 않는다.
 export function isOnceLimitEligible(member) {
   return !!member && (member.category || "상담") !== "상담";

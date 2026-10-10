@@ -30,6 +30,7 @@ import {
   renderSchedule3Result,
   onceLimit3Widget,
   excluded3Widget,
+  noConsecutive3Widget,
   goToPage,
 } from "../schedule3.js";
 
@@ -1231,6 +1232,9 @@ export function deleteMember(member) {
   state.excludedMemberIds3 = state.excludedMemberIds3.filter(
     (id) => id !== member.id,
   );
+  state.noConsecutiveDayMemberIds = state.noConsecutiveDayMemberIds.filter(
+    (id) => id !== member.id,
+  );
   saveState();
   renderMemberTable();
   renderRequestList();
@@ -1280,6 +1284,7 @@ export function memberPrimaryLocationName(member) {
 export function renderMemberTable() {
   onceLimit3Widget.renderAll();
   excluded3Widget.renderAll();
+  noConsecutive3Widget.renderAll();
   memberTableBodyEl.innerHTML = "";
   memberLocationSortArrowEl.textContent =
     memberLocationSortDir === "asc"

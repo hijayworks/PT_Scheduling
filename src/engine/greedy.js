@@ -19,6 +19,8 @@ import {
   memberById,
   knownLocationIdSet,
   maxSessionsFor,
+  isAdjacentDay,
+  memberDayViolation,
   soloTravelMemberIds,
   chainBreaksSoloTravel,
   travelMinutes,
@@ -50,15 +52,6 @@ export function isEligibleRequest(req) {
   return (
     isWithinAvailability(req) && !currentExcludedIds().includes(req.memberId)
   );
-}
-
-// day가 days(회원이 이미 배정된 요일들) 중 하나와 연속된 이틀을 이루는지 확인한다.
-// 일요일은 다루지 않으므로(토~월 사이에 쉬는 일요일이 끼어 있음) 주 경계 wraparound는 연속으로 보지 않는다.
-export function isAdjacentDay(day, days) {
-  for (const d of days) {
-    if (Math.abs(d - day) === 1) return true;
-  }
-  return false;
 }
 
 // 회원이 등록한 지점들 중 어디서든 그 신청을 소화할 수 있다고 보고, 배정 시점에
@@ -319,8 +312,9 @@ export function greedyAssign(eligibleReqs, options, pinned) {
 
     function withinCaps(memberId, day) {
       const usedDays = memberDays.get(memberId);
-      if (usedDays && usedDays.has(day)) return false; // 1일 최대 1회
-      if (usedDays && usedDays.size >= maxSessionsFor(memberById(memberId)))
+      if (!usedDays) return true;
+      if (memberDayViolation(memberId, day, usedDays)) return false; // 1일 최대 1회·연속 요일 배정 제외
+      if (usedDays.size >= maxSessionsFor(memberById(memberId)))
         return false; // 최대 2회(상담 회원은 최대 1회)
       return true;
     }

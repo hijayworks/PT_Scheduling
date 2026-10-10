@@ -23,6 +23,7 @@ import {
   travelMinutes,
   soloTravelMemberIds,
   breaksSoloTravel,
+  memberDayViolation,
   unassignedMembersFor,
   isOnceLimitEligible,
   appendOnceLimitMemberLabel,
@@ -165,15 +166,11 @@ export function eligibleSwapMembersFor(container, req) {
       )
     )
       return; // 이동-회원-이동 금지
-    let weekCount = 0;
-    let sameDayCount = 0;
-    container.assigned.forEach((a) => {
-      if (a.memberId !== member.id || a.id === req.id) return;
-      weekCount++;
-      if (a.day === req.day) sameDayCount++;
-    });
-    if (sameDayCount > 0) return; // 1일 최대 1회
-    if (weekCount >= maxSessionsFor3(member)) return; // 주간 최대 횟수(상담 회원·1회 제한 회원 포함)
+    const otherDays = container.assigned
+      .filter((a) => a.memberId === member.id && a.id !== req.id)
+      .map((a) => a.day);
+    if (memberDayViolation(member.id, req.day, otherDays)) return; // 1일 최대 1회·연속 요일 배정 제외
+    if (otherDays.length >= maxSessionsFor3(member)) return; // 주간 최대 횟수(상담 회원·1회 제한 회원 포함)
     seenMemberIds.add(member.id);
     results.push(member);
   });
@@ -278,7 +275,7 @@ export function findOccupyingAssigned(
 
 // 수동 이동 하나의 회원 단위 검사: (1) 그 자리에 신청 이력이 있는지 → (2) 수업 전체(시작~종료)가
 // 근무 가능 시간 안인지(자동 생성과 같은 isWithinAvailability — 근무 시간 밖 신청도 저장될 수 있다)
-// → (3) 그 요일에 이 회원의 다른 배정이 없는지(1일 최대 1회) → (4) 그 자리에서 지점을 그대로 쓸 수
+// → (3) 회원 요일 규칙(1일 최대 1회·연속 요일 배정 제외, memberDayViolation) → (4) 그 자리에서 지점을 그대로 쓸 수
 // 있는지. ignoreIds의
 // 배정은 "이미 자리를 비운 것"으로 친다(맞바꾸기에서 상대가 곧 비울 자리). 앞뒤 수업과의 간격 등
 // 요일 체인 규칙은 여기서 보지 않고 editedDaysViolation이 최종 결과로 검사한다.
@@ -303,16 +300,20 @@ function planMove(container, req, targetDay, targetStartSlot, ignoreIds) {
       message: "근무 가능 시간 밖이라 이 자리로 옮길 수 없습니다",
     };
   }
-  const sameDayConflict = container.assigned.some(
-    (a) =>
-      !ignoreSet.has(a.id) &&
-      a.memberId === req.memberId &&
-      a.day === targetDay,
+  const dayViolation = memberDayViolation(
+    req.memberId,
+    targetDay,
+    container.assigned
+      .filter((a) => !ignoreSet.has(a.id) && a.memberId === req.memberId)
+      .map((a) => a.day),
   );
-  if (sameDayConflict) {
+  if (dayViolation) {
     return {
       ok: false,
-      message: "같은 요일에는 하루 최대 1회만 배정할 수 있습니다",
+      message:
+        dayViolation === "sameDay"
+          ? "같은 요일에는 하루 최대 1회만 배정할 수 있습니다"
+          : "연속 요일 배정 제외 회원이라 연속된 요일에는 배정할 수 없습니다",
     };
   }
   const validLocations = candidateLocationsForRequest(newReq);
@@ -818,7 +819,7 @@ export function createMemberSelectionWidget(opts) {
 
   function add(memberId) {
     if (state[idsKey].includes(memberId)) return;
-    if (state[conflictIdsKey].includes(memberId)) {
+    if (conflictIdsKey && state[conflictIdsKey].includes(memberId)) {
       alert(conflictMessage);
       return;
     }
@@ -976,6 +977,23 @@ export const excluded3Widget = createMemberSelectionWidget({
     control: "excludedControl3",
     chipRow: "excludedChipRow3",
     dropdown: "excludedDropdown3",
+  },
+  onChanged: onSchedule3SelectionChanged,
+});
+
+// "회원 스케줄 추가" 페이지의 연속 요일 배정 제외 회원. 미배정·1회 제한과 함께 선택해도 각 제한을
+// 그대로 지키면 되므로 충돌 목록이 없다. 상담 회원(주 1회)에게는 영향이 없지만 구분이 바뀔 수 있어
+// 모든 회원을 고를 수 있게 둔다(구분 변경으로 선택이 조용히 지워지지 않게).
+export const noConsecutive3Widget = createMemberSelectionWidget({
+  idsKey: "noConsecutiveDayMemberIds",
+  eligibleFilter: () => true,
+  emptyMembersMessage: "등록된 회원이 없습니다.",
+  chipClass: "chip",
+  elIds: {
+    ms: "noConsecutiveMs",
+    control: "noConsecutiveControl",
+    chipRow: "noConsecutiveChipRow",
+    dropdown: "noConsecutiveDropdown",
   },
   onChanged: onSchedule3SelectionChanged,
 });

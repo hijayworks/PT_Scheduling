@@ -233,6 +233,10 @@ export function validateBackupState(data) {
     "onceLimitedMemberIds3",
   );
   assertOptionalStringArray(data.excludedMemberIds3, "excludedMemberIds3");
+  assertOptionalStringArray(
+    data.noConsecutiveDayMemberIds,
+    "noConsecutiveDayMemberIds",
+  );
 
   const locations = data.locations || [];
   const members = data.members || [];
@@ -357,6 +361,7 @@ export function createPortableBackupState(data) {
     availableCells: validated.availableCells || [],
     onceLimitedMemberIds3: validated.onceLimitedMemberIds3 || [],
     excludedMemberIds3: validated.excludedMemberIds3 || [],
+    noConsecutiveDayMemberIds: validated.noConsecutiveDayMemberIds || [],
     startMinBase: validated.startMinBase,
   };
   if (portable.startMinBase === undefined) delete portable.startMinBase;
