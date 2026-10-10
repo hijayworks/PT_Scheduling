@@ -374,9 +374,9 @@ async function checkLegacyCompat(browser, site, failures) {
     assert((await app.locator("#candidates3 .candidate-card").count()) === 1, "이관 후 수정 확정 후보 카드가 보이지 않음");
     assert((await read(app, LEGACY_STORAGE_KEY)) === legacyRaw, "신버전이 구버전 저장분을 바꿈");
 
-    // 새 설정 저장
-    await app.click('.nav-item[data-page="memberSchedule"]');
-    await app.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    // 새 설정 저장(수업 스케줄 생성 페이지의 조건 영역)
+    await app.click('.nav-item[data-page="schedule3"]');
+    await app.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
     await app.click("#noConsecutiveControl");
     await app.locator("#noConsecutiveDropdown .ms-option", { hasText: "회원A" }).click();
     const ncOf = async () => (JSON.parse((await read(app, STORAGE_KEY)) || "{}")).noConsecutiveDayMemberIds;
@@ -391,7 +391,7 @@ async function checkLegacyCompat(browser, site, failures) {
     await legacy.click('.nav-item[data-page="memberSchedule"]');
     assert((await read(app, STORAGE_KEY)) === appRaw, "구버전 탭의 저장이 신버전 저장분을 바꿈");
     await app.reload();
-    await app.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    await app.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
     assert((await app.locator("#noConsecutiveChipRow .chip", { hasText: "회원A" }).count()) === 1, "구버전 탭 저장 뒤 새로고침하자 연속 요일 배정 제외가 사라짐");
 
     // 신버전 백업 만들기
@@ -421,7 +421,7 @@ async function checkLegacyCompat(browser, site, failures) {
     assert((await read(app, STORAGE_KEY)) === appBefore, "구버전 복원 시도 뒤 신버전 저장분이 바뀜");
 
     // (4) 신버전에서 설정을 지운 뒤 복원 → 새로고침 후 설정이 돌아온다
-    await app.click('.nav-item[data-page="memberSchedule"]');
+    await app.click('.nav-item[data-page="schedule3"]');
     await app.locator("#noConsecutiveChipRow .chip button").click();
     assert(json(await ncOf()) === "[]", "연속 요일 배정 제외 해제가 저장되지 않음");
     await app.click('.nav-item[data-page="settings"]');
@@ -434,7 +434,7 @@ async function checkLegacyCompat(browser, site, failures) {
     const restored = JSON.parse((await read(app, STORAGE_KEY)) || "{}");
     assert(json(restored.noConsecutiveDayMemberIds) === json(["A"]) && restored.schemaVersion === 2, "신버전 백업 복원 후 연속 요일 배정 제외가 유지되지 않음: " + json(restored.noConsecutiveDayMemberIds));
     assert(json(restored.members) === json(old.members) && json(restored.requests) === json(old.requests), "신버전 백업 복원 후 회원·신청이 달라짐");
-    await app.click('.nav-item[data-page="memberSchedule"]');
+    await app.click('.nav-item[data-page="schedule3"]');
     assert((await app.locator("#noConsecutiveChipRow .chip", { hasText: "회원A" }).count()) === 1, "신버전 백업 복원 후 연속 요일 배정 제외 칩이 보이지 않음");
     return backupCode;
   } finally {
@@ -484,6 +484,93 @@ async function checkBlockedStorage(browser, site, backupCode, failures) {
     } finally {
       await ctx.close();
     }
+  }
+}
+
+// 연속 요일 배정 제외 회원 설정은 수업 스케줄 생성의 조건 줄(미배정·1회 제한 회원과 같은 줄)에만 있다. 이미 저장된 선택이 그대로
+// 보이고, 선택·해제가 저장되며 기존 후보를 비우고, 다시 생성한 후보에 실제로 적용된다(회원A는 월·화만 신청 → 제외면 1회, 해제면 2회).
+async function checkNoConsecutiveSetting(browser, site, failures) {
+  const assert = (cond, msg) => { if (!cond) failures.push("[연속 요일 배정 제외] " + msg); };
+  const json = (v) => JSON.stringify(v);
+  const cells = [];
+  [0, 1].forEach((day) => {
+    for (let slot = 0; slot < 36; slot++) cells.push(day + "-" + slot);
+  });
+  const seed = {
+    schemaVersion: 2,
+    locations: [{ id: "loc1", name: "테스트지점" }],
+    travelTimes: {},
+    members: [{ id: "A", name: "회원A", locationIds: ["loc1"], category: "등록" }],
+    requests: [0, 1].map((day) => ({ id: "A" + day, memberId: "A", day, startSlot: 0, duration: 60 })),
+    onceLimitedMemberIds3: [],
+    excludedMemberIds3: [],
+    noConsecutiveDayMemberIds: ["A"],
+    availableCells: cells,
+    currentPage: "schedule3",
+    startMinBase: 720,
+  };
+  const page = await browser.newPage();
+  page.on("pageerror", (err) => assert(false, "페이지 런타임 에러: " + err.message));
+  if (!FULL_BUDGET_A) await page.addInitScript((scale) => { window.__PT_TEST_BUDGET_SCALE__ = scale; }, A_BUDGET_SCALE);
+  const generateTimeout = FULL_BUDGET_A ? 45 * 60 * 1000 : 2 * 60 * 1000;
+  const chip = page.locator("#noConsecutiveChipRow .chip", { hasText: "회원A" });
+  const savedIds = async () => ((await readState(page)) || {}).noConsecutiveDayMemberIds;
+  // 저장된 모든 후보(그리디 슬롯 + 체인 DP 슬롯)에서 회원A가 배정된 요일
+  const assignedDays = async () => {
+    const s = (await readState(page)) || {};
+    return [...(s.candidates || []), ...((s.schedule3Result || {}).candidateAList || [])]
+      .filter(Boolean)
+      .map((r) => r.assigned.filter((a) => a.memberId === "A").map((a) => a.day).sort());
+  };
+  const cardCount = () => page.locator("#candidates3 .candidate-card:not(.candidate-card-placeholder)").count();
+  try {
+    await openWithSeed(page, seed, site);
+    const sameRow = await page.evaluate(() => {
+      const block = document.getElementById("noConsecutiveBlock");
+      const row = block && block.closest("#pageSchedule3 .day-start-block-row");
+      return !!row && row.contains(document.getElementById("excludedBlock3")) && row.contains(document.getElementById("onceLimitBlock3"));
+    });
+    assert(sameRow, "수업 스케줄 생성의 미배정·1회 제한 회원과 같은 조건 줄에 있지 않음");
+    assert(await page.locator("#noConsecutiveBlock").isVisible(), "수업 스케줄 생성에서 보이지 않음");
+    assert((await chip.count()) === 1, "기존 선택(회원A)이 칩으로 보이지 않음");
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    assert(
+      (await page.locator("#pageMemberSchedule #noConsecutiveBlock").count()) === 0 && !(await page.locator("#noConsecutiveBlock").isVisible()),
+      "회원 스케줄 추가에 설정이 아직 보임"
+    );
+    await page.click('.nav-item[data-page="schedule3"]');
+    await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+
+    // 선택된 채로 생성 → 연속된 월·화에 함께 배정하지 않는다.
+    await clickGenerateAndWait(page, "#generateBtn3", generateTimeout);
+    let days = await assignedDays();
+    assert(days.length > 0 && days.every((d) => d.length === 1), "제외 회원이 연속 요일에 배정됨: " + json(days));
+
+    // 해제 → 저장·기존 후보 비움 → 다시 생성하면 월·화 모두 배정된다.
+    await chip.locator("button").click();
+    assert(json(await savedIds()) === "[]", "해제가 저장되지 않음: " + json(await savedIds()));
+    assert(
+      (await cardCount()) === 0 && (await page.locator("#generateHint3").innerText()).includes("회원 선택이 변경되어"),
+      "해제 뒤 기존 후보가 비워지지 않음"
+    );
+    await clickGenerateAndWait(page, "#generateBtn3", generateTimeout);
+    days = await assignedDays();
+    assert(days.some((d) => json(d) === "[0,1]"), "해제했는데 월·화 연속 배정 후보가 없음: " + json(days));
+
+    // 다시 선택 → 저장·기존 후보 비움 → 새로고침 후 유지 → 생성에 적용
+    await page.click("#noConsecutiveControl");
+    await page.locator("#noConsecutiveDropdown .ms-option", { hasText: "회원A" }).click();
+    assert(json(await savedIds()) === json(["A"]), "선택이 저장되지 않음: " + json(await savedIds()));
+    assert((await cardCount()) === 0, "선택 뒤 기존 후보가 비워지지 않음");
+    await reloadChecked(page, "연속 요일 배정 제외 새로고침", failures);
+    await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    assert((await chip.count()) === 1 && json(await savedIds()) === json(["A"]), "새로고침 후 선택이 유지되지 않음");
+    await clickGenerateAndWait(page, "#generateBtn3", generateTimeout);
+    days = await assignedDays();
+    assert(days.length > 0 && days.every((d) => d.length === 1), "새로고침 뒤 생성에서 제외 회원이 연속 요일에 배정됨: " + json(days));
+  } finally {
+    await page.close();
   }
 }
 
@@ -683,20 +770,6 @@ async function main() {
       assert((await rowFields(0).isVisible()) === visible, `미리보기 선택 ${choice}에서 지점·구분 드롭다운 표시가 ${visible ? "보여야" : "숨겨야"} 함`);
     }
     await page.click("#bulkImportCloseBtn");
-
-    // 연속 요일 배정 제외 회원: 회원 스케줄 추가에서 선택 → 저장 → 새로고침 후 유지, 선택 해제도 저장.
-    const ncIds = async () => ((await readState(page)) || {}).noConsecutiveDayMemberIds;
-    await page.click("#noConsecutiveControl");
-    await page.locator("#noConsecutiveDropdown .ms-option", { hasText: "테스터" }).click();
-    assert(JSON.stringify(await ncIds()) === JSON.stringify(["mem1"]), "연속 요일 배정 제외 선택이 저장되지 않음: " + JSON.stringify(await ncIds()));
-    await reloadChecked(page, "연속 요일 배정 제외 새로고침", failures);
-    await page.click('.nav-item[data-page="memberSchedule"]');
-    await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
-    assert((await page.locator("#noConsecutiveChipRow .chip", { hasText: "테스터" }).count()) === 1, "새로고침 후 연속 요일 배정 제외 칩이 사라짐");
-    assert(JSON.stringify(await ncIds()) === JSON.stringify(["mem1"]), "새로고침 후 연속 요일 배정 제외 저장값이 달라짐");
-    await page.locator("#noConsecutiveChipRow .chip button").click();
-    assert(JSON.stringify(await ncIds()) === "[]", "연속 요일 배정 제외 해제가 저장되지 않음");
-
 
     const cspViolations = await page.evaluate(() => window.__PT_CSP_VIOLATIONS__ || []);
     assert(
@@ -943,6 +1016,7 @@ async function main() {
     const backupCode = await checkLegacyCompat(browser, site, failures);
     if (backupCode) await checkBlockedStorage(browser, site, backupCode, failures);
     else failures.push("[저장 보호] 구버전 호환 검사에서 백업 코드를 받지 못해 검사하지 못함");
+    await checkNoConsecutiveSetting(browser, site, failures);
 
     // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-file-"));
@@ -980,7 +1054,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 구버전 탭·백업과 저장 분리(이관·자동 저장·복원 거부)·비정상 신버전 저장분 보호와 백업 복원 해제, 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 새로고침·브라우저 재실행 유지, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 구버전 탭·백업과 저장 분리(이관·자동 저장·복원 거부)·비정상 신버전 저장분 보호와 백업 복원 해제, 연속 요일 배정 제외 설정 위치(수업 스케줄 생성)·선택 유지·후보 무효화·생성 적용, 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 새로고침·브라우저 재실행 유지, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 

@@ -37,7 +37,7 @@ export let state = {
   // "수업 스케줄 생성3" 전용 설정 (생성1·생성2 엔진을 withSelectionOverride로 재사용해 후보 3개를 한 화면에 보여줌)
   onceLimitedMemberIds3: [], // 스케줄 생성3에서 최대 1회만 배정되어야 하는 회원 id 목록
   excludedMemberIds3: [], // 스케줄 생성3에서 후보 생성 시 아예 제외할 회원 id 목록
-  // "회원 스케줄 추가"의 연속 요일 배정 제외 회원 id 목록 — 두 수업 사이에 최소 하루를 둔다
+  // "수업 스케줄 생성"의 연속 요일 배정 제외 회원 id 목록 — 두 수업 사이에 최소 하루를 둔다
   // (정책: domain.js의 memberDayViolation). 엔진이 state에서 바로 읽는다(selectionOverride 대상 아님).
   noConsecutiveDayMemberIds: [],
 };
