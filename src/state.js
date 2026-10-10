@@ -35,6 +35,9 @@ export let state = {
   // "수업 스케줄 생성3" 전용 설정 (생성1·생성2 엔진을 withSelectionOverride로 재사용해 후보 3개를 한 화면에 보여줌)
   onceLimitedMemberIds3: [], // 스케줄 생성3에서 최대 1회만 배정되어야 하는 회원 id 목록
   excludedMemberIds3: [], // 스케줄 생성3에서 후보 생성 시 아예 제외할 회원 id 목록
+  // "회원 스케줄 추가"의 연속 요일 배정 제외 회원 id 목록 — 두 수업 사이에 최소 하루를 둔다
+  // (정책: domain.js의 memberDayViolation). 엔진이 state에서 바로 읽는다(selectionOverride 대상 아님).
+  noConsecutiveDayMemberIds: [],
 };
 
 // state 객체 자체는 절대 재대입하지 않고 항상 속성만 바꾼다(위 loadState 등 참고). candidates/
@@ -182,6 +185,11 @@ export function candidateInputKey() {
     Array.from(runtime.availableCells).sort().join(","),
     (state.excludedMemberIds3 || []).slice().sort().join(","),
     (state.onceLimitedMemberIds3 || []).slice().sort().join(","),
+    // 연속 요일 배정 제외는 비어 있으면 넣지 않는다 — 이 설정 이전에 저장된 inputKey와 같게 유지해,
+    // 업데이트만으로 기존 후보가 "입력이 바뀜"으로 지워지지 않게 한다.
+    ...((state.noConsecutiveDayMemberIds || []).length
+      ? ["noConsecutive:" + state.noConsecutiveDayMemberIds.slice().sort().join(",")]
+      : []),
   ].join("\u0001");
   // 32비트 곱셈 해시 두 개(FNV-1a 계열) — 암호용이 아니라 입력이 바뀌었는지만 본다.
   let h1 = 0x811c9dc5,
@@ -284,6 +292,12 @@ export function loadState() {
       state.requests = parsed.requests || [];
       state.onceLimitedMemberIds3 = parsed.onceLimitedMemberIds3 || [];
       state.excludedMemberIds3 = parsed.excludedMemberIds3 || [];
+      // 이 설정 이전 저장분(필드 없음)은 빈 목록이다. 배열이 아니면 손상된 값이라 비운다.
+      state.noConsecutiveDayMemberIds = Array.isArray(
+        parsed.noConsecutiveDayMemberIds,
+      )
+        ? parsed.noConsecutiveDayMemberIds.filter((id) => typeof id === "string")
+        : [];
       runtime.availableCells = new Set(parsed.availableCells || []);
       runtime.candidates = parsed.candidates || [];
       // 후보A가 카드 1장(candidateA)에서 카드 3장(candidateAList)으로 바뀌기 전에 저장된
@@ -406,6 +420,9 @@ export function loadState() {
     isOnceLimitEligible(memberById(id)),
   );
   state.excludedMemberIds3 = state.excludedMemberIds3.filter(
+    (id) => !!memberById(id),
+  );
+  state.noConsecutiveDayMemberIds = state.noConsecutiveDayMemberIds.filter(
     (id) => !!memberById(id),
   );
   // 일요일 기능이 제거되어(DAYS에서 빠짐), 옛 요일 인덱스 6(일요일)을 가리키던 데이터가 남아있다면 정리한다.

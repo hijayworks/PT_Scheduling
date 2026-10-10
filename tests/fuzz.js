@@ -229,6 +229,13 @@ function fuzzInput(seed) {
       });
   }
 
+  // 연속 요일 배정 제외(등록 회원 중 일부). 별도 난수열을 써서 위 입력(신청·제외 등)은 이 설정
+  // 이전과 같게 둔다. 제외·1회 제한 회원과 겹쳐도 그대로 둔다(각 제한을 함께 지켜야 함).
+  const ncRand = mulberry32(seed ^ 0x2545f491);
+  const noConsecutive = members
+    .filter((m) => m.category === "등록" && ncRand() < 0.3)
+    .map((m) => m.id);
+
   return {
     id: "FUZZ-" + seed,
     description: "퍼즈 시드 " + seed + " / " + scenario,
@@ -240,6 +247,7 @@ function fuzzInput(seed) {
     availableCells: [...cells],
     onceLimitedMemberIds3: onceLimited,
     excludedMemberIds3: excluded,
+    noConsecutiveDayMemberIds: noConsecutive,
   };
 }
 
@@ -410,7 +418,8 @@ async function opportunities(input, generated) {
   });
   // withSelectionOverride는 끝난 뒤 마이크로태스크에서 이전 값을 되돌린다 — await하지 않으면 다음
   // 시드의 생성 도중에 이 시드의 선택 목록이 되살아난다(실제로 이 하네스 버그로 거짓 위반이 났다).
-  let maxOpp = false;
+  let maxOpp = false,
+    consecutiveOpp = false;
   await lib.withSelectionOverride(
     input.excludedMemberIds3,
     input.onceLimitedMemberIds3,
@@ -418,10 +427,18 @@ async function opportunities(input, generated) {
       daysByMember.forEach((days, id) => {
         if (days.size >= 2 && lib.maxSessionsFor(lib.memberById(id)) === 1)
           maxOpp = true;
+        // 연속 요일 배정 제외 회원이 연속된 두 요일에 신청했고 2회까지 받을 수 있으면 위반할 기회가 있다.
+        if (
+          input.noConsecutiveDayMemberIds.includes(id) &&
+          lib.maxSessionsFor(lib.memberById(id)) === 2 &&
+          [...days].some((d) => days.has(d + 1))
+        )
+          consecutiveOpp = true;
       });
     },
   );
   if (maxOpp) bump("maxSessions");
+  if (consecutiveOpp) bump("consecutiveDay");
   const spread = new Map();
   eligible.forEach((r) => {
     const k = r.memberId + "|" + r.day;
@@ -441,6 +458,7 @@ function withoutMember(input, id) {
     requests: input.requests.filter((r) => r.memberId !== id),
     excludedMemberIds3: input.excludedMemberIds3.filter(keep),
     onceLimitedMemberIds3: input.onceLimitedMemberIds3.filter(keep),
+    noConsecutiveDayMemberIds: input.noConsecutiveDayMemberIds.filter(keep),
   };
 }
 

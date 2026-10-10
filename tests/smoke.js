@@ -371,7 +371,18 @@ async function main() {
     // 체인 DP의 시간 예산을 축소해 몇 초 안에 끝난다. SMOKE_FULL_BUDGET_A=1이면 실제 운영 예산
     // 그대로 돌린다(트리비얼한 입력도 몇 분~수십 분).
     const generateTimeout = FULL_BUDGET_A ? 45 * 60 * 1000 : 2 * 60 * 1000;
-    await clickGenerateAndWait(page, "#generateBtn3", generateTimeout);
+    // 진행바: 생성 전에는 숨기고, 버튼을 누른 그 순간(첫 await 전 동기 구간) 보이고, 끝나면 다시 숨긴다.
+    // [hidden]을 클래스의 display: flex가 덮어 '후보 탐색 0%'가 생성 전부터 보이던 회귀를 막는다.
+    const progressVisible = (p = page) => p.locator("#generateProgressWrap3").isVisible();
+    assert(!(await progressVisible()), "생성 전에 진행바(후보 탐색 0%)가 보임");
+    const shownOnStart = await page.evaluate(() => {
+      document.getElementById("generateBtn3").click();
+      const el = document.getElementById("generateProgressWrap3");
+      return window.getComputedStyle(el).display !== "none" && el.getBoundingClientRect().height > 0;
+    });
+    assert(shownOnStart, "생성을 시작했는데 진행바가 보이지 않음");
+    await page.waitForFunction(() => !document.querySelector("#generateBtn3").disabled, null, { timeout: generateTimeout });
+    assert(!(await progressVisible()), "생성이 끝났는데 진행바가 남음");
     let state = await readState(page);
     assert(
       state && Array.isArray(state.candidates) && state.candidates.length > 0,
@@ -438,6 +449,7 @@ async function main() {
     // 새로고침 후에도 데이터와 생성 결과가 유지되는지(localStorage 로드 경로 회귀 확인)
     await reloadChecked(page, "생성 결과 새로고침", failures);
     await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    assert(!(await progressVisible()), "새로고침 후 진행바가 보임");
     const reloadedMemberCount = await page.evaluate(() => {
       const raw = localStorage.getItem("pt_schedule_state_v3");
       return raw ? JSON.parse(raw).members.length : -1;
@@ -470,6 +482,39 @@ async function main() {
     );
     const staleHint = await page.locator("#generateHint3").innerText();
     assert(staleHint.includes("회원·신청·설정이 변경되어") && !staleHint.includes("필수 조건"), "입력 변경 안내가 다름: " + staleHint);
+    // 시작 전 입력 검증에서 멈추면(신청 없음) 진행바를 띄우지 않는다.
+    await page.click("#generateBtn3");
+    assert((await page.locator("#generateHint3").innerText()).includes("가능 시간을 등록"), "신청이 없을 때 안내가 다름");
+    assert(!(await progressVisible()), "입력 검증에서 멈췄는데 진행바가 보임");
+
+    // 붙여넣기 미리보기: 신규 회원일 때만 지점·구분 드롭다운을 보이고, 기존 회원·건너뛰기에서는 숨긴다(여러 번 바꿔도).
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    await page.click("#bulkImportOpenBtn"); // 신청이 비어 있어 확인 창 없이 바로 열린다
+    await page.fill("#bulkImportTextarea", "테스터 x\n새회원 x");
+    await page.click("#bulkImportPreviewBtn");
+    const rowSelect = page.locator(".bulk-preview-row").nth(0).locator(".bulk-preview-row-head > select");
+    const rowFields = (i) => page.locator(".bulk-preview-row").nth(i).locator(".bulk-preview-new-fields");
+    assert(!(await rowFields(0).isVisible()), "기존 회원 줄에 신규 회원용 지점·구분 드롭다운이 보임");
+    assert(await rowFields(1).isVisible(), "신규 회원 줄에 지점·구분 드롭다운이 보이지 않음");
+    for (const [choice, visible] of [["__new__", true], ["__skip__", false], ["mem1", false], ["__new__", true], ["mem1", false]]) {
+      await rowSelect.selectOption(choice);
+      assert((await rowFields(0).isVisible()) === visible, `미리보기 선택 ${choice}에서 지점·구분 드롭다운 표시가 ${visible ? "보여야" : "숨겨야"} 함`);
+    }
+    await page.click("#bulkImportCloseBtn");
+
+    // 연속 요일 배정 제외 회원: 회원 스케줄 추가에서 선택 → 저장 → 새로고침 후 유지, 선택 해제도 저장.
+    const ncIds = async () => ((await readState(page)) || {}).noConsecutiveDayMemberIds;
+    await page.click("#noConsecutiveControl");
+    await page.locator("#noConsecutiveDropdown .ms-option", { hasText: "테스터" }).click();
+    assert(JSON.stringify(await ncIds()) === JSON.stringify(["mem1"]), "연속 요일 배정 제외 선택이 저장되지 않음: " + JSON.stringify(await ncIds()));
+    await reloadChecked(page, "연속 요일 배정 제외 새로고침", failures);
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    assert((await page.locator("#noConsecutiveChipRow .chip", { hasText: "테스터" }).count()) === 1, "새로고침 후 연속 요일 배정 제외 칩이 사라짐");
+    assert(JSON.stringify(await ncIds()) === JSON.stringify(["mem1"]), "새로고침 후 연속 요일 배정 제외 저장값이 달라짐");
+    await page.locator("#noConsecutiveChipRow .chip button").click();
+    assert(JSON.stringify(await ncIds()) === "[]", "연속 요일 배정 제외 해제가 저장되지 않음");
 
 
     const cspViolations = await page.evaluate(() => window.__PT_CSP_VIOLATIONS__ || []);
@@ -553,8 +598,10 @@ async function main() {
     const eventOf = (log, event) => log.find((e) => e.event === event);
 
     await reoptBtn.click();
+    assert(await progressVisible(ro), "다시 최적화를 시작했는데 진행바가 보이지 않음");
     await ro.click("#generateBtn3Cancel");
     await waitIdle();
+    assert(!(await progressVisible(ro)), "다시 최적화를 취소했는데 진행바가 남음");
     assert(eventOf(reoptLog, "abort")?.reason === "cancelled", "취소가 계측에 남지 않음: " + JSON.stringify(reoptLog));
     assert(!(await reoptPanel.isVisible()), "재최적화를 취소했는데 제안이 나타남");
     assert((await editedIds()) === seedJson, "재최적화 취소 뒤 카드가 바뀜");

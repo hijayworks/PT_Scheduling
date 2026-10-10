@@ -16,7 +16,9 @@ export {
   scheduleTargetMemberIds,
   unassignedMembersFor,
   parseTravelMinutesInput,
+  memberDayViolation,
 } from "../../src/domain.js";
+export { engineWorkerInit } from "../../src/engine/workerPool.js";
 export { state } from "../../src/state.js";
 export {
   MAX_SESSIONS_PER_MEMBER,

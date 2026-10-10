@@ -44,6 +44,7 @@ export function engineWorkerInit(kind, extra) {
         locations: state.locations,
         travelTimes: state.travelTimes,
         requests: state.requests,
+        noConsecutiveDayMemberIds: state.noConsecutiveDayMemberIds,
       },
       availableCells: Array.from(runtime.availableCells),
       excludedIds: (currentExcludedIds2() || []).slice(),

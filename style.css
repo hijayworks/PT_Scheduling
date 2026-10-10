@@ -18,6 +18,8 @@
 }
 
 * { box-sizing: border-box; }
+/* hidden 속성은 항상 숨긴다 — 클래스의 display(flex 등)가 브라우저 기본 [hidden] 규칙을 덮지 않게. */
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -1133,7 +1135,6 @@ body {
   padding: 14px; background: var(--card-bg); word-break: keep-all;
   overflow-wrap: anywhere; /* 긴 회원·지점명이 패널을 넘지 않게 */
 }
-.candidate-compare[hidden] { display: none; }
 .candidate-compare-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .candidate-compare-title { margin: 0; font-size: 16px; }
 .candidate-compare-close { flex: 0 0 auto; white-space: nowrap; height: 28px; padding: 0 12px; font-size: 12px; }
@@ -1478,7 +1479,6 @@ body {
   font-size: 13px;
   line-height: 1.5;
 }
-.storage-error-banner[hidden] { display: none; }
 
 .restore-recovery-banner {
   margin-top: 12px;

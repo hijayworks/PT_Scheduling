@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'sha256-UP0QZg7irvSMvOBz9mH2PIIE28+57UiavRfeVea0l3g='; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; worker-src blob:; object-src 'none'; base-uri 'none';" />
 <title>수업 스케줄 자동 생성기</title>
-<link rel="stylesheet" href="style.css?v=cfda09dd" />
+<link rel="stylesheet" href="style.css?v=fe7f1c5f" />
 </head>
 <body>
 
@@ -117,6 +117,7 @@
                   <li>각 회원은 하루 최대 1회, 주 최대 2회까지 배정됩니다. 상담 회원과 1회 제한 회원은 주 최대 1회까지입니다.</li>
                   <li>하루 지점 간 이동은 최대 2회까지이며, 가능한 한 줄입니다.</li>
                   <li>미배정 회원으로 선택한 회원은 배정하지 않습니다. 미배정 회원 · 1회 제한 회원 설정은 모든 후보에 똑같이 적용됩니다.</li>
+                  <li>회원 스케줄 추가에서 연속 요일 배정 제외 회원으로 선택한 회원은 두 수업을 연속된 요일(월·화, 화·수 등)에 배정하지 않습니다. 가능한 조합이 없으면 가능한 횟수만 배정합니다.</li>
                 </ul>
               </li>
               <li>후보 비교
@@ -288,6 +289,19 @@
               <div class="cal-grid" id="scheduleGrid"></div>
             </div>
             <div class="chip-row" id="scheduleChipRow"></div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="day-start-block" id="noConsecutiveBlock">
+            <p class="day-start-title" id="noConsecutiveTitle">연속 요일 배정 제외 회원 <span class="optional-tag">(선택사항)</span></p>
+            <p class="card-desc subsection-desc">선택한 회원에게 주 2회 수업을 배정할 때는 두 수업 사이에 최소 하루를 둡니다.</p>
+            <div class="chip-row" id="noConsecutiveChipRow">
+              <div class="ms once-limit-add" id="noConsecutiveMs">
+                <button type="button" class="btn btn-ghost btn-small once-limit-add-btn" id="noConsecutiveControl" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="noConsecutiveTitle">+ 추가</button>
+                <div class="ms-dropdown" id="noConsecutiveDropdown" role="listbox"></div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -477,6 +491,6 @@
 <script src="vendor/html2canvas.min.js"></script>
 <!-- script.js / style.css의 ?v= 값은 scripts/bump-cache-version.js가 파일 해시로 자동 갱신합니다
      (git pre-commit 훅에서 자동 실행됨). 손으로 바꾸지 마세요. -->
-<script src="script.js?v=156b98b2"></script>
+<script src="script.js?v=f0eb8324"></script>
 </body>
 </html>
