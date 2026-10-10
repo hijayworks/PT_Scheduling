@@ -3076,7 +3076,7 @@ toastTest("연속 요일 배정 제외: 수동 이동은 연속 요일로 막고
     const at2 = (day) => ({ ...lib.state.requests.find((q) => q.day === day), locationId: "L1" });
     const container = { assigned: [at2(0), at2(3)], confirmedIds: [] };
     const r = lib.validateMove(container, container.assigned[1], 1, 12);
-    assert(!r.ok && /연속 요일/.test(r.message), "목→화는 월 다음날: " + JSON.stringify(r));
+    assert(!r.ok && /연속 배정 제외/.test(r.message), "목→화는 월 다음날: " + JSON.stringify(r));
     assert(lib.validateMove(container, container.assigned[1], 2, 12).ok, "목→수는 월과 하루 건너");
     lib.state.noConsecutiveDayMemberIds = [];
     assert(lib.validateMove(container, container.assigned[1], 1, 12).ok, "선택하지 않으면 허용");
@@ -3095,7 +3095,7 @@ toastTest("연속 요일 배정 제외: 맞바꾸기로 연속 요일이 되면 
     const container = { assigned: [n0, n2, o1], unassignedMembers: [], confirmedIds: [] };
     assertEqual(consecutiveViolations(container), [], "픽스처 확인");
     const swap = lib.prepareSwap(container, n2, o1);
-    assert(!swap.ok && /연속 요일/.test(swap.message), JSON.stringify(swap));
+    assert(!swap.ok && /연속 배정 제외/.test(swap.message), JSON.stringify(swap));
     // O의 화요일 자리를 N으로 교체하면 N이 월·화·수가 되므로 후보가 아니다(같은 시각 신청은 있음).
     const solo = { assigned: [n0, o1], unassignedMembers: [], confirmedIds: [] };
     assert(!lib.eligibleSwapMembersFor(solo, o1).some((m) => m.id === "N"), "월 배정된 N은 화요일 자리로 교체 불가");

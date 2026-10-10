@@ -7458,7 +7458,7 @@
     if (dayViolation) {
       return {
         ok: false,
-        message: dayViolation === "sameDay" ? "같은 요일에는 하루 최대 1회만 배정할 수 있습니다" : "연속 요일 배정 제외 회원이라 연속된 요일에는 배정할 수 없습니다"
+        message: dayViolation === "sameDay" ? "같은 요일에는 하루 최대 1회만 배정할 수 있습니다" : "연속 배정 제외 회원이라 연속된 요일에는 배정할 수 없습니다"
       };
     }
     const validLocations = candidateLocationsForRequest(newReq);
