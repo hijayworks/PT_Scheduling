@@ -267,20 +267,32 @@ function migrateOldState(parsed) {
   };
 }
 
+// 저장분의 최상위 값은 객체여야 한다 — null·false·0·배열 등은 손상으로 본다.
+function parseSavedObject(raw) {
+  const parsed = JSON.parse(raw);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+    throw new Error("saved state must be an object");
+  return parsed;
+}
+
 export function loadState() {
   let hadSavedState = false;
+  // 신버전 키가 실제로 있는지(getItem !== null)로 판단한다 — 빈 문자열·"null" 같은 값도 "있음"이다.
   let raw = null;
+  runtime.loadError = null;
   try {
     raw = localStorage.getItem(STORAGE_KEY);
-    let parsed = raw ? JSON.parse(raw) : null;
-    if (!parsed) {
-      // 이관: 신버전 키가 없으면 구버전(schemaVersion 0~1) 저장분을 복사해 읽는다. 원본은 그대로 두어
+    let parsed = null;
+    if (raw !== null) {
+      parsed = parseSavedObject(raw);
+    } else {
+      // 이관: 신버전 키가 없을 때만 구버전(schemaVersion 0~1) 저장분을 복사해 읽는다. 원본은 그대로 두어
       // 아직 열려 있는 구버전 탭은 자기 키만 계속 쓰고, 신버전 저장분은 다음 saveState부터 STORAGE_KEY에 쌓인다.
       // schemaVersion 1 → 2는 연속 요일 배정 제외 목록이 없을 뿐이라 아래 정규화(없음 → [])가 마이그레이션이다.
       const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
-      parsed = legacyRaw ? JSON.parse(legacyRaw) : null;
+      if (legacyRaw !== null) parsed = parseSavedObject(legacyRaw);
     }
-    if (!parsed) {
+    if (!parsed && raw === null) {
       const oldRaw = localStorage.getItem(OLD_STORAGE_KEY);
       if (oldRaw) {
         const oldParsed = JSON.parse(oldRaw);
@@ -360,7 +372,7 @@ export function loadState() {
   } catch (e) {
     console.warn("failed to load saved state", e);
     // 신버전 키의 저장분만 막는다 — 구버전 키는 읽기만 하므로 읽지 못해도 덮어쓸 일이 없다.
-    if (raw) {
+    if (raw !== null) {
       runtime.loadError = e;
       runtime.storageError = e;
     }

@@ -517,17 +517,26 @@
       currentStep: parsed.currentStep
     };
   }
+  function parseSavedObject(raw) {
+    const parsed = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
+      throw new Error("saved state must be an object");
+    return parsed;
+  }
   function loadState() {
     let hadSavedState = false;
     let raw = null;
+    runtime.loadError = null;
     try {
       raw = localStorage.getItem(STORAGE_KEY);
-      let parsed = raw ? JSON.parse(raw) : null;
-      if (!parsed) {
+      let parsed = null;
+      if (raw !== null) {
+        parsed = parseSavedObject(raw);
+      } else {
         const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
-        parsed = legacyRaw ? JSON.parse(legacyRaw) : null;
+        if (legacyRaw !== null) parsed = parseSavedObject(legacyRaw);
       }
-      if (!parsed) {
+      if (!parsed && raw === null) {
         const oldRaw = localStorage.getItem(OLD_STORAGE_KEY);
         if (oldRaw) {
           const oldParsed = JSON.parse(oldRaw);
@@ -585,7 +594,7 @@
       }
     } catch (e) {
       console.warn("failed to load saved state", e);
-      if (raw) {
+      if (raw !== null) {
         runtime.loadError = e;
         runtime.storageError = e;
       }

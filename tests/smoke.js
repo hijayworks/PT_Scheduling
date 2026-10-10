@@ -436,8 +436,54 @@ async function checkLegacyCompat(browser, site, failures) {
     assert(json(restored.members) === json(old.members) && json(restored.requests) === json(old.requests), "신버전 백업 복원 후 회원·신청이 달라짐");
     await app.click('.nav-item[data-page="memberSchedule"]');
     assert((await app.locator("#noConsecutiveChipRow .chip", { hasText: "회원A" }).count()) === 1, "신버전 백업 복원 후 연속 요일 배정 제외 칩이 보이지 않음");
+    return backupCode;
   } finally {
     await ctx.close();
+  }
+}
+
+// 신버전 키가 있는데 최상위 값이 객체가 아니면(대표: "null"·빈 문자열·"[]") 읽기 실패로 막는다 — 구버전 저장분을 이관하지 않고,
+// 페이지 이동·beforeunload·새로고침에도 원문을 덮어쓰지 않으며 저장 오류 배너를 띄운다. 정상 백업을 복원하면 차단이 풀리고 다시 저장된다.
+async function checkBlockedStorage(browser, site, backupCode, failures) {
+  const legacyRaw = JSON.stringify({ ...buildManualEditSeedState(), schemaVersion: 1 });
+  for (const value of ["null", "", "[]"]) {
+    const assert = (cond, msg) => { if (!cond) failures.push("[저장 보호 " + JSON.stringify(value) + "] " + msg); };
+    const ctx = await browser.newContext();
+    const read = (p, key) => p.evaluate((k) => localStorage.getItem(k), key);
+    try {
+      const p = await ctx.newPage();
+      p.on("pageerror", (err) => assert(false, "페이지 런타임 에러: " + err.message));
+      await p.goto(site.blank);
+      await p.evaluate(({ key, legacyKey, value, legacyRaw }) => {
+        localStorage.setItem(key, value);
+        localStorage.setItem(legacyKey, legacyRaw);
+      }, { key: STORAGE_KEY, legacyKey: LEGACY_STORAGE_KEY, value, legacyRaw });
+      await p.goto(site.index);
+      await p.waitForSelector(".page.active", { timeout: 5000 });
+      assert(await p.locator("#storageErrorBanner").isVisible(), "저장 오류 배너가 보이지 않음");
+      await p.click('.nav-item[data-page="members"]');
+      assert(!(await p.locator("#memberTableBody").innerText()).includes("회원A"), "신버전 키가 있는데 구버전 저장분을 이관함");
+      await p.evaluate(() => window.dispatchEvent(new window.Event("beforeunload")));
+      await p.reload();
+      await p.waitForSelector(".page.active", { timeout: 5000 });
+      assert((await read(p, STORAGE_KEY)) === value, "원문이 바뀜: " + JSON.stringify(await read(p, STORAGE_KEY)));
+      assert((await read(p, LEGACY_STORAGE_KEY)) === legacyRaw, "구버전 저장분이 바뀜");
+
+      // 정상 백업 복원 → 차단 해제 → 페이지 이동이 다시 저장된다
+      await p.click('.nav-item[data-page="settings"]');
+      await p.click("#backupImportOpenBtn");
+      await p.fill("#backupImportTextarea", backupCode);
+      await p.fill("#backupImportPinInput", BACKUP_PASSWORD);
+      p.once("dialog", (d) => d.accept());
+      await p.click("#backupImportApplyBtn");
+      await p.waitForSelector(".restore-recovery-banner", { timeout: 15000 });
+      assert(!(await p.locator("#storageErrorBanner").isVisible()), "정상 백업 복원 뒤에도 저장 오류 배너가 보임");
+      await p.click('.nav-item[data-page="memberSchedule"]');
+      const saved = JSON.parse((await read(p, STORAGE_KEY)) || "null");
+      assert(saved && saved.schemaVersion === 2 && saved.currentPage === "memberSchedule" && JSON.stringify(saved.noConsecutiveDayMemberIds) === JSON.stringify(["A"]), "정상 백업 복원 뒤 저장이 다시 되지 않음: " + JSON.stringify(saved && { schemaVersion: saved.schemaVersion, currentPage: saved.currentPage, nc: saved.noConsecutiveDayMemberIds }));
+    } finally {
+      await ctx.close();
+    }
   }
 }
 
@@ -894,7 +940,9 @@ async function main() {
     }
     await lg.close();
 
-    await checkLegacyCompat(browser, site, failures);
+    const backupCode = await checkLegacyCompat(browser, site, failures);
+    if (backupCode) await checkBlockedStorage(browser, site, backupCode, failures);
+    else failures.push("[저장 보호] 구버전 호환 검사에서 백업 코드를 받지 못해 검사하지 못함");
 
     // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-file-"));
@@ -932,7 +980,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 구버전 탭·백업과 저장 분리(이관·자동 저장·복원 거부), 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 새로고침·브라우저 재실행 유지, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 구버전 탭·백업과 저장 분리(이관·자동 저장·복원 거부)·비정상 신버전 저장분 보호와 백업 복원 해제, 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 새로고침·브라우저 재실행 유지, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 

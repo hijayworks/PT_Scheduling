@@ -368,6 +368,36 @@ test("저장 보호: 신버전 키의 저장분을 읽지 못하면(미래 schem
   });
 });
 
+test("저장 보호: 신버전 키가 있는데 최상위 값이 객체가 아니면(null·빈 문자열·false·0·배열) 구버전을 이관하지 않고 원문을 지킨다", () => {
+  const legacyRaw = JSON.stringify(legacySavedState());
+  for (const raw of ["null", "", "false", "0", "[]"]) {
+    withFakeStorage({ [lib.STORAGE_KEY]: raw, [lib.LEGACY_STORAGE_KEY]: legacyRaw }, (data) => {
+      lib.state.members = []; // 새 페이지처럼 비운 상태에서 읽는다(이전 테스트의 회원이 남지 않게)
+      lib.loadState();
+      assert(lib.runtime.loadError && lib.runtime.storageError, JSON.stringify(raw) + ": 읽기 실패로 처리해야 함");
+      assert(!lib.state.members.some((m) => m.id === "M1"), JSON.stringify(raw) + ": 구버전 저장분을 이관하면 안 됨");
+      assertEqual(lib.saveState(), false, JSON.stringify(raw) + ": 저장 차단");
+      assertEqual(data.get(lib.STORAGE_KEY), raw, JSON.stringify(raw) + ": 원문 보존");
+      assertEqual(data.get(lib.LEGACY_STORAGE_KEY), legacyRaw, JSON.stringify(raw) + ": 구버전 저장분 보존");
+    });
+  }
+});
+
+test("저장 보호: 차단된 상태에서도 정상 백업을 복원하면(새로고침 후) 저장 차단이 풀린다", () => {
+  withFakeStorage({ [lib.STORAGE_KEY]: "null" }, (data) => {
+    lib.loadState();
+    assertEqual(lib.saveState(), false, "픽스처 확인: 차단");
+    // 복원 흐름: 검증한 백업을 저장소에 직접 쓰고 새로고침(loadState)
+    const backup = lib.createPortableBackupState({ ...legacySavedState(), schemaVersion: 2, noConsecutiveDayMemberIds: ["M1"] });
+    data.set(lib.STORAGE_KEY, JSON.stringify(lib.prepareBackupStateForRestore(backup)));
+    lib.loadState();
+    assertEqual(lib.runtime.loadError, null, "차단 해제");
+    assertEqual(lib.state.noConsecutiveDayMemberIds, ["M1"]);
+    assert(lib.saveState(), "복원 뒤 저장 가능");
+    assertEqual(JSON.parse(data.get(lib.STORAGE_KEY)).schemaVersion, 2);
+  });
+});
+
 test("백업: 신버전 백업은 schemaVersion 2로 새 설정을 담고, 구버전 백업(1)은 복원 후 새 설정을 빈 목록으로 이관한다", () => {
   const current = { ...legacySavedState(), schemaVersion: 2, noConsecutiveDayMemberIds: ["M1"] };
   const portable = lib.createPortableBackupState(current);
