@@ -78,7 +78,10 @@ export const COVERAGE_WEIGHT_GAP_THRESHOLD = 10000;
 export const SESSION_DURATION_MIN_2 = 60;
 export const CONSULT_DURATION_MIN_2 = 30;
 
-export const STORAGE_KEY = "pt_schedule_state_v3";
+// 저장 키는 schemaVersion이 오를 때마다 새로 만든다. 구버전 앱은 자기 키만 읽고 쓰므로, 아직 열려 있는
+// 구버전 탭의 자동 저장이 신버전 저장분을 덮어쓰지 못한다(state.js loadState가 옛 키를 한 번 복사해 이관).
+export const STORAGE_KEY = "pt_schedule_state_v4"; // schemaVersion 2: noConsecutiveDayMemberIds 추가
+export const LEGACY_STORAGE_KEY = "pt_schedule_state_v3"; // schemaVersion 0~1 — 이관 원본으로 읽기만 하고 지우지 않는다
 export const OLD_STORAGE_KEY = "pt_schedule_state_v2"; // pre-migration key: 30분 슬롯 기준
 export const OLD_SLOT_MIN = 30;
 export const SLOT_SCALE = OLD_SLOT_MIN / SLOT_MIN; // 옛 슬롯 인덱스를 새 슬롯 인덱스로 환산

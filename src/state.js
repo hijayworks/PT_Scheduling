@@ -4,6 +4,7 @@ import {
   SLOT_SCALE,
   DAYS,
   STORAGE_KEY,
+  LEGACY_STORAGE_KEY,
   OLD_STORAGE_KEY,
   DEFAULT_LOCATION_NAMES,
   DEFAULT_BUSINESS_DAY_INDICES,
@@ -23,7 +24,8 @@ import {
 } from "./domain.js";
 
 /* ---------------- State ---------------- */
-export const CURRENT_SCHEMA_VERSION = 1;
+// 2: noConsecutiveDayMemberIds 추가 + 저장 키 분리(constants.js STORAGE_KEY). 올릴 때는 저장 키도 새로 만든다.
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export let state = {
   schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -65,6 +67,8 @@ export const runtime = {
   // saveState()를 한 번 더 실행해 방금 덮어쓴 localStorage를 되돌리지 않도록 막는 플래그.
   suppressAutosave: false,
   storageError: null,
+  // 저장분이 있는데 읽지 못했으면(미래 schemaVersion·손상) 기본값으로 덮어쓰지 않도록 저장을 막는다.
+  loadError: null,
   // 재최적화 실행 계측(schedule3.js logReoptimize): 세션 한정, 저장하지 않는다.
   reoptimizeLog: [],
 };
@@ -133,6 +137,10 @@ function emitStorageStatus(ok, error = null) {
 
 export function saveState() {
   if (runtime.suppressAutosave) return true;
+  if (runtime.loadError) {
+    emitStorageStatus(false, runtime.loadError);
+    return false;
+  }
   state.schemaVersion = CURRENT_SCHEMA_VERSION;
   state.availableCells = Array.from(runtime.availableCells);
   state.candidates = runtime.candidates;
@@ -261,9 +269,17 @@ function migrateOldState(parsed) {
 
 export function loadState() {
   let hadSavedState = false;
+  let raw = null;
   try {
-    let raw = localStorage.getItem(STORAGE_KEY);
+    raw = localStorage.getItem(STORAGE_KEY);
     let parsed = raw ? JSON.parse(raw) : null;
+    if (!parsed) {
+      // 이관: 신버전 키가 없으면 구버전(schemaVersion 0~1) 저장분을 복사해 읽는다. 원본은 그대로 두어
+      // 아직 열려 있는 구버전 탭은 자기 키만 계속 쓰고, 신버전 저장분은 다음 saveState부터 STORAGE_KEY에 쌓인다.
+      // schemaVersion 1 → 2는 연속 요일 배정 제외 목록이 없을 뿐이라 아래 정규화(없음 → [])가 마이그레이션이다.
+      const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+      parsed = legacyRaw ? JSON.parse(legacyRaw) : null;
+    }
     if (!parsed) {
       const oldRaw = localStorage.getItem(OLD_STORAGE_KEY);
       if (oldRaw) {
@@ -343,6 +359,11 @@ export function loadState() {
     }
   } catch (e) {
     console.warn("failed to load saved state", e);
+    // 신버전 키의 저장분만 막는다 — 구버전 키는 읽기만 하므로 읽지 못해도 덮어쓸 일이 없다.
+    if (raw) {
+      runtime.loadError = e;
+      runtime.storageError = e;
+    }
   }
   // First-ever run: seed the trainer's usual branches, 지점 간 이동 시간, 근무 가능 시간
   // 이 비어있지 않도록 기본값을 채워둔다.

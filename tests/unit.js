@@ -235,7 +235,7 @@ test("backup password: 새 백업은 12자 이상만 허용", () => {
 
 test("restore recovery: session snapshot에서 기존 localStorage를 복원", () => {
   const sessionData = new Map();
-  const localData = new Map([["pt_schedule_state_v3", "new-state"]]);
+  const localData = new Map([[lib.STORAGE_KEY, "new-state"]]);
   const fakeSession = {
     getItem: (k) => sessionData.has(k) ? sessionData.get(k) : null,
     setItem: (k, v) => sessionData.set(k, v),
@@ -252,13 +252,13 @@ test("restore recovery: session snapshot에서 기존 localStorage를 복원", (
   );
   assertEqual(lib.readRestoreRecoverySnapshot(fakeSession).state, "old-state");
   assert(lib.restoreRecoverySnapshot(fakeSession, fakeLocal));
-  assertEqual(fakeLocal.getItem("pt_schedule_state_v3"), "old-state");
+  assertEqual(fakeLocal.getItem(lib.STORAGE_KEY), "old-state");
   assertEqual(fakeSession.getItem(lib.RESTORE_RECOVERY_KEY), null);
 });
 
 test("restore recovery: 이전에 저장 데이터가 없던 상태도 되돌릴 수 있음", () => {
   const sessionData = new Map();
-  const localData = new Map([["pt_schedule_state_v3", "restored-state"]]);
+  const localData = new Map([[lib.STORAGE_KEY, "restored-state"]]);
   const fakeSession = {
     getItem: (k) => sessionData.has(k) ? sessionData.get(k) : null,
     setItem: (k, v) => sessionData.set(k, v),
@@ -274,7 +274,7 @@ test("restore recovery: 이전에 저장 데이터가 없던 상태도 되돌릴
     JSON.stringify({ createdAt: 1, state: null }),
   );
   assert(lib.restoreRecoverySnapshot(fakeSession, fakeLocal));
-  assertEqual(fakeLocal.getItem("pt_schedule_state_v3"), null);
+  assertEqual(fakeLocal.getItem(lib.STORAGE_KEY), null);
 });
 
 test("saveState: localStorage 쓰기 실패를 밖으로 던지지 않고 false 반환", () => {
@@ -290,6 +290,98 @@ test("saveState: localStorage 쓰기 실패를 밖으로 던지지 않고 false 
     lib.runtime.storageError = null;
   }
   assertEqual(result, false);
+});
+
+/* ---------------- 저장 키 분리·이관 (schemaVersion 2) ---------------- */
+// 구버전 앱은 LEGACY_STORAGE_KEY만 읽고 쓴다. 신버전은 STORAGE_KEY만 쓰고, 그 키가 없을 때만 구버전 저장분을 복사해 읽는다.
+function withFakeStorage(entries, fn) {
+  const data = new Map(Object.entries(entries));
+  const original = { ...globalThis.localStorage };
+  Object.assign(globalThis.localStorage, {
+    getItem: (k) => (data.has(k) ? data.get(k) : null),
+    setItem: (k, v) => data.set(k, String(v)),
+    removeItem: (k) => data.delete(k),
+  });
+  try {
+    fn(data);
+  } finally {
+    Object.assign(globalThis.localStorage, original);
+    lib.runtime.loadError = null;
+    lib.runtime.storageError = null;
+  }
+}
+function legacySavedState() {
+  const data = validBackupFixture();
+  data.schemaVersion = 1;
+  data.startMinBase = 12 * 60;
+  data.onceLimitedMemberIds3 = ["M1"];
+  data.schedule3Result = {
+    candidateAList: [{ assigned: [{ ...data.requests[0], locationId: "L1" }], unassignedMembers: [], confirmedIds: ["R1"] }, null, null],
+  };
+  return data;
+}
+
+test("저장 이관: 구버전 키(schemaVersion 1)의 회원·신청·설정·수정 확정 후보를 신버전 키로 옮기고 구버전 저장분은 건드리지 않는다", () => {
+  const legacyRaw = JSON.stringify(legacySavedState());
+  withFakeStorage({ [lib.LEGACY_STORAGE_KEY]: legacyRaw }, (data) => {
+    lib.loadState();
+    assertEqual(lib.state.members.map((m) => m.id), ["M1"]);
+    assertEqual(lib.state.requests.map((r) => r.id), ["R1"]);
+    assertEqual(lib.state.onceLimitedMemberIds3, ["M1"]);
+    assertEqual(lib.state.noConsecutiveDayMemberIds, [], "새 설정은 빈 목록으로 이관");
+    assertEqual(lib.runtime.schedule3Result.candidateAList[0].confirmedIds, ["R1"], "수정 확정 후보 유지");
+    assert(lib.saveState(), "이관 뒤 저장 가능");
+    const saved = JSON.parse(data.get(lib.STORAGE_KEY));
+    assertEqual(saved.schemaVersion, 2);
+    assertEqual(saved.members.map((m) => m.id), ["M1"]);
+    assertEqual(data.get(lib.LEGACY_STORAGE_KEY), legacyRaw, "구버전 저장분은 그대로");
+  });
+});
+
+test("저장 분리: 신버전 키가 있으면 구버전 탭이 나중에 쓴 구버전 키는 읽지 않는다", () => {
+  const legacy = legacySavedState();
+  const current = { ...legacySavedState(), schemaVersion: 2, noConsecutiveDayMemberIds: ["M1"] };
+  legacy.members = []; // 구버전 탭이 다른 내용으로 자동 저장
+  withFakeStorage({ [lib.STORAGE_KEY]: JSON.stringify(current), [lib.LEGACY_STORAGE_KEY]: JSON.stringify(legacy) }, (data) => {
+    lib.loadState();
+    assertEqual(lib.state.members.map((m) => m.id), ["M1"]);
+    assertEqual(lib.state.noConsecutiveDayMemberIds, ["M1"], "새 설정 유지");
+    lib.saveState();
+    assertEqual(JSON.parse(data.get(lib.LEGACY_STORAGE_KEY)).members, [], "신버전은 구버전 키에 쓰지 않음");
+  });
+});
+
+test("저장 보호: 신버전 키의 저장분을 읽지 못하면(미래 schemaVersion·손상) 기본값으로 덮어쓰지 않고 저장을 막는다", () => {
+  for (const raw of [JSON.stringify({ ...legacySavedState(), schemaVersion: lib.CURRENT_SCHEMA_VERSION + 1 }), "{broken"]) {
+    withFakeStorage({ [lib.STORAGE_KEY]: raw }, (data) => {
+      lib.loadState();
+      assert(lib.runtime.storageError, "저장 불가 상태를 알려야 함");
+      assertEqual(lib.saveState(), false);
+      assertEqual(data.get(lib.STORAGE_KEY), raw, "저장분 보존");
+    });
+  }
+  // 구버전 키는 신버전이 쓰지 않으므로 읽지 못해도 저장을 막지 않는다(구버전 키도 그대로).
+  withFakeStorage({ [lib.LEGACY_STORAGE_KEY]: "{broken" }, (data) => {
+    lib.loadState();
+    assert(lib.saveState(), "구버전 키 손상은 신버전 저장을 막지 않음");
+    assertEqual(data.get(lib.LEGACY_STORAGE_KEY), "{broken");
+  });
+});
+
+test("백업: 신버전 백업은 schemaVersion 2로 새 설정을 담고, 구버전 백업(1)은 복원 후 새 설정을 빈 목록으로 이관한다", () => {
+  const current = { ...legacySavedState(), schemaVersion: 2, noConsecutiveDayMemberIds: ["M1"] };
+  const portable = lib.createPortableBackupState(current);
+  assertEqual([portable.schemaVersion, portable.noConsecutiveDayMemberIds], [2, ["M1"]]);
+  const legacyBackup = { ...portable, schemaVersion: 1 }; // 구버전이 만든 백업: 새 설정 필드 없음
+  delete legacyBackup.noConsecutiveDayMemberIds;
+  for (const [backup, expected] of [[portable, ["M1"]], [legacyBackup, []]]) {
+    const restored = lib.prepareBackupStateForRestore(JSON.parse(JSON.stringify(backup)));
+    withFakeStorage({ [lib.STORAGE_KEY]: JSON.stringify(restored) }, () => {
+      lib.loadState();
+      assertEqual(lib.state.members.map((m) => m.id), ["M1"]);
+      assertEqual(lib.state.noConsecutiveDayMemberIds, expected);
+    });
+  }
 });
 
 /* ---------------- utils.js ---------------- */

@@ -26,6 +26,8 @@ export {
   SESSION_DURATION_MIN,
   CONSULT_DURATION_MIN,
   DAYS,
+  STORAGE_KEY,
+  LEGACY_STORAGE_KEY,
 } from "../../src/constants.js";
 export {
   mulberry32,

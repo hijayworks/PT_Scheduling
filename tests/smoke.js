@@ -19,11 +19,16 @@ const fs = require("fs");
 const http = require("http");
 const os = require("os");
 const path = require("path");
+const { execFileSync } = require("child_process");
 const { pathToFileURL } = require("url");
 const { chromium } = require("playwright");
 
 const ROOT = path.resolve(__dirname, "..");
-const STORAGE_KEY = "pt_schedule_state_v3";
+const STORAGE_KEY = "pt_schedule_state_v4";
+// 구버전 앱(schemaVersion 1)의 저장 키와, 그 마지막 배포 빌드. 구버전 탭과의 저장 호환성 검사에 쓴다(CI는 fetch-depth 0으로 받아야 한다).
+const LEGACY_STORAGE_KEY = "pt_schedule_state_v3";
+const LEGACY_APP_COMMIT = "fa0d4babb3ffa9da6e0e4978a65fa42c2235980b";
+const BACKUP_PASSWORD = "smoke-backup-password";
 // 앱이 읽지 않는 별도 키 — 시드를 넣을 때 한 번 기록한다. 새로고침된 문서가 시작될 때 이 키가 없으면 저장소가 통째로 사라진 것이다.
 const SEED_LOG_KEY = "__smoke_seed_log__";
 const BLANK_HTML = "<!doctype html><title>smoke seed</title>";
@@ -158,15 +163,21 @@ async function readState(page) {
 
 // 기본 검사는 로컬 HTTP 서버에서 연다(실제 배포와 같은 http origin). 앱이 쓰는 정적 파일과 시드용 빈 페이지만 낸다.
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
-function startServer() {
+// /legacy/ 아래는 구버전 앱(LEGACY_APP_COMMIT 빌드)을 같은 origin에서 낸다 — localStorage를 공유하는 구버전 탭을 재현한다.
+function startServer(legacyRoot) {
   const server = http.createServer((req, res) => {
-    const pathname = decodeURIComponent(new URL(req.url, "http://x").pathname);
+    let pathname = decodeURIComponent(new URL(req.url, "http://x").pathname);
     if (pathname === "/__smoke_blank") {
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       return res.end(BLANK_HTML);
     }
-    const file = path.join(ROOT, pathname);
-    if (!file.startsWith(ROOT + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+    let root = ROOT;
+    if (pathname.startsWith("/legacy/")) {
+      root = legacyRoot;
+      pathname = pathname.slice("/legacy".length);
+    }
+    const file = path.join(root, pathname);
+    if (!file.startsWith(root + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
       res.writeHead(404);
       return res.end();
     }
@@ -307,6 +318,129 @@ async function checkSwapReload(page, { pageConsole, injection }, tag, failures) 
   }
 }
 
+// 구버전 앱(LEGACY_APP_COMMIT)의 정적 파일을 임시 폴더로 꺼낸다. 커밋이 없으면(얕은 clone) 검사를 건너뛰지 않고 실패한다.
+function extractLegacyApp() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-legacy-"));
+  let tar;
+  try {
+    tar = execFileSync("git", ["-C", ROOT, "archive", "--format=tar", LEGACY_APP_COMMIT, "index.html", "script.js", "style.css", "vendor"], { maxBuffer: 64 * 1024 * 1024 });
+  } catch (err) {
+    throw new Error("구버전 앱 커밋 " + LEGACY_APP_COMMIT + "을 찾지 못함 — 전체 git 이력이 필요하다(CI checkout fetch-depth: 0)\n" + err.message);
+  }
+  execFileSync("tar", ["-x", "-C", dir], { input: tar });
+  return dir;
+}
+
+// 구버전 탭과의 저장 호환성: 같은 origin에서 구버전(키 v3, schemaVersion 1)과 신버전(키 v4, schemaVersion 2)이 함께 열려도
+// (1) 구버전 저장분의 회원·신청·설정·수정 확정 후보가 신버전으로 그대로 이관되고 구버전 저장분은 건드리지 않는다
+// (2) 구버전 탭의 자동 저장·새로고침이 신버전 저장분(연속 요일 배정 제외 포함)을 바꾸지 못한다
+// (3) 신버전 백업을 구버전에서 복원하면 기존 데이터를 그대로 둔 채 거부된다 (4) 신버전에서 복원하면 새 설정이 유지된다.
+async function checkLegacyCompat(browser, site, failures) {
+  const assert = (cond, msg) => { if (!cond) failures.push("[구버전 호환] " + msg); };
+  const ctx = await browser.newContext();
+  const read = (p, key) => p.evaluate((k) => localStorage.getItem(k), key);
+  const json = (v) => JSON.stringify(v);
+  try {
+    const legacy = await ctx.newPage();
+    legacy.on("pageerror", (err) => failures.push("[구버전 호환] 구버전 페이지 런타임 에러: " + err.message));
+    const seed = buildManualEditSeedState();
+    const at = (day) => ({ id: "A" + day + "_0", memberId: "A", day, startSlot: 0, duration: 60, locationId: "loc1" });
+    seed.schemaVersion = 1;
+    seed.onceLimitedMemberIds3 = ["B"];
+    seed.candidates = [];
+    seed.schedule3Result = { candidateAList: [{ assigned: [at(0), at(2)], unassignedMembers: [seed.members[1]], confirmedIds: ["A0_0"] }, null, null] };
+    await legacy.goto(site.blank);
+    await legacy.evaluate(({ key, data }) => localStorage.setItem(key, data), { key: LEGACY_STORAGE_KEY, data: json(seed) });
+    await legacy.goto(site.legacyIndex);
+    await legacy.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    const legacyRaw = await read(legacy, LEGACY_STORAGE_KEY);
+    const old = JSON.parse(legacyRaw);
+    assert(old.schedule3Result.candidateAList[0], "픽스처 확인: 구버전 앱이 수정 확정 후보를 유지해야 함");
+
+    // (1) 이관
+    const app = await ctx.newPage();
+    app.on("pageerror", (err) => failures.push("[구버전 호환] 신버전 페이지 런타임 에러: " + err.message));
+    await app.goto(site.index);
+    await app.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    const migrated = JSON.parse((await read(app, STORAGE_KEY)) || "null");
+    assert(migrated && migrated.schemaVersion === 2, "이관 후 신버전 키에 schemaVersion 2로 저장돼야 함: " + json(migrated && migrated.schemaVersion));
+    if (migrated) {
+      ["locations", "travelTimes", "members", "requests", "availableCells", "onceLimitedMemberIds3", "excludedMemberIds3"].forEach((k) =>
+        assert(json(migrated[k]) === json(old[k]), "이관 후 " + k + "가 달라짐: " + json(migrated[k]) + " ≠ " + json(old[k])));
+      const card = migrated.schedule3Result.candidateAList[0];
+      assert(card && json(card.assigned.map((a) => a.id)) === json(["A0_0", "A2_0"]) && json(card.confirmedIds) === json(["A0_0"]), "이관 후 수정 확정 후보가 유지되지 않음: " + json(card));
+      assert(json(migrated.noConsecutiveDayMemberIds) === "[]", "이관 후 연속 요일 배정 제외 기본값이 빈 목록이 아님");
+    }
+    assert((await app.locator("#candidates3 .candidate-card").count()) === 1, "이관 후 수정 확정 후보 카드가 보이지 않음");
+    assert((await read(app, LEGACY_STORAGE_KEY)) === legacyRaw, "신버전이 구버전 저장분을 바꿈");
+
+    // 새 설정 저장
+    await app.click('.nav-item[data-page="memberSchedule"]');
+    await app.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    await app.click("#noConsecutiveControl");
+    await app.locator("#noConsecutiveDropdown .ms-option", { hasText: "회원A" }).click();
+    const ncOf = async () => (JSON.parse((await read(app, STORAGE_KEY)) || "{}")).noConsecutiveDayMemberIds;
+    assert(json(await ncOf()) === json(["A"]), "연속 요일 배정 제외가 저장되지 않음: " + json(await ncOf()));
+    const appRaw = await read(app, STORAGE_KEY);
+
+    // (2) 이관 전에 열린 구버전 탭의 자동 저장(페이지 이동·숨김·새로고침)
+    await legacy.click('.nav-item[data-page="members"]');
+    await legacy.evaluate(() => window.dispatchEvent(new window.Event("beforeunload")));
+    await legacy.reload();
+    await legacy.waitForSelector(".page.active", { timeout: 5000 });
+    await legacy.click('.nav-item[data-page="memberSchedule"]');
+    assert((await read(app, STORAGE_KEY)) === appRaw, "구버전 탭의 저장이 신버전 저장분을 바꿈");
+    await app.reload();
+    await app.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    assert((await app.locator("#noConsecutiveChipRow .chip", { hasText: "회원A" }).count()) === 1, "구버전 탭 저장 뒤 새로고침하자 연속 요일 배정 제외가 사라짐");
+
+    // 신버전 백업 만들기
+    await app.click('.nav-item[data-page="settings"]');
+    const onPrompt = (d) => d.accept(d.type() === "prompt" ? BACKUP_PASSWORD : undefined);
+    app.on("dialog", onPrompt);
+    await app.click("#backupExportBtn");
+    await app.waitForSelector("#backupExportResult:not([hidden])", { timeout: 15000 });
+    app.off("dialog", onPrompt);
+    const backupCode = await app.inputValue("#backupExportTextarea");
+    const appBefore = await read(app, STORAGE_KEY); // 설정 페이지 이동·백업이 저장한 뒤의 값
+
+    // (3) 구버전에서 복원 → 확인 창 없이 거부, 양쪽 저장분 그대로
+    const legacyDialogs = [];
+    legacy.on("dialog", (d) => { legacyDialogs.push(d.message()); d.dismiss(); });
+    await legacy.click('.nav-item[data-page="settings"]');
+    const legacyBefore = await read(legacy, LEGACY_STORAGE_KEY);
+    await legacy.click("#backupImportOpenBtn");
+    await legacy.fill("#backupImportTextarea", backupCode);
+    await legacy.fill("#backupImportPinInput", BACKUP_PASSWORD);
+    await legacy.click("#backupImportApplyBtn");
+    // 받아들이면 확인 창이 뜨고(위에서 취소) 안내가 비어 있다 — 기다림이 끝나지 않아도 아래 검사로 실패를 기록한다.
+    await legacy.waitForFunction(() => document.getElementById("backupImportHint").textContent !== "", null, { timeout: 15000 }).catch(() => {});
+    const legacyHint = await legacy.locator("#backupImportHint").innerText();
+    assert(legacyHint.includes("복원에 실패") && legacyDialogs.length === 0, "구버전이 신버전 백업을 거부하지 않음: " + json({ legacyHint, legacyDialogs }));
+    assert((await read(legacy, LEGACY_STORAGE_KEY)) === legacyBefore, "구버전 복원 거부 뒤 구버전 저장분이 바뀜");
+    assert((await read(app, STORAGE_KEY)) === appBefore, "구버전 복원 시도 뒤 신버전 저장분이 바뀜");
+
+    // (4) 신버전에서 설정을 지운 뒤 복원 → 새로고침 후 설정이 돌아온다
+    await app.click('.nav-item[data-page="memberSchedule"]');
+    await app.locator("#noConsecutiveChipRow .chip button").click();
+    assert(json(await ncOf()) === "[]", "연속 요일 배정 제외 해제가 저장되지 않음");
+    await app.click('.nav-item[data-page="settings"]');
+    await app.click("#backupImportOpenBtn");
+    await app.fill("#backupImportTextarea", backupCode);
+    await app.fill("#backupImportPinInput", BACKUP_PASSWORD);
+    app.once("dialog", (d) => d.accept());
+    await app.click("#backupImportApplyBtn");
+    await app.waitForSelector(".restore-recovery-banner", { timeout: 15000 });
+    const restored = JSON.parse((await read(app, STORAGE_KEY)) || "{}");
+    assert(json(restored.noConsecutiveDayMemberIds) === json(["A"]) && restored.schemaVersion === 2, "신버전 백업 복원 후 연속 요일 배정 제외가 유지되지 않음: " + json(restored.noConsecutiveDayMemberIds));
+    assert(json(restored.members) === json(old.members) && json(restored.requests) === json(old.requests), "신버전 백업 복원 후 회원·신청이 달라짐");
+    await app.click('.nav-item[data-page="memberSchedule"]');
+    assert((await app.locator("#noConsecutiveChipRow .chip", { hasText: "회원A" }).count()) === 1, "신버전 백업 복원 후 연속 요일 배정 제외 칩이 보이지 않음");
+  } finally {
+    await ctx.close();
+  }
+}
+
 async function clickGenerateAndWait(page, buttonSelector, timeoutMs) {
   await page.click(buttonSelector);
   await page.waitForFunction(
@@ -320,9 +454,10 @@ async function main() {
   const failures = [];
   const assert = (cond, msg) => { if (!cond) failures.push(msg); };
 
-  const server = await startServer();
+  const legacyRoot = extractLegacyApp();
+  const server = await startServer(legacyRoot);
   const origin = "http://127.0.0.1:" + server.address().port;
-  const site = { blank: origin + "/__smoke_blank", index: origin + "/index.html" };
+  const site = { blank: origin + "/__smoke_blank", index: origin + "/index.html", legacyIndex: origin + "/legacy/index.html" };
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
@@ -450,10 +585,10 @@ async function main() {
     await reloadChecked(page, "생성 결과 새로고침", failures);
     await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
     assert(!(await progressVisible()), "새로고침 후 진행바가 보임");
-    const reloadedMemberCount = await page.evaluate(() => {
-      const raw = localStorage.getItem("pt_schedule_state_v3");
+    const reloadedMemberCount = await page.evaluate((key) => {
+      const raw = localStorage.getItem(key);
       return raw ? JSON.parse(raw).members.length : -1;
-    });
+    }, STORAGE_KEY);
     assert(reloadedMemberCount === 1, "새로고침 후 회원 데이터가 유지되지 않음");
     titles = await cardTitles();
     assert(
@@ -759,6 +894,8 @@ async function main() {
     }
     await lg.close();
 
+    await checkLegacyCompat(browser, site, failures);
+
     // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-file-"));
     try {
@@ -785,6 +922,7 @@ async function main() {
   } finally {
     await browser.close();
     server.close();
+    fs.rmSync(legacyRoot, { recursive: true, force: true });
   }
 
   if (failures.length > 0) {
@@ -794,7 +932,7 @@ async function main() {
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 새로고침·브라우저 재실행 유지, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 구버전 탭·백업과 저장 분리(이관·자동 저장·복원 거부), 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 새로고침·브라우저 재실행 유지, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 
