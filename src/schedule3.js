@@ -981,7 +981,7 @@ export const excluded3Widget = createMemberSelectionWidget({
   onChanged: onSchedule3SelectionChanged,
 });
 
-// "회원 스케줄 추가" 페이지의 연속 요일 배정 제외 회원. 미배정·1회 제한과 함께 선택해도 각 제한을
+// "수업 스케줄 생성" 페이지의 연속 요일 배정 제외 회원. 미배정·1회 제한과 함께 선택해도 각 제한을
 // 그대로 지키면 되므로 충돌 목록이 없다. 상담 회원(주 1회)에게는 영향이 없지만 구분이 바뀔 수 있어
 // 모든 회원을 고를 수 있게 둔다(구분 변경으로 선택이 조용히 지워지지 않게).
 export const noConsecutive3Widget = createMemberSelectionWidget({
