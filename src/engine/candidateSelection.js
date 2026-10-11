@@ -313,6 +313,23 @@ export function selectCandidates(entries) {
   };
 }
 
+// 이미 계산했지만 저장 슬롯에 없는 결과(extra: 본 생성의 그리디 시도 전체 등) 중 지금 슬롯(entries)과 합쳐
+// 같은 정책(selectCandidates)으로 고를 때 카드에 보이는 것만 돌려준다 — 전략 기준(후보B·C 최선·동점)에서 밀린
+// 절충 후보도 조건별 대표로 남기되, 결과 전체를 저장하지 않는다. 카드의 대표·variant는 그룹 안 순서로 정해지므로
+// 이것만 더해도 같은 카드가 된다. isValid(result)가 false인 결과(하드 제약 위반)는 빼고 다시 고른다.
+export function representativeAdditions(entries, extra, isValid = () => true) {
+  let rest = extra;
+  for (;;) {
+    const inRest = new Set(rest);
+    const picked = selectCandidates(entries.concat(rest))
+      .cards.flatMap((c) => c.variants)
+      .filter((e) => inRest.has(e));
+    const bad = new Set(picked.filter((e) => !isValid(e.result)));
+    if (!bad.size) return picked;
+    rest = rest.filter((e) => !bad.has(e));
+  }
+}
+
 // 재최적화(5a·5b-1) 제안 고르기: 고정 세션(pins)을 넘겨 다시 생성한 결과들(results, 후보A·B·C와 동점 풀)
 // 중에서 지금 수정 카드(current)보다 나은 것을 고른다. 사용자 기대는 "고정한 수업을 유지하면서 나머지를
 // 더 잘 정리"이므로 제안 자격(업무 정책)은 다음 순서로 본다.

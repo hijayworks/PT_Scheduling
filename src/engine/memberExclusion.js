@@ -1,7 +1,11 @@
 import { state } from "../state.js";
 import { memberById } from "../domain.js";
 import { withSelectionOverrideSync } from "../selectionOverride.js";
-import { buildGreedySearchPool, greedySearchInputs } from "./greedy.js";
+import {
+  buildGreedySearchPool,
+  greedySearchInputs,
+  checkGenerationCancelled,
+} from "./greedy.js";
 import { scheduleMetrics, scheduleViolations } from "./scheduleQuality.js";
 import {
   layoutSignature,
@@ -69,7 +73,8 @@ export function exclusionRepresentatives(rec, member, pool) {
 // 임시 선택(withSelectionOverrideSync)에만 있어, 탐색 중 화면(메뉴 이동·편집·저장)은 저장된 선택만 본다.
 // 회원마다 결과 전체에서 고른 대표(exclusionRepresentatives)를 onFound로 넘긴다.
 // rec: 추천 entry({result, metrics}). onMember(i, total, member): 회원마다 시작 전에, onProgress(i, total, p):
-// 그 회원 탐색의 진행률. 취소는 엔진의 checkGenerationCancelled가 GenerationCancelledError로 던진다.
+// 그 회원 탐색의 진행률. 취소는 회원마다 시작할 때와 엔진 안에서 checkGenerationCancelled가
+// GenerationCancelledError로 던진다.
 // 반환: { members: 탐색한 회원 수, found: 넘긴 결과 수 }
 export async function searchMemberExclusions(
   rec,
@@ -86,6 +91,8 @@ export async function searchMemberExclusions(
   for (let i = 0; i < ids.length; i++) {
     const member = memberById(ids[i]);
     onMember(i, ids.length, member);
+    // 회원 한 명의 탐색이 엔진의 취소 확인 주기보다 빨리 끝나도 취소가 다음 회원으로 넘어가지 않게 한다.
+    checkGenerationCancelled();
     const inSelection = (fn) =>
       withSelectionOverrideSync(
         state.excludedMemberIds3.concat(member.id),

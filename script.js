@@ -382,7 +382,8 @@
     candidates: [],
     // candidateAList: 체인 DP 탐색 그룹 3개의 결과. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.
     // extraCandidates(선택): 회원별 추가 탐색이 찾은 미배정 1명 추가·절충 후보(schedule3.js extraCandidates).
-    // extraSearchDone(선택): 그 탐색('미배정 1명 추가안 더 찾기')을 이번 생성 결과에 대해 끝까지 마쳤으면 true.
+    //   본 생성의 그리디 시도 전체에서 고른 조건별 대표도 여기 둔다(schedule3.js addSearchRepresentatives).
+    // extraSearch(선택): '미배정 1명 추가안 더 찾기' 상태 { baseSig: 기준 추천 배치 서명, done: 끝까지 마쳤는지 }.
     schedule3Result: { candidateAList: [null, null, null] },
     // 세 생성 버튼 중 하나라도 계산 중이면 true — 동시에 두 계산이 겹치면 selectionOverride가
     // 서로 다른 페이지의 회원 선택 목록을 잘못 참조할 수 있어(withSelectionOverride 참고), 이 플래그로 막는다.
@@ -625,8 +626,12 @@
             runtime.schedule3Result.extraCandidates = extras.filter(
               (r) => r && Array.isArray(r.assigned) && Array.isArray(r.unassignedMembers)
             );
-          if (parsed.schedule3Result.extraSearchDone === true)
-            runtime.schedule3Result.extraSearchDone = true;
+          const meta = parsed.schedule3Result.extraSearch;
+          if (meta && typeof meta.baseSig === "string" && typeof meta.done === "boolean")
+            runtime.schedule3Result.extraSearch = {
+              baseSig: meta.baseSig,
+              done: meta.done
+            };
         } else {
           const legacyCandidateA = parsed.schedule3Result && parsed.schedule3Result.candidateA || null;
           runtime.schedule3Result = {
@@ -1839,7 +1844,8 @@
     candidates: [],
     // candidateAList: 체인 DP 탐색 그룹 3개의 결과. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.
     // extraCandidates(선택): 회원별 추가 탐색이 찾은 미배정 1명 추가·절충 후보(schedule3.js extraCandidates).
-    // extraSearchDone(선택): 그 탐색('미배정 1명 추가안 더 찾기')을 이번 생성 결과에 대해 끝까지 마쳤으면 true.
+    //   본 생성의 그리디 시도 전체에서 고른 조건별 대표도 여기 둔다(schedule3.js addSearchRepresentatives).
+    // extraSearch(선택): '미배정 1명 추가안 더 찾기' 상태 { baseSig: 기준 추천 배치 서명, done: 끝까지 마쳤는지 }.
     schedule3Result: { candidateAList: [null, null, null] },
     // 세 생성 버튼 중 하나라도 계산 중이면 true — 동시에 두 계산이 겹치면 selectionOverride가
     // 서로 다른 페이지의 회원 선택 목록을 잘못 참조할 수 있어(withSelectionOverride 참고), 이 플래그로 막는다.
@@ -5656,8 +5662,18 @@
       allMemberIds: new Set(scheduleTargetMemberIds())
     };
   }
+  function greedySearchKey(attempts, pins) {
+    return JSON.stringify([
+      candidateInputKey(),
+      currentExcludedIds(),
+      currentOnceLimitIds(),
+      attempts !== void 0 ? attempts : INITIAL_SEARCH_ATTEMPTS,
+      pins
+    ]);
+  }
   async function generateCandidatesAsync(onProgress, workerOptions = {}, pins = []) {
     const { eligible, eligibleIds, allMemberIds } = greedySearchInputs();
+    const searchKey = greedySearchKey(workerOptions.attempts, pins);
     const pool = await buildGreedySearchPool(
       eligible,
       eligibleIds,
@@ -5683,6 +5699,8 @@
         }
       });
       const builtCand = Object.assign({}, best, {
+        assigned: best.assigned.slice(),
+        unassignedMembers: best.unassignedMembers.slice(),
         title: strategy.title,
         desc: strategy.desc,
         strategyIndex: idx
@@ -5708,7 +5726,9 @@
     });
     return {
       built: builtPairs.map((p) => p.builtCand),
-      pools: builtPairs.map((p) => p.tied)
+      pools: builtPairs.map((p) => p.tied),
+      all: pool,
+      searchKey
     };
   }
 
@@ -7714,7 +7734,8 @@
     const eligibleReqs = state.requests.filter(isEligibleRequest2);
     const pins = options.pins || [];
     const GREEDY_BASELINE_PROGRESS_SHARE = 0.08;
-    const greedyBaseline = await generateCandidatesAsync(
+    const reusable = options.greedyResult && options.greedyResult.searchKey === greedySearchKey(options.greedyAttempts, pins);
+    const greedyBaseline = reusable ? options.greedyResult : await generateCandidatesAsync(
       (p) => {
         if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
       },
@@ -7766,8 +7787,8 @@
           if (!cand || !cand.assigned) return null;
           if (missingPins(cand.assigned, pins).length) return null;
           return {
-            assigned: cand.assigned,
-            unassignedMembers: cand.unassignedMembers || []
+            assigned: cand.assigned.slice(),
+            unassignedMembers: (cand.unassignedMembers || []).slice()
           };
         }).filter(Boolean);
         cards.forEach((c) => considerAsCandidate(c.result));
@@ -7797,7 +7818,15 @@
             if (g === IDLE_FIRST_CARD_INDEX !== idleMode) continue;
             if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
             if (!isSchedule2ResultBetter(best, c.result)) continue;
-            cards[g] = { result: best, pool: bestPool.slice() };
+            const own = {
+              ...best,
+              assigned: best.assigned.slice(),
+              unassignedMembers: best.unassignedMembers.slice()
+            };
+            cards[g] = {
+              result: own,
+              pool: bestPool.map((r) => r === best ? own : r)
+            };
           }
         }
       } finally {
@@ -8196,6 +8225,16 @@
       }
     };
   }
+  function representativeAdditions(entries, extra, isValid = () => true) {
+    let rest = extra;
+    for (; ; ) {
+      const inRest = new Set(rest);
+      const picked = selectCandidates(entries.concat(rest)).cards.flatMap((c) => c.variants).filter((e) => inRest.has(e));
+      const bad = new Set(picked.filter((e) => !isValid(e.result)));
+      if (!bad.size) return picked;
+      rest = rest.filter((e) => !bad.has(e));
+    }
+  }
   function keepsSessions(current, result) {
     return result.unassignedMembers.length <= current.unassignedMembers.length && result.assigned.length >= current.assigned.length;
   }
@@ -8330,6 +8369,7 @@
     for (let i = 0; i < ids.length; i++) {
       const member = memberById(ids[i]);
       onMember(i, ids.length, member);
+      checkGenerationCancelled();
       const inSelection = (fn) => withSelectionOverrideSync(
         state.excludedMemberIds3.concat(member.id),
         state.onceLimitedMemberIds3,
@@ -11038,7 +11078,7 @@
       onceLimitIds3,
       () => generateSchedule2Async(
         (progress) => onProgress(0.5 + progress * 0.5, "비교·최적화"),
-        { pins }
+        { pins, greedyResult: v1Built }
       )
     );
     onProgress(1, "후보 정리");
@@ -11051,8 +11091,10 @@
       // strategyIndex -> 동점 풀
       candidateAList: v2Result.map((c) => c.result),
       // 체인 DP 탐색 그룹 3개
-      candidateAPools: v2Result.map((c) => c.pool)
+      candidateAPools: v2Result.map((c) => c.pool),
       // 그룹 인덱스 -> 동점 풀
+      greedyAll: v1Built.all
+      // 그리디 시도 전체(세션 한정, addSearchRepresentatives용)
     };
   }
   var generateHint3El = document.getElementById("generateHint3");
@@ -11072,6 +11114,12 @@
   var GENERATE3_IDLE_LABEL = "수업 스케줄 후보 생성";
   var extraSearchBtn3El = document.getElementById("extraSearchBtn3");
   var EXTRA_SEARCH3_LABEL = "미배정 1명 추가안 더 찾기";
+  var EXTRA_SEARCH_MISSING_TEXT = {
+    notRun: "아직 찾지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다",
+    stale: "추천안이 바뀌어 다시 찾아야 함 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다",
+    incomplete: "탐색을 끝까지 하지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 다시 찾습니다",
+    done: "탐색에서 조건을 충족하는 후보를 찾지 못함"
+  };
   function isUserEdited(result) {
     return !!result && Array.isArray(result.confirmedIds) && result.confirmedIds.length > 0;
   }
@@ -11141,6 +11189,34 @@
   function extraCandidates() {
     return runtime.schedule3Result.extraCandidates || [];
   }
+  function addSearchRepresentatives(results) {
+    const entries = candidatePoolEntries();
+    const seen = new Set(entries.map((e) => layoutSignature(e.result)));
+    const extra = [];
+    (results || []).forEach((r) => {
+      if (!r) return;
+      const result = {
+        assigned: r.assigned.slice(),
+        unassignedMembers: r.unassignedMembers.slice()
+      };
+      const sig = layoutSignature(result);
+      if (seen.has(sig)) return;
+      seen.add(sig);
+      extra.push({ result, metrics: scheduleMetrics(result) });
+    });
+    const added = representativeAdditions(
+      entries,
+      extra,
+      (r) => !scheduleViolations(r).length
+    ).map((e) => e.result);
+    runtime.schedule3Result.extraCandidates = extraCandidates().concat(added);
+    return added.length;
+  }
+  function extraSearchStatus(meta, recSig) {
+    if (!meta) return "notRun";
+    if (meta.baseSig !== recSig) return "stale";
+    return meta.done ? "done" : "incomplete";
+  }
   function keepsUserEditedSlot(prev) {
     return isUserEdited(prev);
   }
@@ -11190,6 +11266,19 @@
     return entries;
   }
   var shownVariantByCard = /* @__PURE__ */ new Map();
+  var cardKeyOf = (c) => c.role === "edited" ? "edited:" + layoutSignature(c.variants[0].result) : qualityKey(c.metrics);
+  function shownVariantIndex(c) {
+    const meta = runtime.schedule3Result.extraSearch;
+    const sig = shownVariantByCard.has(cardKeyOf(c)) ? shownVariantByCard.get(cardKeyOf(c)) : c.role === "recommended" && meta ? meta.baseSig : void 0;
+    return Math.max(
+      0,
+      c.variants.findIndex((v) => layoutSignature(v.result) === sig)
+    );
+  }
+  function shownRecommendation() {
+    const card = selectCandidates(candidatePoolEntries()).rows[0].card;
+    return card ? card.variants[shownVariantIndex(card)] : null;
+  }
   var compareCardKey = null;
   var candidateCompare3El = document.getElementById("candidateCompare3");
   var candidateSummary3El = document.getElementById("candidateSummary3");
@@ -11228,13 +11317,8 @@
     }
     let promoted = false;
     const shown = /* @__PURE__ */ new Map();
-    const keyOf = (c) => c.role === "edited" ? "edited:" + layoutSignature(c.variants[0].result) : qualityKey(c.metrics);
-    const shownIdx = (c) => Math.max(
-      0,
-      c.variants.findIndex(
-        (v) => layoutSignature(v.result) === shownVariantByCard.get(keyOf(c))
-      )
-    );
+    const keyOf = cardKeyOf;
+    const shownIdx = shownVariantIndex;
     const recShown = rows[0].card ? rows[0].card.variants[shownIdx(rows[0].card)].result : null;
     renderCandidateSummary(rows);
     cards.forEach((c) => {
@@ -11305,9 +11389,11 @@
           return cell;
         };
         if (!r.card) {
-          const cell = td(
-            EXCLUSION_ROLES.includes(r.role) && !runtime.schedule3Result.extraSearchDone ? "아직 찾지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다" : "탐색에서 조건을 충족하는 후보를 찾지 못함"
-          );
+          const status = EXCLUSION_ROLES.includes(r.role) ? extraSearchStatus(
+            runtime.schedule3Result.extraSearch,
+            recShown && layoutSignature(recShown)
+          ) : "done";
+          const cell = td(EXTRA_SEARCH_MISSING_TEXT[status]);
           cell.colSpan = 5;
           cell.className = "candidate-summary-missing";
         } else {
@@ -11984,6 +12070,7 @@
         inputKey,
         extraCandidates: prevExtras.filter(keepsUserEditedSlot)
       };
+      addSearchRepresentatives(result.greedyAll);
       if (dropStaleCandidates()) return;
       renderSchedule3Result();
       saveState();
@@ -12006,8 +12093,11 @@
       return;
     }
     if (dropStaleCandidates()) return;
-    const recCard = selectCandidates(candidatePoolEntries()).rows[0].card;
-    if (!recCard) return;
+    const base = shownRecommendation();
+    if (!base) return;
+    const baseSig = layoutSignature(base.result);
+    const meta = { baseSig, done: false };
+    runtime.schedule3Result.extraSearch = meta;
     generateHint3El.textContent = "";
     runtime.generationInProgress = true;
     runtime.generationCancelRequested = false;
@@ -12018,7 +12108,9 @@
     startGenerationProgress("추가 탐색 중...", "추가 탐색 취소");
     await acquireWakeLock();
     try {
-      const stats = await searchMemberExclusions(recCard.variants[0], {
+      renderSchedule3Result();
+      saveState();
+      const stats = await searchMemberExclusions(base, {
         onMember: (i, n, member) => {
           label = "회원별 추가 탐색 " + (i + 1) + "/" + n + "명 (" + member.name + ")";
           showGenerationProgress(i / n, label);
@@ -12027,7 +12119,7 @@
         onFound: (results) => {
           if (candidateInputKey() !== inputKey) return;
           const have = new Set(extraCandidates().map(layoutSignature));
-          const fresh = results.filter((r) => !have.has(layoutSignature(r)));
+          const fresh = results.filter((r) => !have.has(layoutSignature(r))).map((r) => ({ ...r, baseSig }));
           if (!fresh.length) return;
           added += fresh.length;
           runtime.schedule3Result.extraCandidates = extraCandidates().concat(fresh);
@@ -12044,13 +12136,21 @@
         })
       );
       if (dropStaleCandidates()) return;
-      runtime.schedule3Result.extraSearchDone = true;
+      meta.done = true;
+      const now = shownRecommendation();
+      const sameBase = !!now && layoutSignature(now.result) === baseSig;
       renderSchedule3Result();
       saveState();
-      showToast(
-        added ? "미배정 1명 추가안 " + added + "개를 찾았습니다" : "조건을 충족하는 미배정 1명 추가안을 찾지 못했습니다",
-        added ? "success" : "info"
-      );
+      if (!sameBase)
+        showToast(
+          "탐색 중 추천안이 바뀌어 완료로 처리하지 않았습니다. 바뀐 추천안으로 다시 찾아주세요",
+          "info"
+        );
+      else
+        showToast(
+          added ? "미배정 1명 추가안 " + added + "개를 찾았습니다" : "조건을 충족하는 미배정 1명 추가안을 찾지 못했습니다",
+          added ? "success" : "info"
+        );
     } catch (err) {
       if (err instanceof GenerationCancelledError) {
         showToast(

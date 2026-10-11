@@ -670,52 +670,115 @@ async function checkCandidateDisplay(browser, site, failures) {
     // 본 생성은 추가 탐색 없이 끝나고, 미배정 1명 추가 행은 '아직 찾지 않음'으로 버튼을 안내한다.
     let progress = await page.evaluate(() => [...window.__progressTexts__]);
     assert(!progress.some((t) => t.startsWith("회원별 추가 탐색")), "본 생성이 회원별 추가 탐색까지 돌았음: " + json(progress));
-    const notYet = (await summaryRows()).filter((r) => r[0].startsWith("미배정 1명 추가")).map((r) => r[1]);
-    // 본 생성 풀에서 이미 찾은 조건은 값이 보이고(이 시드는 이동 감소형), 못 찾은 조건만 '아직 찾지 않음'이다.
-    assert(notYet.length === 2 && notYet.some((t) => t.startsWith("아직 찾지 않음")) && notYet.every((t) => t.startsWith("아직 찾지 않음") || t === "1명"), "추가 탐색 전 미배정 1명 추가 행: " + json(notYet));
+    const unassignedRows = async () => (await summaryRows()).filter((r) => r[0].startsWith("미배정 1명 추가")).map((r) => r[1]);
+    // 본 생성 풀에서 이미 찾은 조건은 값이 보이고(이 시드는 이동 감소형), 후보가 없는 행은 추가 탐색 상태를 안내한다.
+    const missingRowsAre = async (prefix, label) => {
+      const texts = await unassignedRows();
+      assert(texts.length === 2 && texts.some((t) => t.startsWith(prefix)) && texts.every((t) => t.startsWith(prefix) || t === "1명"), label + " 미배정 1명 추가 행: " + json(texts));
+    };
+    await missingRowsAre("아직 찾지 않음", "추가 탐색 전");
     assert(await page.locator("#extraSearchBtn3").isVisible(), "'미배정 1명 추가안 더 찾기' 버튼이 보이지 않음");
+    // 본 생성에서 이미 계산한 그리디 시도 전체 중 카드에 보이는 대표만 추가 후보 슬롯에 저장된다(엔진 재실행 없음).
+    let saved = await readState(page);
+    assert(saved.schedule3Result.extraCandidates.length >= 1 && saved.schedule3Result.extraCandidates.every((r) => !r.excludedMemberId), "본 생성 그리디 시도에서 고른 대표가 저장되지 않음: " + saved.schedule3Result.extraCandidates.length);
 
     // 확정 후보(블록 확정)와 수정 후보(인원 교체)를 만든다. 추천(정상) 후보는 남은 자동 배치에서 다시 고른다.
     const cardByTitle = (re) => page.locator("#candidates3 .candidate-card").filter({ has: page.locator(".candidate-title", { hasText: re }) });
-    assert(await clickBlockMenuItem(page, cardByTitle(/^추천·균형/).first(), /으로 확정$/), "확정할 블록을 찾지 못함");
-    assert(await clickBlockMenuItem(page, cardByTitle(/^추천·균형/).first(), /\(으\)로 교체$/), "교체할 블록을 찾지 못함");
+    const recCard = () => cardByTitle(/^추천·균형/).first();
+    assert(await clickBlockMenuItem(page, recCard(), /으로 확정$/), "확정할 블록을 찾지 못함");
+    assert(await clickBlockMenuItem(page, recCard(), /\(으\)로 교체$/), "교체할 블록을 찾지 못함");
     const editedBefore = await cardByTitle("내가 수정한 후보").count();
     assert(editedBefore === 2 && (await cardByTitle(/^추천·균형/).count()) === 1, "정상·수정·확정 후보 준비: " + json(await page.locator("#candidates3 .candidate-title").allTextContents()));
+
+    // 진행 문구가 prefix로 바뀌는 순간(그 회원을 탐색에서 뺀 동안) 동기적으로 action을 한다. 새로고침하면 다시 건다.
+    const armOnProgress = (prefix, action) =>
+      page.evaluate(({ prefix, action }) => {
+        const el = document.getElementById("generateProgressText3");
+        window.__armedDone__ = false;
+        const obs = new window.MutationObserver(() => {
+          if (!el.textContent.startsWith(prefix)) return;
+          obs.disconnect();
+          if (action === "nav") {
+            document.querySelector('.nav-item[data-page="settings"]').click();
+            document.querySelector('.nav-item[data-page="schedule3"]').click();
+          } else if (action === "cancel") {
+            document.getElementById("generateBtn3Cancel").click();
+          } else if (action === "confirmRec") {
+            const rec = [...document.querySelectorAll("#candidates3 .candidate-card")].find((c) => c.querySelector(".candidate-title").textContent.startsWith("추천·균형"));
+            rec.querySelector(".cal-block.clickable").click();
+            [...document.querySelectorAll(".block-context-menu-item")].find((b) => b.textContent.endsWith("으로 확정")).click();
+          }
+          window.__armedDone__ = document.getElementById("pageSchedule3").classList.contains("active");
+        });
+        obs.observe(el, { childList: true, characterData: true, subtree: true });
+      }, { prefix, action });
+    const searchTimeout = FULL_BUDGET_A ? 45 * 60 * 1000 : 2 * 60 * 1000;
+    const pagerLabel = async () => ((await recCard().locator(".pool-pager-label").count()) ? await recCard().locator(".pool-pager-label").innerText() : "");
+    const reload = async (label) => {
+      await reloadChecked(page, label, failures);
+      await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    };
+    const extrasOf = async () => (await readState(page)).schedule3Result.extraCandidates.map((r) => r.assigned.map((x) => x.id).sort().join());
+
+    // (1) 기준 = 화면에 보이는 추천 배치: 동점 배치를 넘겨 둔 채 추가 탐색을 시작하고, 둘째 회원에서 취소한다.
+    const pagerBefore = await pagerLabel();
+    assert(/^배치 1\/\d+$/.test(pagerBefore) && !pagerBefore.endsWith("/1"), "픽스처 확인: 추천 카드에 동점 배치가 있어야 함: " + pagerBefore);
+    await recCard().locator('button[aria-label="다음 배치"]').click();
+    const baseLabel = await pagerLabel();
+    // 넘겨 본 배치는 원래 슬롯에 저장된다(기존 동작) — 이 시점의 정상·수정·확정 슬롯이 이후 내내 그대로여야 한다.
     const before = await candidateSlotSnapshot(page);
     assert(before.includes('"P0_9"'), "픽스처 확인: 회원P가 배정된 후보가 있어야 함");
-    // 첫 회원(P)을 탐색에서 뺀 동안 기본 설정 → 수업 스케줄 생성으로 이동한다(진행 문구 변경 직후 동기적으로).
-    await page.evaluate(() => {
-      const el = document.getElementById("generateProgressText3");
-      const obs = new window.MutationObserver(() => {
-        if (!el.textContent.startsWith("회원별 추가 탐색 1/")) return;
-        obs.disconnect();
-        document.querySelector('.nav-item[data-page="settings"]').click();
-        document.querySelector('.nav-item[data-page="schedule3"]').click();
-        window.__navDuringExtra__ = document.getElementById("pageSchedule3").classList.contains("active");
-      });
-      obs.observe(el, { childList: true, characterData: true, subtree: true });
-    });
-    await clickGenerateAndWait(page, "#extraSearchBtn3", FULL_BUDGET_A ? 45 * 60 * 1000 : 2 * 60 * 1000);
-    assert(await page.evaluate(() => window.__navDuringExtra__ === true), "추가 탐색 중 메뉴 이동이 일어나지 않음");
+    const extrasBeforeCancel = await extrasOf();
+    await armOnProgress("회원별 추가 탐색 2/", "cancel");
+    await clickGenerateAndWait(page, "#extraSearchBtn3", searchTimeout);
+    assert(await page.evaluate(() => window.__armedDone__), "추가 탐색 취소가 일어나지 않음");
+    await missingRowsAre("탐색을 끝까지 하지 않음", "같은 기준에서 취소한 뒤");
+    const extrasAfterCancel = await extrasOf();
+    assert(extrasBeforeCancel.every((x) => extrasAfterCancel.includes(x)) && (await candidateSlotSnapshot(page)) === before, "취소 뒤 기존 후보·이미 찾은 후보가 사라짐");
+    await reload("추가 탐색 취소 뒤 새로고침");
+    assert((await pagerLabel()) === baseLabel, "새로고침 뒤 추천 카드가 탐색 기준 배치를 보여주지 않음: " + (await pagerLabel()) + " ≠ " + baseLabel);
+    await missingRowsAre("탐색을 끝까지 하지 않음", "취소 뒤 새로고침");
+    assert(json(await extrasOf()) === json(extrasAfterCancel) && (await candidateSlotSnapshot(page)) === before, "취소 뒤 새로고침하자 후보가 달라짐");
+
+    // (2) 같은 기준으로 다시 찾는 동안(첫 회원 P를 탐색에서 뺀 동안) 기본 설정 → 수업 스케줄 생성으로 이동한다
+    //     — 탐색용 임시 제외가 화면의 후보 검증(dropStaleCandidates)에 새면 P가 배정된 후보가 위반으로 지워진다.
+    await armOnProgress("회원별 추가 탐색 1/", "nav");
+    await clickGenerateAndWait(page, "#extraSearchBtn3", searchTimeout);
+    assert(await page.evaluate(() => window.__armedDone__ === true), "추가 탐색 중 메뉴 이동이 일어나지 않음");
     const hint = await page.locator("#generateHint3").innerText();
     assert(!hint.includes("필수 조건"), "추가 탐색 중 메뉴 이동 뒤 후보가 위반으로 초기화됨: " + hint);
     assert((await candidateSlotSnapshot(page)) === before, "추가 탐색 중 메뉴 이동 뒤 저장된 정상·수정·확정 후보가 달라짐");
     assert((await cardByTitle("내가 수정한 후보").count()) === editedBefore && (await cardByTitle(/^추천·균형/).count()) === 1, "추가 탐색 뒤 카드: " + json(await page.locator("#candidates3 .candidate-title").allTextContents()));
-
     progress = await page.evaluate(() => [...window.__progressTexts__]);
     assert(progress.some((t) => /^회원별 추가 탐색 \d+\/\d+명 \(회원/.test(t)), "회원별 추가 탐색 진행 문구가 보이지 않음: " + json(progress));
     const rows = await summaryRows();
     assert(rows.length === 6, "비교표 행 수: " + rows.length);
     const travelRow = rows.find((r) => r[0] === "미배정 1명 추가·이동 감소");
     assert(travelRow && json(travelRow.slice(1, 5)) === json(["1명", "8건", "0번", "없음"]), "미배정 1명 추가·이동 감소 행: " + json(travelRow));
-    const sessionsRow = rows.find((r) => r[0] === "미배정 1명 추가·수업 증가");
-    assert(sessionsRow && sessionsRow[1] === "탐색에서 조건을 충족하는 후보를 찾지 못함", "수업 +1뿐이라 수업 증가형은 없어야 함: " + json(sessionsRow));
+    const sessionsRow = () => summaryRows().then((rs) => rs.find((r) => r[0] === "미배정 1명 추가·수업 증가")[1]);
+    assert((await sessionsRow()) === "탐색에서 조건을 충족하는 후보를 찾지 못함", "끝까지 찾은 뒤 수업 증가형 행: " + (await sessionsRow()));
+    await reload("추가 탐색 완료 뒤 새로고침");
+    assert((await pagerLabel()) === baseLabel && (await sessionsRow()) === "탐색에서 조건을 충족하는 후보를 찾지 못함", "새로고침 뒤 완료 상태가 유지되지 않음: " + json([await pagerLabel(), await sessionsRow()]));
+    // (3) 다른 동점 배치로 넘기면 기준이 바뀐 것 — 다시 찾아야 한다고 안내하고, 기준 배치로 돌아오면 완료 상태다.
+    await recCard().locator('button[aria-label="이전 배치"]').click();
+    assert((await sessionsRow()).startsWith("추천안이 바뀌어 다시 찾아야 함"), "추천 배치를 넘긴 뒤 수업 증가형 행: " + (await sessionsRow()));
+    await recCard().locator('button[aria-label="다음 배치"]').click();
+    assert((await sessionsRow()) === "탐색에서 조건을 충족하는 후보를 찾지 못함", "기준 배치로 돌아온 뒤 수업 증가형 행: " + (await sessionsRow()));
+    // (4) 탐색 중 추천을 확정해 기준이 바뀌면 끝나도 완료로 처리하지 않고, 새로고침 뒤에도 다시 찾아야 한다고 안내한다.
+    await armOnProgress("회원별 추가 탐색 1/", "confirmRec");
+    await clickGenerateAndWait(page, "#extraSearchBtn3", searchTimeout);
+    assert(await page.evaluate(() => window.__armedDone__ === true), "추가 탐색 중 추천 확정이 일어나지 않음");
+    assert((await cardByTitle("내가 수정한 후보").count()) === editedBefore + 1, "탐색 중 확정한 후보가 수정 후보로 남지 않음");
+    assert((await sessionsRow()).startsWith("추천안이 바뀌어 다시 찾아야 함"), "탐색 중 기준이 바뀐 뒤 수업 증가형 행: " + (await sessionsRow()));
+    await reload("탐색 중 기준 변경 뒤 새로고침");
+    assert((await sessionsRow()).startsWith("추천안이 바뀌어 다시 찾아야 함") && (await cardByTitle("내가 수정한 후보").count()) === editedBefore + 1, "새로고침 뒤 기준 변경 안내·수정 후보: " + (await sessionsRow()));
     const card = page.locator("#candidates3 .candidate-card", { has: page.locator(".candidate-title", { hasText: "미배정 1명 추가·이동 감소" }) });
     const desc = (await card.count()) ? await card.locator(".candidate-desc").innerText() : "";
     assert(desc.includes("추천 대비 새로 미배정: 회원P") && desc.includes("이동 -2"), "새로 미배정된 회원·추천 대비 변화 표시: " + desc);
-    const saved = await readState(page);
+    saved = await readState(page);
     assert(json(saved.excludedMemberIds3) === "[]", "회원별 추가 탐색이 미배정 회원 설정을 바꿈");
-    assert(saved.schedule3Result.extraCandidates.length >= 1 && saved.schedule3Result.extraCandidates.every((r) => r.unassignedMembers.some((m) => m.id === r.excludedMemberId)), "추가 탐색 후보가 저장되지 않았거나 제외 회원이 미배정에 없음");
+    const found = saved.schedule3Result.extraCandidates.filter((r) => r.excludedMemberId);
+    assert(found.length >= 1 && found.every((r) => r.unassignedMembers.some((m) => m.id === r.excludedMemberId) && typeof r.baseSig === "string"), "추가 탐색 후보가 저장되지 않았거나 제외 회원이 미배정에 없음(기준 서명 포함)");
     // 지점 색: 블록 제목의 지점과 색 클래스가 맞는다(마포점=파랑 2, 상암점=코랄 3).
     const colorMismatch = await page.locator("#candidates3 .cal-block").evaluateAll((bs) =>
       bs.filter((b) => !b.classList.contains(b.title.includes("(상암점)") ? "location-color-3" : "location-color-2")).map((b) => b.title));

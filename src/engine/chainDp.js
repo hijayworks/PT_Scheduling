@@ -5,6 +5,7 @@ import {
   checkGenerationCancelled,
   MAX_POOL_VARIANTS,
   generateCandidatesAsync,
+  greedySearchKey,
 } from "./greedy.js";
 import { isEligibleRequest2, runChainDP, setIdleFirst } from "./chainDpCore.js";
 import { runSchedule2Pipeline } from "./chainDpPolish.js";
@@ -457,6 +458,8 @@ export async function runSchedule2RestartGroup(
 // 카드를 바꿔치기할 외부 결과(화면의 후보B·C 등)도 고정 세션을 모두 지킨 것만 쓴다.
 // options.budgetScale: 카드(재시작 그룹)마다의 후보A 시간 예산 배율(groupBudgets). 생략하면 운영 예산.
 // 국소 재최적화 측정(tests/reoptimize.js --levels)만 넘긴다. 그리디 기준선은 greedyAttempts로 따로 정한다.
+// options.greedyResult: 같은 생성에서 방금 만든 그리디 탐색 결과(generateCandidatesAsync 반환값). 그 searchKey가
+// 이 호출의 기준선 조건(입력·선택·greedyAttempts·pins)과 같을 때만 기준선으로 재사용하고, 다르면 새로 계산한다.
 export async function generateSchedule2Async(onProgress, options = {}) {
   const eligibleReqs = state.requests.filter(isEligibleRequest2);
   const pins = options.pins || [];
@@ -469,13 +472,19 @@ export async function generateSchedule2Async(onProgress, options = {}) {
   // 잡은 사례로 확인됨 — runtime.candidates는 후보B·C를 먼저 생성해둔 적이 있을 때만 채워져
   // 있다). 그리디는 담금질보다 훨씬 빨라(수 초~수십 초) 전체 대기 시간에 크게 보태지 않는다.
   const GREEDY_BASELINE_PROGRESS_SHARE = 0.08;
-  const greedyBaseline = await generateCandidatesAsync(
-    (p) => {
-      if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
-    },
-    { attempts: options.greedyAttempts },
-    pins,
-  );
+  const reusable =
+    options.greedyResult &&
+    options.greedyResult.searchKey ===
+      greedySearchKey(options.greedyAttempts, pins);
+  const greedyBaseline = reusable
+    ? options.greedyResult
+    : await generateCandidatesAsync(
+        (p) => {
+          if (onProgress) onProgress(p * GREEDY_BASELINE_PROGRESS_SHARE);
+        },
+        { attempts: options.greedyAttempts },
+        pins,
+      );
   const cardProgressShare = 1 - GREEDY_BASELINE_PROGRESS_SHARE;
 
   // 후보A-1/A-2/A-3 카드마다 독립적으로 탐색한다(서로 다른 시드 → 서로 다른 골격에서
@@ -557,9 +566,11 @@ export async function generateSchedule2Async(onProgress, options = {}) {
         .map((cand) => {
           if (!cand || !cand.assigned) return null;
           if (missingPins(cand.assigned, pins).length) return null;
+          // 배열은 복사한다 — 카드가 이 결과로 바뀌면 후보B·C(같은 그리디 결과를 재사용하거나 화면의
+          // runtime.candidates)와 assigned 배열을 공유해, 한 카드의 수동 편집이 다른 카드까지 바꾼다.
           return {
-            assigned: cand.assigned,
-            unassignedMembers: cand.unassignedMembers || [],
+            assigned: cand.assigned.slice(),
+            unassignedMembers: (cand.unassignedMembers || []).slice(),
           };
         })
         .filter(Boolean);
@@ -601,7 +612,17 @@ export async function generateSchedule2Async(onProgress, options = {}) {
           // bestPool을 그대로(참조로) 나눠주면 여러 카드가 같은 배열을 공유하게 되어, 한
           // 카드에서 페이저로 다른 배치를 골라(pickCandidateASlot의 pool.unshift 등) 배열을
           // 바꾸면 다른 카드의 풀까지 조용히 같이 바뀐다 — 카드마다 독립된 복사본을 준다.
-          cards[g] = { result: best, pool: bestPool.slice() };
+          // 결과도 카드마다 따로 복사한다 — 여러 카드가 같은 best 객체를 가리키면 한 카드의 편집이 다른
+          // 카드에도 보인다. 풀 안의 best 자리는 그 카드의 복사본으로 바꾼다(페이저가 풀에서 현재 결과를 찾는다).
+          const own = {
+            ...best,
+            assigned: best.assigned.slice(),
+            unassignedMembers: best.unassignedMembers.slice(),
+          };
+          cards[g] = {
+            result: own,
+            pool: bestPool.map((r) => (r === best ? own : r)),
+          };
         }
       }
     } finally {

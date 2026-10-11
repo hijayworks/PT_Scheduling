@@ -14,6 +14,7 @@ import {
   state,
   runtime,
   GenerationCancelledError,
+  candidateInputKey,
 } from "../state.js";
 import {
   memberById,
@@ -30,7 +31,10 @@ import {
   scheduleTargetMemberIds,
   unassignedMembersFor,
 } from "../domain.js";
-import { currentExcludedIds } from "../selectionOverride.js";
+import {
+  currentExcludedIds,
+  currentOnceLimitIds,
+} from "../selectionOverride.js";
 import { schedule2TotalIdleMinutes } from "./scheduleCompare.js";
 import { engineWorkerInit, runTasksInWorkers } from "./workerPool.js";
 
@@ -1877,6 +1881,19 @@ export function greedySearchInputs() {
   };
 }
 
+// 그리디 탐색 결과를 다른 호출(후보A의 그리디 기준선)에 그대로 재사용해도 되는지 판정하는 지문. 탐색은 시드
+// 난수로만 정해지므로(워커 수와 무관) 입력(candidateInputKey)·현재 선택(override 포함)·시도 횟수·고정 세션이
+// 같으면 결과도 같다.
+export function greedySearchKey(attempts, pins) {
+  return JSON.stringify([
+    candidateInputKey(),
+    currentExcludedIds(),
+    currentOnceLimitIds(),
+    attempts !== undefined ? attempts : INITIAL_SEARCH_ATTEMPTS,
+    pins,
+  ]);
+}
+
 // workerOptions(createWorker/workerCount/attempts)는 테스트·벤치에서 워커 구성과 시도 횟수를 바꾸기
 // 위한 것이다 — 앱은 넘기지 않는다(buildGreedySearchPool 참고). pins는 재최적화의 고정 세션.
 export async function generateCandidatesAsync(
@@ -1885,6 +1902,7 @@ export async function generateCandidatesAsync(
   pins = [],
 ) {
   const { eligible, eligibleIds, allMemberIds } = greedySearchInputs();
+  const searchKey = greedySearchKey(workerOptions.attempts, pins);
 
   // 그리디 배정은 동점 신청들을 처리하는 순서(jitter)뿐 아니라, 전략마다 회원을 채워나가는
   // 구조 자체(예: 후보B의 sessionCountFirst)가 달라서, 같은 횟수를 시도해도 어떤 전략은
@@ -1929,7 +1947,11 @@ export async function generateCandidatesAsync(
         bestScore = score;
       }
     });
+    // 배열은 복사한다 — 두 전략이 같은 시도를 고르면 후보B·C가 같은 assigned 배열을 공유해, 수동 편집
+    // (assigned[i] 교체)이 다른 카드까지 바꾼다.
     const builtCand = Object.assign({}, best, {
+      assigned: best.assigned.slice(),
+      unassignedMembers: best.unassignedMembers.slice(),
       title: strategy.title,
       desc: strategy.desc,
       strategyIndex: idx,
@@ -1960,9 +1982,13 @@ export async function generateCandidatesAsync(
     return { builtCand, tied };
   });
 
+  // all: 시도 전체(시도 번호 순, 세션 한정) — 조건별 대표 선정(schedule3.js addSearchRepresentatives)이 전략
+  // 기준에서 밀린 결과도 보게 한다. searchKey: greedySearchKey(재사용 판정).
   return {
     built: builtPairs.map((p) => p.builtCand),
     pools: builtPairs.map((p) => p.tied),
+    all: pool,
+    searchKey,
   };
 }
 

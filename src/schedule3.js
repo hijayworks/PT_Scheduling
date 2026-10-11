@@ -70,6 +70,7 @@ import {
   qualityKey,
   formatTradeoff,
   selectReoptimization,
+  representativeAdditions,
 } from "./engine/candidateSelection.js";
 import {
   searchMemberExclusions,
@@ -1023,13 +1024,14 @@ export async function generateSchedule3Async(onProgress, pins = []) {
       pins,
     ),
   );
+  // 후보A의 그리디 기준선은 방금 만든 이 결과와 같은 입력·시드·조건이라 다시 계산하지 않는다(greedyResult).
   const v2Result = await withSelectionOverride(
     excludedIds3,
     onceLimitIds3,
     () =>
       generateSchedule2Async(
         (progress) => onProgress(0.5 + progress * 0.5, "비교·최적화"),
-        { pins },
+        { pins, greedyResult: v1Built },
       ),
   );
   onProgress(1, "후보 정리");
@@ -1039,6 +1041,7 @@ export async function generateSchedule3Async(onProgress, pins = []) {
     poolsBC: v1Built.pools, // strategyIndex -> 동점 풀
     candidateAList: v2Result.map((c) => c.result), // 체인 DP 탐색 그룹 3개
     candidateAPools: v2Result.map((c) => c.pool), // 그룹 인덱스 -> 동점 풀
+    greedyAll: v1Built.all, // 그리디 시도 전체(세션 한정, addSearchRepresentatives용)
   };
 }
 
@@ -1060,6 +1063,15 @@ export const generateProgressText3El = document.getElementById(
 export const GENERATE3_IDLE_LABEL = "수업 스케줄 후보 생성";
 export const extraSearchBtn3El = document.getElementById("extraSearchBtn3");
 export const EXTRA_SEARCH3_LABEL = "미배정 1명 추가안 더 찾기";
+// UI 표현값: 비교표에서 조건을 충족하는 후보가 없는 행의 문구(추가 탐색 상태별, extraSearchStatus).
+const EXTRA_SEARCH_MISSING_TEXT = {
+  notRun: "아직 찾지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다",
+  stale:
+    "추천안이 바뀌어 다시 찾아야 함 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다",
+  incomplete:
+    "탐색을 끝까지 하지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 다시 찾습니다",
+  done: "탐색에서 조건을 충족하는 후보를 찾지 못함",
+};
 
 // 사용자가 옮기거나 맞바꾸거나 교체·확정한 결과인지(사람의 의도가 담겼는지). 수동 편집은 모두
 // 손댄 자리를 confirmedIds에 넣으므로 이것 하나로 판단한다.
@@ -1161,10 +1173,49 @@ function dropInvalidCandidates() {
   return true;
 }
 
-// 회원별 추가 탐색(engine/memberExclusion.js)이 찾은 미배정 1명 추가·절충 후보 슬롯(저장됨, 동점 풀 없음).
+// 추가 후보 슬롯(저장됨, 동점 풀 없음): 본 생성의 그리디 시도 전체에서 고른 조건별 대표(addSearchRepresentatives)와
+// 회원별 추가 탐색(engine/memberExclusion.js)이 찾은 미배정 1명 추가·절충 후보(baseSig: 탐색 기준 추천 배치 서명).
 // 이 필드가 없는 저장분·초기화된 schedule3Result는 빈 목록이다.
 export function extraCandidates() {
   return runtime.schedule3Result.extraCandidates || [];
+}
+
+// 본 생성에서 이미 계산한 그리디 시도 전체(results) 중, 지금 슬롯과 합쳐 같은 선정 정책으로 카드에 보이는 것만
+// 추가 후보 슬롯에 남긴다(candidateSelection.js representativeAdditions, 하드 제약 위반 제외). 후보B·C 최선·동점에
+// 들지 않은 절충 후보(예: 추천 미배정 0명·수업 10·이동 4 대비 1명·9·2)도 대표로 남는다. 엔진을 다시 돌리지 않는다.
+// 반환: 추가한 슬롯 수.
+export function addSearchRepresentatives(results) {
+  const entries = candidatePoolEntries();
+  const seen = new Set(entries.map((e) => layoutSignature(e.result)));
+  const extra = [];
+  (results || []).forEach((r) => {
+    if (!r) return;
+    const result = {
+      assigned: r.assigned.slice(),
+      unassignedMembers: r.unassignedMembers.slice(),
+    };
+    const sig = layoutSignature(result);
+    if (seen.has(sig)) return;
+    seen.add(sig);
+    extra.push({ result, metrics: scheduleMetrics(result) });
+  });
+  const added = representativeAdditions(
+    entries,
+    extra,
+    (r) => !scheduleViolations(r).length,
+  ).map((e) => e.result);
+  runtime.schedule3Result.extraCandidates = extraCandidates().concat(added);
+  return added.length;
+}
+
+// '미배정 1명 추가안 더 찾기' 상태(업무 정책): 추가 탐색은 그때 화면에 보이던 추천 배치(baseSig)를 기준으로 한다.
+// meta: schedule3Result.extraSearch({ baseSig, done }) | undefined, recSig: 지금 보이는 추천 배치 서명.
+//   notRun 찾은 적 없음 / stale 기준 추천안이 바뀜(수정·확정·배치 넘김 등 — 다시 찾아야 함) /
+//   incomplete 같은 기준에서 끝까지 하지 않음(취소·오류) / done 같은 기준에서 끝까지 찾음
+export function extraSearchStatus(meta, recSig) {
+  if (!meta) return "notRun";
+  if (meta.baseSig !== recSig) return "stale";
+  return meta.done ? "done" : "incomplete";
 }
 
 // 다시 생성할 때 슬롯 하나에 둘 결과: 사용자가 손댄 이전 결과는 덮어쓰지 않고 그대로 지킨다.
@@ -1224,8 +1275,31 @@ export function candidatePoolEntries() {
 }
 
 // 카드마다 지금 보고 있는 배치(서명). 카드 키는 자동 카드면 품질 키, 수정 카드면 그 배치 서명.
-// 세션 한정 — 새로고침하면 각 카드의 첫 배치부터 다시 보인다.
+// 세션 한정 — 새로고침하면 각 카드의 첫 배치부터 다시 보인다(추천 카드는 아래 shownVariantIndex 참고).
 const shownVariantByCard = new Map();
+const cardKeyOf = (c) =>
+  c.role === "edited"
+    ? "edited:" + layoutSignature(c.variants[0].result)
+    : qualityKey(c.metrics);
+// 카드에서 지금 보고 있는 배치 번호. 이 세션에서 고른 적이 없으면 첫 배치 — 추천 카드는 추가 탐색 기준 배치
+// (extraSearch.baseSig)가 그 카드에 있으면 그 배치(새로고침해도 탐색한 기준 배치가 그대로 보이게).
+function shownVariantIndex(c) {
+  const meta = runtime.schedule3Result.extraSearch;
+  const sig = shownVariantByCard.has(cardKeyOf(c))
+    ? shownVariantByCard.get(cardKeyOf(c))
+    : c.role === "recommended" && meta
+      ? meta.baseSig
+      : undefined;
+  return Math.max(
+    0,
+    c.variants.findIndex((v) => layoutSignature(v.result) === sig),
+  );
+}
+// 지금 화면에 보이는 추천 배치 entry(없으면 null) — '미배정 1명 추가안 더 찾기'의 기준.
+export function shownRecommendation() {
+  const card = selectCandidates(candidatePoolEntries()).rows[0].card;
+  return card ? card.variants[shownVariantIndex(card)] : null;
+}
 // 추천안과 비교 중인 카드 키(세션 한정). 그 카드가 사라지면 비교 패널도 닫힌다.
 let compareCardKey = null;
 export const candidateCompare3El = document.getElementById("candidateCompare3");
@@ -1283,17 +1357,8 @@ export function renderSchedule3Result() {
 
   let promoted = false;
   const shown = new Map(); // 카드 키 → {card, entry}
-  const keyOf = (c) =>
-    c.role === "edited"
-      ? "edited:" + layoutSignature(c.variants[0].result)
-      : qualityKey(c.metrics);
-  const shownIdx = (c) =>
-    Math.max(
-      0,
-      c.variants.findIndex(
-        (v) => layoutSignature(v.result) === shownVariantByCard.get(keyOf(c)),
-      ),
-    );
+  const keyOf = cardKeyOf;
+  const shownIdx = shownVariantIndex;
   // 추천 카드에서 지금 보고 있는 배치 — 다른 카드의 "새로 미배정된 회원"을 이것과 비교한다.
   const recShown = rows[0].card
     ? rows[0].card.variants[shownIdx(rows[0].card)].result
@@ -1373,12 +1438,13 @@ export function renderSchedule3Result() {
         return cell;
       };
       if (!r.card) {
-        const cell = td(
-          EXCLUSION_ROLES.includes(r.role) &&
-            !runtime.schedule3Result.extraSearchDone
-            ? "아직 찾지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다"
-            : "탐색에서 조건을 충족하는 후보를 찾지 못함",
-        );
+        const status = EXCLUSION_ROLES.includes(r.role)
+          ? extraSearchStatus(
+              runtime.schedule3Result.extraSearch,
+              recShown && layoutSignature(recShown),
+            )
+          : "done";
+        const cell = td(EXTRA_SEARCH_MISSING_TEXT[status]);
         cell.colSpan = 5;
         cell.className = "candidate-summary-missing";
       } else {
@@ -2199,13 +2265,14 @@ export async function runGenerate3() {
       if (s.pool) candidatePools[idx] = s.pool;
     });
     runtime.candidates = keptBC.map((s) => s.candidate);
-    // 회원별 추가 탐색 후보는 새 추천 기준으로 다시 찾아야 한다('미배정 1명 추가안 더 찾기') — 사용자가 손댄
-    // 것만 지킨다. extraSearchDone(추가 탐색을 끝까지 했는지)도 새 결과에는 없다.
+    // 추가 후보 슬롯(본 생성 대표·회원별 추가 탐색)은 새로 고른다 — 사용자가 손댄 것만 지킨다. 추가 탐색
+    // 상태(extraSearch)도 새 결과에는 없다(새 추천 기준으로 다시 찾아야 한다).
     runtime.schedule3Result = {
       candidateAList,
       inputKey,
       extraCandidates: prevExtras.filter(keepsUserEditedSlot),
     };
+    addSearchRepresentatives(result.greedyAll);
     // 생성하는 동안 입력이 바뀌었으면 방금 결과도 맞지 않는다.
     if (dropStaleCandidates()) return;
     renderSchedule3Result();
@@ -2227,16 +2294,21 @@ export async function runGenerate3() {
 
 // '미배정 1명 추가안 더 찾기'(사용자 결정 2026-10-11: 본 후보 생성과 분리해 선택 실행, 넓은 탐색·품질 우선).
 // 추천 후보 기준으로 회원별 추가 탐색(engine/memberExclusion.js)을 돌린다. 회원 하나가 끝날 때마다 찾은 후보를
-// 저장·표시하므로, 취소하거나 오류가 나도 기존 후보와 그때까지 찾은 후보는 남는다. 끝까지 마치면
-// schedule3Result.extraSearchDone을 켠다(비교표가 '아직 찾지 않음'과 '찾지 못함'을 구분). 계측은 콘솔 [회원별 추가 탐색].
+// 저장·표시하므로, 취소하거나 오류가 나도 기존 후보와 그때까지 찾은 후보는 남는다. 기준은 누를 때 화면에 보이는
+// 추천 배치(동점 배치를 넘겨 보고 있으면 그 배치, shownRecommendation)이고, schedule3Result.extraSearch
+// { baseSig, done }에 기록한다. 그사이 기준 추천안이 바뀌면 옛 기준의 결과를 새 추천의 완료로 보지 않는다
+// (extraSearchStatus가 stale). 계측은 콘솔 [회원별 추가 탐색].
 async function runExtraSearch3() {
   if (runtime.generationInProgress) {
     showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
     return;
   }
   if (dropStaleCandidates()) return;
-  const recCard = selectCandidates(candidatePoolEntries()).rows[0].card;
-  if (!recCard) return;
+  const base = shownRecommendation();
+  if (!base) return;
+  const baseSig = layoutSignature(base.result);
+  const meta = { baseSig, done: false };
+  runtime.schedule3Result.extraSearch = meta;
   generateHint3El.textContent = "";
   runtime.generationInProgress = true;
   runtime.generationCancelRequested = false;
@@ -2247,7 +2319,9 @@ async function runExtraSearch3() {
   startGenerationProgress("추가 탐색 중...", "추가 탐색 취소");
   await acquireWakeLock();
   try {
-    const stats = await searchMemberExclusions(recCard.variants[0], {
+    renderSchedule3Result();
+    saveState();
+    const stats = await searchMemberExclusions(base, {
       onMember: (i, n, member) => {
         label =
           "회원별 추가 탐색 " + (i + 1) + "/" + n + "명 (" + member.name + ")";
@@ -2258,7 +2332,9 @@ async function runExtraSearch3() {
         // 탐색 도중 입력이 바뀌었으면 맞지 않는 결과다(끝나면 dropStaleCandidates가 후보를 정리한다).
         if (candidateInputKey() !== inputKey) return;
         const have = new Set(extraCandidates().map(layoutSignature));
-        const fresh = results.filter((r) => !have.has(layoutSignature(r)));
+        const fresh = results
+          .filter((r) => !have.has(layoutSignature(r)))
+          .map((r) => ({ ...r, baseSig }));
         if (!fresh.length) return;
         added += fresh.length;
         runtime.schedule3Result.extraCandidates = extraCandidates().concat(fresh);
@@ -2275,15 +2351,24 @@ async function runExtraSearch3() {
       }),
     );
     if (dropStaleCandidates()) return;
-    runtime.schedule3Result.extraSearchDone = true;
+    // 끝까지 찾은 것은 기준(baseSig)에 대해서다 — 그사이 추천이 바뀌었으면 상태는 stale로 보인다.
+    meta.done = true;
+    const now = shownRecommendation();
+    const sameBase = !!now && layoutSignature(now.result) === baseSig;
     renderSchedule3Result();
     saveState();
-    showToast(
-      added
-        ? "미배정 1명 추가안 " + added + "개를 찾았습니다"
-        : "조건을 충족하는 미배정 1명 추가안을 찾지 못했습니다",
-      added ? "success" : "info",
-    );
+    if (!sameBase)
+      showToast(
+        "탐색 중 추천안이 바뀌어 완료로 처리하지 않았습니다. 바뀐 추천안으로 다시 찾아주세요",
+        "info",
+      );
+    else
+      showToast(
+        added
+          ? "미배정 1명 추가안 " + added + "개를 찾았습니다"
+          : "조건을 충족하는 미배정 1명 추가안을 찾지 못했습니다",
+        added ? "success" : "info",
+      );
   } catch (err) {
     if (err instanceof GenerationCancelledError) {
       showToast(

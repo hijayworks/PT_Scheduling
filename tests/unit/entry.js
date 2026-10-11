@@ -72,6 +72,7 @@ export {
   UNASSIGNED_TRADEOFF_MIN_TRAVEL,
   unassignedTradeoff,
   pickRepresentative,
+  representativeAdditions,
   pickVariants,
 } from "../../src/engine/candidateSelection.js";
 export { setIdleFirst } from "../../src/engine/chainDpCore.js";
@@ -85,6 +86,7 @@ export {
   generateCandidatesAsync,
   buildGreedySearchPool,
   isEligibleRequest,
+  greedySearchKey,
 } from "../../src/engine/greedy.js";
 export {
   parseBulkImportLine,
@@ -120,6 +122,8 @@ export {
   keepsUserEditedSlot,
   candidatePoolEntries,
   extraCandidates,
+  addSearchRepresentatives,
+  extraSearchStatus,
   dropStaleCandidates,
   validateMove,
   prepareSwap,
@@ -135,7 +139,7 @@ export {
   manualUndoStacks,
   MANUAL_UNDO_LIMIT,
 } from "../../src/schedule3.js";
-export { candidateAPools, candidatePools } from "../../src/engine/greedy.js";
+export { candidateAPools, candidatePools, resetCandidateSession } from "../../src/engine/greedy.js";
 export {
   metricDiff,
   assignmentDiff,
