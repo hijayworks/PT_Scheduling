@@ -149,6 +149,21 @@
       selectionOverride = prev;
     }
   }
+  function withSelectionOverrideSync(excludedIds, onceLimitIds, fn) {
+    const prev = selectionOverride;
+    selectionOverride = {
+      excludedIds: excludedIds.slice(),
+      onceLimitIds: onceLimitIds.slice()
+    };
+    try {
+      const out = fn();
+      if (out && typeof out.then === "function")
+        throw new Error("withSelectionOverrideSync는 동기 함수만 감쌀 수 있습니다");
+      return out;
+    } finally {
+      selectionOverride = prev;
+    }
+  }
   function currentExcludedIds() {
     return selectionOverride ? selectionOverride.excludedIds : state.excludedMemberIds3;
   }
@@ -367,6 +382,7 @@
     candidates: [],
     // candidateAList: 체인 DP 탐색 그룹 3개의 결과. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.
     // extraCandidates(선택): 회원별 추가 탐색이 찾은 미배정 1명 추가·절충 후보(schedule3.js extraCandidates).
+    // extraSearchDone(선택): 그 탐색('미배정 1명 추가안 더 찾기')을 이번 생성 결과에 대해 끝까지 마쳤으면 true.
     schedule3Result: { candidateAList: [null, null, null] },
     // 세 생성 버튼 중 하나라도 계산 중이면 true — 동시에 두 계산이 겹치면 selectionOverride가
     // 서로 다른 페이지의 회원 선택 목록을 잘못 참조할 수 있어(withSelectionOverride 참고), 이 플래그로 막는다.
@@ -609,6 +625,8 @@
             runtime.schedule3Result.extraCandidates = extras.filter(
               (r) => r && Array.isArray(r.assigned) && Array.isArray(r.unassignedMembers)
             );
+          if (parsed.schedule3Result.extraSearchDone === true)
+            runtime.schedule3Result.extraSearchDone = true;
         } else {
           const legacyCandidateA = parsed.schedule3Result && parsed.schedule3Result.candidateA || null;
           runtime.schedule3Result = {
@@ -1609,7 +1627,2844 @@
     if (typeof Worker === "undefined" || false)
       return null;
     const url = URL.createObjectURL(
-      new Blob(['(() => {\n  // src/constants.js\n  var DAYS = ["월", "화", "수", "목", "금", "토"];\n  var START_MIN = 12 * 60;\n  var END_MIN = 24 * 60;\n  var SLOT_MIN = 10;\n  var SLOT_COUNT = (END_MIN - START_MIN) / SLOT_MIN;\n  var SESSION_DURATION_MIN = 60;\n  var BREAK_MIN = 0;\n  var ALLOWED_GAP_MIN = 10;\n  var SOLO_TRAVEL_LOCATION_NAMES = ["상암점", "여의도점", "마포점"];\n  var INEFFICIENT_ROUNDTRIP_LOCATION_NAMES = ["마포점", "여의도점", "상암점"];\n  var MAX_SESSIONS_PER_MEMBER = 2;\n  var MAX_TRAVELS_PER_DAY = 2;\n  var FORCE_ONCE_WEIGHT = 1e6;\n  var COVERAGE_WEIGHT_GAP_THRESHOLD = 1e4;\n  var SESSION_DURATION_MIN_2 = 60;\n  var CONSULT_DURATION_MIN_2 = 30;\n  var OLD_SLOT_MIN = 30;\n  var SLOT_SCALE = OLD_SLOT_MIN / SLOT_MIN;\n  var DEFAULT_BUSINESS_START_MIN = 14 * 60;\n  var DEFAULT_BUSINESS_END_MIN = 23 * 60 + 30;\n  var DEFAULT_BUSINESS_START_SLOT = (DEFAULT_BUSINESS_START_MIN - START_MIN) / SLOT_MIN;\n  var DEFAULT_BUSINESS_END_SLOT = (DEFAULT_BUSINESS_END_MIN - START_MIN) / SLOT_MIN;\n\n  // src/utils.js\n  function durationToSlots(min) {\n    return min / SLOT_MIN;\n  }\n  var TIME_SELECT_STEP_SLOTS = 10 / SLOT_MIN;\n\n  // src/selectionOverride.js\n  var selectionOverride = null;\n  async function withSelectionOverride(excludedIds, onceLimitIds, asyncFn) {\n    const prev = selectionOverride;\n    selectionOverride = {\n      excludedIds: excludedIds.slice(),\n      onceLimitIds: onceLimitIds.slice()\n    };\n    try {\n      return await asyncFn();\n    } finally {\n      selectionOverride = prev;\n    }\n  }\n  function currentExcludedIds() {\n    return selectionOverride ? selectionOverride.excludedIds : state.excludedMemberIds3;\n  }\n  function currentOnceLimitIds() {\n    return selectionOverride ? selectionOverride.onceLimitIds : state.onceLimitedMemberIds3;\n  }\n  function currentExcludedIds2() {\n    return selectionOverride ? selectionOverride.excludedIds : state.excludedMemberIds3;\n  }\n  function currentOnceLimitIds2() {\n    return selectionOverride ? selectionOverride.onceLimitIds : state.onceLimitedMemberIds3;\n  }\n\n  // src/domain.js\n  var memberPosIndex = { list: null, posById: /* @__PURE__ */ new Map() };\n  function memberById(id) {\n    const list = state.members;\n    if (memberPosIndex.list === list) {\n      const pos = memberPosIndex.posById.get(id);\n      const m = pos === void 0 ? void 0 : list[pos];\n      if (m && m.id === id) return m;\n    }\n    const found = list.find((m) => m.id === id);\n    if (found) {\n      const posById = /* @__PURE__ */ new Map();\n      list.forEach((m, i) => {\n        if (m && !posById.has(m.id)) posById.set(m.id, i);\n      });\n      memberPosIndex = { list, posById };\n    }\n    return found;\n  }\n  var knownLocationCache = { ids: [], set: /* @__PURE__ */ new Set() };\n  function knownLocationIdSet() {\n    const list = state.locations;\n    const ids = knownLocationCache.ids;\n    let same = ids.length === list.length;\n    for (let i = 0; same && i < list.length; i++) same = list[i].id === ids[i];\n    if (!same) {\n      const nextIds = list.map((l) => l.id);\n      knownLocationCache = { ids: nextIds, set: new Set(nextIds) };\n    }\n    return knownLocationCache.set;\n  }\n  function maxSessionsFor(member) {\n    if (!member) return 1;\n    if (currentOnceLimitIds().includes(member.id)) return 1;\n    return (member.category || "상담") === "상담" ? 1 : MAX_SESSIONS_PER_MEMBER;\n  }\n  function isAdjacentDay(day, days) {\n    for (const d of days) {\n      if (Math.abs(d - day) === 1) return true;\n    }\n    return false;\n  }\n  function memberDayViolation(memberId, day, otherDays) {\n    for (const d of otherDays) if (d === day) return "sameDay";\n    if (isAdjacentDay(day, otherDays) && (state.noConsecutiveDayMemberIds || []).includes(memberId))\n      return "consecutiveDay";\n    return null;\n  }\n  function soloTravelMemberIds() {\n    const soloTravelLocationIds = state.locations.filter((l) => SOLO_TRAVEL_LOCATION_NAMES.includes(l.name)).map((l) => l.id);\n    if (soloTravelLocationIds.length !== SOLO_TRAVEL_LOCATION_NAMES.length)\n      return /* @__PURE__ */ new Set();\n    return new Set(\n      state.members.filter(\n        (m) => soloTravelLocationIds.every((id) => m.locationIds.includes(id))\n      ).map((m) => m.id)\n    );\n  }\n  function breaksSoloTravel(memberId, prevLocId, locId, nextLocId, soloIds) {\n    return soloIds.has(memberId) && !!prevLocId && !!nextLocId && travelMinutes(prevLocId, locId) > 0 && travelMinutes(locId, nextLocId) > 0;\n  }\n  function chainBreaksSoloTravel(chain, soloIds) {\n    for (let i = 1; i + 1 < chain.length; i++) {\n      const cur = chain[i];\n      if (breaksSoloTravel(\n        cur.memberId,\n        chain[i - 1].locationId,\n        cur.locationId,\n        chain[i + 1].locationId,\n        soloIds\n      ))\n        return true;\n    }\n    return false;\n  }\n  function pairKey(idA, idB) {\n    const a = String(idA), b = String(idB);\n    return a < b ? a + "|" + b : b + "|" + a;\n  }\n  function isValidTravelMinutes(v) {\n    return typeof v === "number" && Number.isFinite(v) && v >= 0;\n  }\n  function travelMinutes(locIdA, locIdB) {\n    if (!locIdA || !locIdB || locIdA === locIdB) return 0;\n    const v = state.travelTimes[pairKey(locIdA, locIdB)];\n    return isValidTravelMinutes(v) ? v : Infinity;\n  }\n  function scheduleTargetMemberIds() {\n    const excluded = new Set(currentExcludedIds());\n    const submitted = new Set(state.requests.map((r) => r.memberId));\n    return state.members.filter((m) => submitted.has(m.id) && !excluded.has(m.id)).map((m) => m.id);\n  }\n  function unassignedMembersFor(assigned, targetIds = scheduleTargetMemberIds()) {\n    const assignedIds = new Set(assigned.map((r) => r.memberId));\n    return [...targetIds].filter((id) => !assignedIds.has(id)).map((id) => memberById(id)).filter(Boolean);\n  }\n  function inefficientRoundTripLocationInfo() {\n    const matches = state.locations.filter(\n      (l) => INEFFICIENT_ROUNDTRIP_LOCATION_NAMES.includes(l.name)\n    );\n    if (matches.length !== INEFFICIENT_ROUNDTRIP_LOCATION_NAMES.length)\n      return null;\n    const idByName = new Map(matches.map((l) => [l.name, l.id]));\n    return {\n      ids: new Set(idByName.values()),\n      mapoId: idByName.get("마포점"),\n      yeouidoId: idByName.get("여의도점")\n    };\n  }\n  function roundTripOriginLoc(start, prevOf, locOf) {\n    const loc = locOf(start);\n    let n = prevOf(start);\n    while (n != null && locOf(n) === loc) n = prevOf(n);\n    return n == null ? null : locOf(n);\n  }\n  function isInefficientRoundTrip(info, locA, locB, locC) {\n    if (!info || locA == null || locB == null || locC == null) return false;\n    if (locA !== locC || locA === locB) return false;\n    if (!info.ids.has(locA) || !info.ids.has(locB)) return false;\n    const isMapoYeouido = locA === info.mapoId && locB === info.yeouidoId || locA === info.yeouidoId && locB === info.mapoId;\n    return !isMapoYeouido;\n  }\n\n  // src/state.js\n  var CURRENT_SCHEMA_VERSION = 3;\n  var state = {\n    schemaVersion: CURRENT_SCHEMA_VERSION,\n    availableCells: [],\n    // array of "day-slot" strings\n    locations: [],\n    // {id, name, color} — color는 LOCATION_PALETTE의 색(표시 전용)\n    travelTimes: {},\n    // { "locIdA|locIdB": minutes }\n    members: [],\n    // {id, name, locationIds: [locId, ...]}\n    requests: [],\n    // {id, memberId, locationId, day, startSlot, duration}\n    // "수업 스케줄 생성3" 전용 설정 (생성1·생성2 엔진을 withSelectionOverride로 재사용해 후보 3개를 한 화면에 보여줌)\n    onceLimitedMemberIds3: [],\n    // 스케줄 생성3에서 최대 1회만 배정되어야 하는 회원 id 목록\n    excludedMemberIds3: [],\n    // 스케줄 생성3에서 후보 생성 시 아예 제외할 회원 id 목록\n    // "수업 스케줄 생성"의 연속 요일 배정 제외 회원 id 목록 — 두 수업 사이에 최소 하루를 둔다\n    // (정책: domain.js의 memberDayViolation). 엔진이 state에서 바로 읽는다(selectionOverride 대상 아님).\n    noConsecutiveDayMemberIds: []\n  };\n  var runtime = {\n    availableCells: /* @__PURE__ */ new Set(),\n    // 후보 풀 저장소(원본 슬롯). 화면의 카드·역할은 여기서 매번 파생한다(schedule3.js의\n    // candidatePoolEntries → candidateSelection.js의 selectCandidates) — 카드 구조는 저장하지 않는다.\n    // candidates: 그리디 전략 0(인원 최대)·전략 1(수업 횟수 최대)의 결과.\n    candidates: [],\n    // candidateAList: 체인 DP 탐색 그룹 3개의 결과. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.\n    // extraCandidates(선택): 회원별 추가 탐색이 찾은 미배정 1명 추가·절충 후보(schedule3.js extraCandidates).\n    schedule3Result: { candidateAList: [null, null, null] },\n    // 세 생성 버튼 중 하나라도 계산 중이면 true — 동시에 두 계산이 겹치면 selectionOverride가\n    // 서로 다른 페이지의 회원 선택 목록을 잘못 참조할 수 있어(withSelectionOverride 참고), 이 플래그로 막는다.\n    generationInProgress: false,\n    // 생성2/생성3의 다듬기 파이프라인(담금질 기법 등)은 수 초~수십 초가 걸릴 수 있어, 사용자가\n    // "취소"를 누르면 다음 양보 지점(yieldToUI 직후)에서 즉시 멈출 수 있도록 이 플래그로 신호를\n    // 보낸다. 실제 중단은 GenerationCancelledError를 던져 호출 스택을 그대로 타고 올라가\n    // 각 생성 버튼 핸들러의 catch에서 잡는 방식으로 처리한다.\n    generationCancelRequested: false,\n    currentPage: "settings",\n    // 백업 복원 직후 reload()할 때 beforeunload/visibilitychange 핸들러가 옛 메모리 상태로\n    // saveState()를 한 번 더 실행해 방금 덮어쓴 localStorage를 되돌리지 않도록 막는 플래그.\n    suppressAutosave: false,\n    storageError: null,\n    // 저장분이 있는데 읽지 못했으면(미래 schemaVersion·손상) 기본값으로 덮어쓰지 않도록 저장을 막는다.\n    loadError: null,\n    // 재최적화 실행 계측(schedule3.js logReoptimize): 세션 한정, 저장하지 않는다.\n    reoptimizeLog: []\n  };\n  var GenerationCancelledError = class extends Error {\n  };\n  var wakeLockSentinel = null;\n  async function acquireWakeLock() {\n    if (!("wakeLock" in navigator)) return;\n    try {\n      wakeLockSentinel = await navigator.wakeLock.request("screen");\n    } catch {\n      wakeLockSentinel = null;\n    }\n  }\n  if (typeof document !== "undefined") {\n    document.addEventListener("visibilitychange", () => {\n      if (document.visibilityState === "visible" && runtime.generationInProgress) {\n        acquireWakeLock();\n      }\n    });\n  }\n  var LEGACY_START_MIN = 13 * 60;\n\n  // src/engine/pins.js\n  function pinKey(r) {\n    return r.memberId + "|" + r.day + "|" + r.startSlot + "|" + r.locationId;\n  }\n\n  // src/engine/scheduleCompare.js\n  function schedule2TotalIdleMinutes(assigned) {\n    let idle = 0;\n    const byDay = /* @__PURE__ */ new Map();\n    assigned.forEach((r) => {\n      if (!byDay.has(r.day)) byDay.set(r.day, []);\n      byDay.get(r.day).push(r);\n    });\n    byDay.forEach((reqs) => {\n      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);\n      for (let i = 1; i < sorted.length; i++) {\n        const prev = sorted[i - 1], cur = sorted[i];\n        const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;\n        const needMin = requiredGapMin2(prev.locationId, cur.locationId);\n        idle += Math.max(0, gapMin - needMin);\n      }\n    });\n    return idle;\n  }\n\n  // src/engine/greedy.js\n  function candidateLocationsFor(memberId) {\n    const member = memberById(memberId);\n    if (!member || !Array.isArray(member.locationIds)) return [];\n    const knownLocationIds = knownLocationIdSet();\n    return member.locationIds.filter((id) => knownLocationIds.has(id));\n  }\n  function candidateLocationsForRequest(req) {\n    const excluded = req.excludedLocationIds || [];\n    const base = candidateLocationsFor(req.memberId).filter(\n      (id) => id !== null && !excluded.includes(id)\n    );\n    const knownLocationIds = knownLocationIdSet();\n    const extra = (req.extraLocationIds || []).filter(\n      (id) => knownLocationIds.has(id) && !base.includes(id)\n    );\n    return base.concat(extra);\n  }\n  function requiredGapMin(locA, locB) {\n    const raw = Math.max(BREAK_MIN, travelMinutes(locA, locB));\n    return Math.ceil(raw / SLOT_MIN) * SLOT_MIN;\n  }\n  var DAYTIME_END_MIN = 18 * 60;\n  function isDaytimeStart(cand) {\n    return START_MIN + cand.startSlot * SLOT_MIN < DAYTIME_END_MIN;\n  }\n  function isHalfHourStart(cand) {\n    return (START_MIN + cand.startSlot * SLOT_MIN) % 30 === 0;\n  }\n  function dailyTravelCount(chain) {\n    let count = 0;\n    for (let i = 1; i < chain.length; i++) {\n      if (travelMinutes(chain[i - 1].locationId, chain[i].locationId) > 0)\n        count++;\n    }\n    return count;\n  }\n  function dayChainViolation(chain, soloIds) {\n    for (let i = 1; i < chain.length; i++) {\n      const prev = chain[i - 1], cur = chain[i];\n      if ((cur.startSlot - prev.end) * SLOT_MIN < requiredGapMin(prev.locationId, cur.locationId))\n        return "gap";\n    }\n    if (dailyTravelCount(chain) > MAX_TRAVELS_PER_DAY) return "dailyTravel";\n    if (chainBreaksSoloTravel(chain, soloIds)) return "soloTravel";\n    return null;\n  }\n  function dailyInefficientMoveCount(chain, info) {\n    info = info === void 0 ? inefficientRoundTripLocationInfo() : info;\n    const locs = [];\n    chain.forEach((s) => {\n      if (locs[locs.length - 1] !== s.locationId) locs.push(s.locationId);\n    });\n    let count = 0;\n    for (let i = 1; i < locs.length - 1; i++) {\n      if (isInefficientRoundTrip(info, locs[i - 1], locs[i], locs[i + 1]))\n        count++;\n    }\n    return count;\n  }\n  function greedyAssign(eligibleReqs, options, pinned) {\n    options = options || {};\n    pinned = pinned || [];\n    const travelFirst = !!options.travelFirst;\n    const preferDaytime = !!options.preferDaytime;\n    const groupByLocation = !!options.groupByLocation;\n    const minimizeUnassigned = !!options.minimizeUnassigned;\n    const sessionCountFirst = !!options.sessionCountFirst;\n    const pinnedLocationDay = options.pinnedLocationDay || null;\n    const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY;\n    const maxTravelsPerWeek = options.maxTravelsPerWeek || null;\n    const travelCountOnly = !!options.travelCountOnly;\n    const forceOnceMemberIds = options.forceOnceMemberIds ? new Set(options.forceOnceMemberIds) : null;\n    const externalDayOrder = options.stage1DayOrder || null;\n    const forbidInefficient = !!options.forbidInefficient;\n    const soloTravelIds = soloTravelMemberIds();\n    const ineffInfo = inefficientRoundTripLocationInfo();\n    const priorityRank = new Map(eligibleReqs.map((r, i) => [r.id, i]));\n    const byDay = /* @__PURE__ */ new Map();\n    eligibleReqs.forEach((r) => {\n      if (!byDay.has(r.day)) byDay.set(r.day, []);\n      byDay.get(r.day).push(r);\n    });\n    const days = [...byDay.keys()].sort((a, b) => a - b);\n    const allLocIds = state.locations.map((l) => l.id).concat([null]);\n    const memberIdsByDay = /* @__PURE__ */ new Map();\n    function allMemberIdsForDay(day) {\n      let ids = memberIdsByDay.get(day);\n      if (!ids) {\n        ids = new Set((byDay.get(day) || []).map((r) => r.memberId));\n        memberIdsByDay.set(day, ids);\n      }\n      return ids;\n    }\n    const locationsByReq = /* @__PURE__ */ new Map();\n    function locationsForReq(r) {\n      let locs = locationsByReq.get(r);\n      if (!locs) {\n        locs = candidateLocationsForRequest(r);\n        locationsByReq.set(r, locs);\n      }\n      return locs;\n    }\n    const locIndexOf = new Map(allLocIds.map((id, i) => [id, i]));\n    const LOCS = allLocIds.length;\n    const needOfPair = new Array(LOCS * LOCS), travelOfPair = new Array(LOCS * LOCS);\n    allLocIds.forEach(\n      (a, i) => allLocIds.forEach((b, j) => {\n        needOfPair[i * LOCS + j] = requiredGapMin(a, b);\n        travelOfPair[i * LOCS + j] = travelMinutes(a, b);\n      })\n    );\n    const memberBitOf = /* @__PURE__ */ new Map();\n    eligibleReqs.forEach((r) => {\n      if (!memberBitOf.has(r.memberId)) memberBitOf.set(r.memberId, memberBitOf.size);\n    });\n    const MEMBER_WORDS = Math.max(1, Math.ceil(memberBitOf.size / 32));\n    function pairNeed(predIdx, predLoc, locId, locIdx) {\n      return locIdx === void 0 ? requiredGapMin(predLoc, locId) : needOfPair[predIdx * LOCS + locIdx];\n    }\n    function pairTravel(predIdx, predLoc, locId, locIdx) {\n      return locIdx === void 0 ? travelMinutes(predLoc, locId) : travelOfPair[predIdx * LOCS + locIdx];\n    }\n    function runPass(stage1Order, allowGapMin) {\n      const assigned = [];\n      const memberDays = /* @__PURE__ */ new Map();\n      const chainByDay = /* @__PURE__ */ new Map();\n      function withinCaps(memberId, day) {\n        const usedDays = memberDays.get(memberId);\n        if (!usedDays) return true;\n        if (memberDayViolation(memberId, day, usedDays)) return false;\n        if (usedDays.size >= maxSessionsFor(memberById(memberId)))\n          return false;\n        return true;\n      }\n      function commit(day, located) {\n        assigned.push(located);\n        if (!memberDays.has(located.memberId))\n          memberDays.set(located.memberId, /* @__PURE__ */ new Set());\n        memberDays.get(located.memberId).add(day);\n        if (!chainByDay.has(day)) chainByDay.set(day, []);\n        chainByDay.get(day).push(located);\n      }\n      function weeklyTravelUsedExcluding(day) {\n        let total = 0;\n        chainByDay.forEach((chain, d) => {\n          if (d === day) return;\n          total += dailyTravelCount(chain);\n        });\n        return total;\n      }\n      function buildBestChain(day, eligibleMemberIds, weightFn, endBefore, onlyLocationId, coveragePriority) {\n        weightFn = weightFn || (() => 1);\n        const otherDaysTravelUsed = maxTravelsPerWeek != null ? weeklyTravelUsedExcluding(day) : 0;\n        const cands = (byDay.get(day) || []).filter(\n          (r) => eligibleMemberIds.has(r.memberId) && (!endBefore || r.startSlot + durationToSlots(r.duration) <= endBefore.slot)\n        );\n        const nodes = [];\n        cands.forEach((cand) => {\n          const memberLocs = locationsForReq(cand);\n          const locs = onlyLocationId ? memberLocs.includes(onlyLocationId) ? [onlyLocationId] : [] : memberLocs;\n          locs.forEach((locId) => {\n            nodes.push({\n              cand,\n              locationId: locId,\n              end: cand.startSlot + durationToSlots(cand.duration)\n            });\n          });\n        });\n        nodes.sort(\n          (a, b) => a.end - b.end || priorityRank.get(a.cand.id) - priorityRank.get(b.cand.id)\n        );\n        const index = /* @__PURE__ */ new Map();\n        function indexList(end, locId) {\n          const byEnd = index.get(locId);\n          return byEnd && byEnd.get(end);\n        }\n        function timeCostOf(n) {\n          return n.travelMinutesSum + n.idleMinutesSum;\n        }\n        function addToIndex(node) {\n          let byEnd = index.get(node.locationId);\n          if (!byEnd) {\n            byEnd = /* @__PURE__ */ new Map();\n            index.set(node.locationId, byEnd);\n          }\n          let list = byEnd.get(node.end);\n          if (!list) {\n            list = [];\n            byEnd.set(node.end, list);\n          }\n          list.push(node);\n          list.sort(\n            (a, b) => travelFirst ? a.travelCount - b.travelCount || b.dp - a.dp || a.ineffCount - b.ineffCount || (travelCountOnly ? 0 : a.travelMinutesSum - b.travelMinutesSum || timeCostOf(a) - timeCostOf(b) || b.alignedScore - a.alignedScore || a.soloSlackPenalty - b.soloSlackPenalty) || (preferDaytime ? b.daytimeScore - a.daytimeScore : 0) || (groupByLocation ? b.groupScore - a.groupScore : 0) : (coveragePriority || Math.abs(a.dp - b.dp) >= COVERAGE_WEIGHT_GAP_THRESHOLD ? b.dp - a.dp || a.ineffCount - b.ineffCount : a.ineffCount - b.ineffCount || b.dp - a.dp) || a.travelCount - b.travelCount || (travelCountOnly ? 0 : a.travelMinutesSum - b.travelMinutesSum || timeCostOf(a) - timeCostOf(b) || b.alignedScore - a.alignedScore || a.soloSlackPenalty - b.soloSlackPenalty) || (preferDaytime ? b.daytimeScore - a.daytimeScore : 0) || (groupByLocation ? b.groupScore - a.groupScore : 0)\n          );\n        }\n        function chainScore(node) {\n          let s = 0, n = node;\n          while (n) {\n            s += priorityRank.get(n.cand.id);\n            n = n.prev;\n          }\n          return s;\n        }\n        function isBetterPair(dpA, countA, ineffA, travelA, timeCostA, alignedA, slackPenA, daytimeA, groupA, dpB, countB, ineffB, travelB, timeCostB, alignedB, slackPenB, daytimeB, groupB) {\n          const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;\n          if (travelFirst) {\n            if (countA !== countB) return countA < countB;\n            if (dpA !== dpB) return dpA > dpB;\n            if (ineffA !== ineffB) return ineffA < ineffB;\n          } else if (coveragePriority || hardWeightGap) {\n            if (dpA !== dpB) return dpA > dpB;\n            if (ineffA !== ineffB) return ineffA < ineffB;\n            if (countA !== countB) return countA < countB;\n          } else {\n            if (ineffA !== ineffB) return ineffA < ineffB;\n            if (dpA !== dpB) return dpA > dpB;\n            if (countA !== countB) return countA < countB;\n          }\n          if (travelCountOnly) return false;\n          if (travelA !== travelB) return travelA < travelB;\n          if (timeCostA !== timeCostB) return timeCostA < timeCostB;\n          if (alignedA !== alignedB) return alignedA > alignedB;\n          if (slackPenA !== slackPenB) return slackPenA < slackPenB;\n          if (preferDaytime && daytimeA !== daytimeB) return daytimeA > daytimeB;\n          if (groupByLocation && groupA !== groupB) return groupA > groupB;\n          return false;\n        }\n        const usedBits = new Uint32Array(nodes.length * MEMBER_WORDS);\n        let best = null;\n        nodes.forEach((node, nodeIdx) => {\n          const memberBit = memberBitOf.get(node.cand.memberId);\n          const memberWord = memberBit >>> 5, memberMask = 1 << (memberBit & 31);\n          node.bitBase = nodeIdx * MEMBER_WORDS;\n          let bestPrev = null, bestPrevDp = -Infinity, bestResultTravelOnly = Infinity, bestResultTimeCost = Infinity, bestResultAligned = -Infinity, bestResultSlackPen = Infinity, bestResultDaytime = -Infinity, bestResultGroup = -Infinity, bestTravelCount = Infinity, bestResultIneffCount = Infinity, bestTransitionMin = 0, bestSlackMin = 0;\n          const nodeLocIdx = locIndexOf.get(node.locationId);\n          allLocIds.forEach((predLoc, predIdx) => {\n            const need = pairNeed(predIdx, predLoc, node.locationId, nodeLocIdx);\n            const transitionMin = pairTravel(\n              predIdx,\n              predLoc,\n              node.locationId,\n              nodeLocIdx\n            );\n            for (let slackMin = 0; slackMin <= allowGapMin; slackMin += SLOT_MIN) {\n              const reqEnd2 = node.cand.startSlot - (need + slackMin) / SLOT_MIN;\n              const list = indexList(reqEnd2, predLoc);\n              if (!list) continue;\n              for (const prevNode of list) {\n                if (usedBits[prevNode.bitBase + memberWord] & memberMask) continue;\n                if (soloTravelIds.has(prevNode.cand.memberId) && prevNode.arrivedViaTravel && transitionMin > 0)\n                  continue;\n                const tc = prevNode.travelCount + (transitionMin > 0 ? 1 : 0);\n                if (tc > maxTravelsPerDay) continue;\n                if (maxTravelsPerWeek != null && otherDaysTravelUsed + tc > maxTravelsPerWeek)\n                  continue;\n                const resultTravelOnly = prevNode.travelMinutesSum + transitionMin;\n                const resultTimeCost = resultTravelOnly + prevNode.idleMinutesSum + slackMin;\n                const slackPenalty = soloTravelIds.has(node.cand.memberId) && transitionMin === 0 && slackMin > 0 ? slackMin : 0;\n                const resultSlackPen = prevNode.soloSlackPenalty + slackPenalty;\n                const resultIneffCount = prevNode.ineffCount + (isInefficientRoundTrip(\n                  ineffInfo,\n                  prevNode.twoBackLoc,\n                  prevNode.locationId,\n                  node.locationId\n                ) ? 1 : 0);\n                if (forbidInefficient && resultIneffCount > prevNode.ineffCount)\n                  continue;\n                if (!bestPrev || isBetterPair(\n                  prevNode.dp,\n                  tc,\n                  resultIneffCount,\n                  resultTravelOnly,\n                  resultTimeCost,\n                  prevNode.alignedScore,\n                  resultSlackPen,\n                  prevNode.daytimeScore,\n                  prevNode.groupScore,\n                  bestPrevDp,\n                  bestTravelCount,\n                  bestResultIneffCount,\n                  bestResultTravelOnly,\n                  bestResultTimeCost,\n                  bestResultAligned,\n                  bestResultSlackPen,\n                  bestResultDaytime,\n                  bestResultGroup\n                )) {\n                  bestPrevDp = prevNode.dp;\n                  bestPrev = prevNode;\n                  bestTravelCount = tc;\n                  bestResultIneffCount = resultIneffCount;\n                  bestResultTravelOnly = resultTravelOnly;\n                  bestResultTimeCost = resultTimeCost;\n                  bestTransitionMin = transitionMin;\n                  bestSlackMin = slackMin;\n                  bestResultAligned = prevNode.alignedScore;\n                  bestResultSlackPen = resultSlackPen;\n                  bestResultDaytime = prevNode.daytimeScore;\n                  bestResultGroup = prevNode.groupScore;\n                }\n                break;\n              }\n            }\n          });\n          const daytimeBonus = isDaytimeStart(node.cand) ? 1 : 0;\n          if (bestPrev) {\n            node.dp = bestPrev.dp + weightFn(node.cand.memberId);\n            node.prev = bestPrev;\n            node.travelCount = bestTravelCount;\n            node.ineffCount = bestResultIneffCount;\n            node.travelMinutesSum = bestPrev.travelMinutesSum + bestTransitionMin;\n            node.idleMinutesSum = bestPrev.idleMinutesSum + bestSlackMin;\n            node.alignedScore = bestPrev.alignedScore;\n            node.soloSlackPenalty = bestResultSlackPen;\n            node.daytimeScore = bestPrev.daytimeScore + daytimeBonus;\n            node.groupScore = bestPrev.groupScore + (bestPrev.locationId === node.locationId ? 1 : 0);\n            usedBits.copyWithin(\n              node.bitBase,\n              bestPrev.bitBase,\n              bestPrev.bitBase + MEMBER_WORDS\n            );\n            node.arrivedViaTravel = bestPrev.locationId !== node.locationId;\n          } else {\n            node.dp = weightFn(node.cand.memberId);\n            node.prev = null;\n            node.travelCount = 0;\n            node.ineffCount = 0;\n            node.travelMinutesSum = 0;\n            node.idleMinutesSum = 0;\n            node.alignedScore = isHalfHourStart(node.cand) ? 1 : 0;\n            node.soloSlackPenalty = 0;\n            node.daytimeScore = daytimeBonus;\n            node.groupScore = 0;\n            node.arrivedViaTravel = false;\n          }\n          usedBits[node.bitBase + memberWord] |= memberMask;\n          node.twoBackLoc = roundTripOriginLoc(\n            node,\n            (n) => n.prev,\n            (n) => n.locationId\n          );\n          if (node.dp > -Infinity) {\n            addToIndex(node);\n            const nodeTimeCost = timeCostOf(node);\n            const bestTimeCost = best ? timeCostOf(best) : null;\n            const tie = best && node.dp === best.dp && node.ineffCount === best.ineffCount && node.travelCount === best.travelCount && (travelCountOnly || node.travelMinutesSum === best.travelMinutesSum) && (travelCountOnly || nodeTimeCost === bestTimeCost) && (travelCountOnly || node.alignedScore === best.alignedScore) && (travelCountOnly || node.soloSlackPenalty === best.soloSlackPenalty) && (!preferDaytime || node.daytimeScore === best.daytimeScore) && (!groupByLocation || node.groupScore === best.groupScore);\n            if (!best || isBetterPair(\n              node.dp,\n              node.travelCount,\n              node.ineffCount,\n              node.travelMinutesSum,\n              nodeTimeCost,\n              node.alignedScore,\n              node.soloSlackPenalty,\n              node.daytimeScore,\n              node.groupScore,\n              best.dp,\n              best.travelCount,\n              best.ineffCount,\n              best.travelMinutesSum,\n              bestTimeCost,\n              best.alignedScore,\n              best.soloSlackPenalty,\n              best.daytimeScore,\n              best.groupScore\n            ) || tie && chainScore(node) < chainScore(best))\n              best = node;\n          }\n        });\n        let chosen = best;\n        if (endBefore) {\n          chosen = null;\n          allLocIds.forEach((loc) => {\n            const need = requiredGapMin(loc, endBefore.locationId);\n            const transitionMin = travelMinutes(loc, endBefore.locationId);\n            if (endBefore.noTravelIn && transitionMin > 0) return;\n            for (let slackMin = 0; slackMin <= allowGapMin; slackMin += SLOT_MIN) {\n              const gapSlots = (need + slackMin) / SLOT_MIN;\n              const list = indexList(endBefore.slot - gapSlots, loc);\n              if (!list || list.length === 0) continue;\n              const node = list.find(\n                (n) => !(soloTravelIds.has(n.cand.memberId) && n.arrivedViaTravel && transitionMin > 0)\n              );\n              if (!node) continue;\n              const nodeIneffCount = node.ineffCount + (isInefficientRoundTrip(\n                ineffInfo,\n                node.twoBackLoc,\n                node.locationId,\n                endBefore.locationId\n              ) ? 1 : 0);\n              if (forbidInefficient && nodeIneffCount > node.ineffCount) continue;\n              const nodeTimeCost = timeCostOf(node);\n              const chosenTimeCost = chosen ? timeCostOf(chosen) : null;\n              if (!chosen || isBetterPair(\n                node.dp,\n                node.travelCount,\n                nodeIneffCount,\n                node.travelMinutesSum,\n                nodeTimeCost,\n                node.alignedScore,\n                node.soloSlackPenalty,\n                node.daytimeScore,\n                node.groupScore,\n                chosen.dp,\n                chosen.travelCount,\n                chosen.ineffCount,\n                chosen.travelMinutesSum,\n                chosenTimeCost,\n                chosen.alignedScore,\n                chosen.soloSlackPenalty,\n                chosen.daytimeScore,\n                chosen.groupScore\n              )) {\n                chosen = node;\n              }\n            }\n          });\n        }\n        if (!chosen) return [];\n        const chain = [];\n        let cur = chosen;\n        while (cur) {\n          chain.unshift({\n            id: cur.cand.id,\n            memberId: cur.cand.memberId,\n            day,\n            startSlot: cur.cand.startSlot,\n            duration: cur.cand.duration,\n            locationId: cur.locationId\n          });\n          cur = cur.prev;\n        }\n        return chain;\n      }\n      function extendExistingChain(day, eligibleMemberIds, coveragePriority) {\n        let chain = chainByDay.get(day) || [];\n        if (chain.length === 0) return;\n        const usedMembers = new Set(chain.map((s) => s.memberId));\n        const dayCands = byDay.get(day) || [];\n        let extending = true;\n        while (extending) {\n          extending = false;\n          const chainEnd = chain[chain.length - 1];\n          const chainTwoBackLoc = roundTripOriginLoc(\n            chain.length - 1,\n            (i) => i > 0 ? i - 1 : null,\n            (i) => chain[i].locationId\n          );\n          const chainEndArrivedViaTravel = chain.length >= 2 && chain[chain.length - 2].locationId !== chainEnd.locationId;\n          const chainEndIsSoloTravelMember = soloTravelIds.has(chainEnd.memberId) && chainEndArrivedViaTravel;\n          let bestCand = null, bestLocated = null, bestCost = Infinity;\n          dayCands.forEach((cand) => {\n            if (!eligibleMemberIds.has(cand.memberId) || usedMembers.has(cand.memberId))\n              return;\n            let bestLoc = null;\n            locationsForReq(cand).forEach((locId) => {\n              const need = requiredGapMin(chainEnd.locationId, locId);\n              const actual = (cand.startSlot - (chainEnd.startSlot + durationToSlots(chainEnd.duration))) * SLOT_MIN;\n              if (actual < need || actual > need + allowGapMin) return;\n              const cost = travelMinutes(chainEnd.locationId, locId);\n              if (chainEndIsSoloTravelMember && cost > 0) return;\n              if ((forbidInefficient || !coveragePriority) && isInefficientRoundTrip(\n                ineffInfo,\n                chainTwoBackLoc,\n                chainEnd.locationId,\n                locId\n              ))\n                return;\n              if (!bestLoc || cost < bestLoc.cost) bestLoc = { locId, cost };\n            });\n            if (!bestLoc) return;\n            if (travelFirst && bestLoc.cost > 0) return;\n            if (!bestCand || bestLoc.cost < bestCost || bestLoc.cost === bestCost && priorityRank.get(cand.id) < priorityRank.get(bestCand.id)) {\n              bestCand = cand;\n              bestCost = bestLoc.cost;\n              bestLocated = {\n                id: cand.id,\n                memberId: cand.memberId,\n                day,\n                startSlot: cand.startSlot,\n                duration: cand.duration,\n                locationId: bestLoc.locId\n              };\n            }\n          });\n          if (bestLocated) {\n            const projectedChain = [...chain, bestLocated];\n            if (dailyTravelCount(projectedChain) > maxTravelsPerDay) break;\n            if (maxTravelsPerWeek != null && weeklyTravelUsedExcluding(day) + dailyTravelCount(projectedChain) > maxTravelsPerWeek)\n              break;\n            commit(day, bestLocated);\n            chain = chainByDay.get(day);\n            usedMembers.add(bestCand.memberId);\n            extending = true;\n          }\n        }\n      }\n      function endBeforeOf(chain) {\n        const first = chain[0];\n        const second = chain[1];\n        return {\n          slot: first.startSlot,\n          locationId: first.locationId,\n          noTravelIn: !!second && soloTravelIds.has(first.memberId) && travelMinutes(first.locationId, second.locationId) > 0\n        };\n      }\n      function extendChainBackward(day, eligibleMemberIds, weightFn, coveragePriority) {\n        const chain = chainByDay.get(day) || [];\n        if (chain.length === 0) return;\n        const usedMembers = new Set(chain.map((s) => s.memberId));\n        const remaining = new Set(\n          [...eligibleMemberIds].filter((id) => !usedMembers.has(id))\n        );\n        if (remaining.size === 0) return;\n        const frontChain = buildBestChain(\n          day,\n          remaining,\n          weightFn,\n          endBeforeOf(chain),\n          null,\n          coveragePriority\n        );\n        if (frontChain.length === 0) return;\n        const combined = [...frontChain, ...chain];\n        if (dailyTravelCount(combined) > maxTravelsPerDay) return;\n        if (forbidInefficient && dailyInefficientMoveCount(combined, ineffInfo) > dailyInefficientMoveCount(chain, ineffInfo))\n          return;\n        if (maxTravelsPerWeek != null && weeklyTravelUsedExcluding(day) + dailyTravelCount(combined) > maxTravelsPerWeek)\n          return;\n        frontChain.forEach((s) => {\n          assigned.push(s);\n          if (!memberDays.has(s.memberId)) memberDays.set(s.memberId, /* @__PURE__ */ new Set());\n          memberDays.get(s.memberId).add(day);\n        });\n        chainByDay.set(day, combined);\n      }\n      function fillDay(day, eligibleMemberIds, weightFn, coveragePriority) {\n        if ((chainByDay.get(day) || []).length > 0) {\n          extendExistingChain(day, eligibleMemberIds, coveragePriority);\n          extendChainBackward(day, eligibleMemberIds, weightFn, coveragePriority);\n        } else {\n          buildBestChain(\n            day,\n            eligibleMemberIds,\n            weightFn,\n            null,\n            null,\n            coveragePriority\n          ).forEach((s) => commit(day, s));\n        }\n      }\n      function fairnessWeight(memberId) {\n        if (forceOnceMemberIds && forceOnceMemberIds.has(memberId)) {\n          const usedDays = memberDays.get(memberId);\n          if (!usedDays || usedDays.size === 0) return FORCE_ONCE_WEIGHT;\n        }\n        return 1;\n      }\n      if (pinned.length > 0) {\n        [...pinned].sort((a, b) => a.day - b.day || a.startSlot - b.startSlot).forEach((p) => commit(p.day, { ...p }));\n        [...new Set(pinned.map((p) => p.day))].forEach(\n          (day) => extendChainBackward(\n            day,\n            new Set(\n              [...allMemberIdsForDay(day)].filter((id) => withinCaps(id, day))\n            ),\n            fairnessWeight\n          )\n        );\n      }\n      if (pinnedLocationDay && !pinned.some((p) => p.day === pinnedLocationDay.day) && (byDay.get(pinnedLocationDay.day) || []).length > 0) {\n        buildBestChain(\n          pinnedLocationDay.day,\n          new Set(\n            [...allMemberIdsForDay(pinnedLocationDay.day)].filter(\n              (id) => withinCaps(id, pinnedLocationDay.day)\n            )\n          ),\n          fairnessWeight,\n          null,\n          pinnedLocationDay.locationId\n        ).forEach((s) => commit(pinnedLocationDay.day, s));\n      }\n      stage1Order.forEach((day) => {\n        const elig = new Set(\n          [...allMemberIdsForDay(day)].filter((id) => {\n            if (!sessionCountFirst) {\n              const usedDays = memberDays.get(id);\n              if (usedDays && usedDays.size >= 1) return false;\n            }\n            return withinCaps(id, day);\n          })\n        );\n        fillDay(day, elig, fairnessWeight, !sessionCountFirst);\n      });\n      days.forEach((day) => {\n        const elig = new Set(\n          [...allMemberIdsForDay(day)].filter((id) => {\n            if (!withinCaps(id, day)) return false;\n            const usedDays = memberDays.get(id);\n            if (usedDays && isAdjacentDay(day, usedDays)) return false;\n            return true;\n          })\n        );\n        fillDay(day, elig);\n      });\n      days.forEach((day) => {\n        const elig = new Set(\n          [...allMemberIdsForDay(day)].filter((id) => withinCaps(id, day))\n        );\n        fillDay(day, elig);\n      });\n      return assigned;\n    }\n    function runWithGapPolicy(allowGapMin) {\n      const naturalResult = runPass(days, allowGapMin);\n      if (!minimizeUnassigned && !externalDayOrder) return naturalResult;\n      let best = naturalResult;\n      let bestMemberCount = new Set(best.map((r) => r.memberId)).size;\n      function consider(order) {\n        const attempt = runPass(order, allowGapMin);\n        const attemptMemberCount = new Set(attempt.map((r) => r.memberId)).size;\n        if (attemptMemberCount > bestMemberCount || attemptMemberCount === bestMemberCount && attempt.length > best.length) {\n          best = attempt;\n          bestMemberCount = attemptMemberCount;\n        }\n      }\n      if (minimizeUnassigned) {\n        consider(\n          [...days].sort(\n            (a, b) => allMemberIdsForDay(a).size - allMemberIdsForDay(b).size\n          )\n        );\n      }\n      if (externalDayOrder) {\n        consider(externalDayOrder.filter((d) => byDay.has(d)));\n      }\n      return best;\n    }\n    const strictResult = runWithGapPolicy(0);\n    const looseResult = ALLOWED_GAP_MIN > 0 ? runWithGapPolicy(ALLOWED_GAP_MIN) : strictResult;\n    return looseResult.length > strictResult.length ? looseResult : strictResult;\n  }\n  function totalTravelMinutes(assigned) {\n    let total = 0;\n    const byDay = /* @__PURE__ */ new Map();\n    assigned.forEach((r) => {\n      if (!byDay.has(r.day)) byDay.set(r.day, []);\n      byDay.get(r.day).push(r);\n    });\n    byDay.forEach((reqs) => {\n      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);\n      for (let i = 1; i < sorted.length; i++) {\n        total += travelMinutes(sorted[i - 1].locationId, sorted[i].locationId);\n      }\n    });\n    return total;\n  }\n  function totalTravelCount(assigned) {\n    let total = 0;\n    const byDay = /* @__PURE__ */ new Map();\n    assigned.forEach((r) => {\n      if (!byDay.has(r.day)) byDay.set(r.day, []);\n      byDay.get(r.day).push(r);\n    });\n    byDay.forEach((reqs) => {\n      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);\n      for (let i = 1; i < sorted.length; i++) {\n        if (travelMinutes(sorted[i - 1].locationId, sorted[i].locationId) > 0)\n          total++;\n      }\n    });\n    return total;\n  }\n  function totalInefficientMoveCount(assigned, info) {\n    info = info === void 0 ? inefficientRoundTripLocationInfo() : info;\n    let total = 0;\n    const byDay = /* @__PURE__ */ new Map();\n    assigned.forEach((r) => {\n      if (!byDay.has(r.day)) byDay.set(r.day, []);\n      byDay.get(r.day).push(r);\n    });\n    byDay.forEach((reqs) => {\n      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);\n      total += dailyInefficientMoveCount(sorted, info);\n    });\n    return total;\n  }\n  function buildCandidate(title, desc, sortedReqs, eligibleSet, allMemberIds, options, pinned) {\n    const assigned = greedyAssign(\n      sortedReqs.filter((r) => eligibleSet.has(r.id)),\n      options,\n      pinned\n    );\n    const unassignedMembers = unassignedMembersFor(assigned, allMemberIds);\n    return {\n      title,\n      desc,\n      assigned,\n      unassignedMembers,\n      travelMinutes: totalTravelMinutes(assigned)\n    };\n  }\n  var CONTENTION_BUCKET_SLOTS = durationToSlots(SESSION_DURATION_MIN);\n  function reqEnd(r) {\n    return r.startSlot + durationToSlots(r.duration);\n  }\n  function endBucket(r) {\n    return Math.floor(reqEnd(r) / CONTENTION_BUCKET_SLOTS);\n  }\n  function defaultSort(eligible, jitter) {\n    return [...eligible].sort(\n      (a, b) => a.day - b.day || endBucket(a) - endBucket(b) || jitter.get(a.id) - jitter.get(b.id) || reqEnd(a) - reqEnd(b)\n    );\n  }\n  var STRATEGIES = [\n    {\n      title: "후보A - 인원 최대",\n      desc: "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",\n      // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은\n      // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은\n      // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로\n      // 분리해뒀지만, 대안이 기본 순서보다 나쁠 수는 없는 구조라(runWithGapPolicy 참고) 후보A\n      // 자체에 통합했다. 분리해뒀을 때는 후보A와 후보H가 대부분 똑같거나, 다르면 항상 후보H가\n      // 후보A보다 낫거나 같아서 후보A를 고를 이유가 없는 중복이었다.\n      options: { strengthenSearch: "count", minimizeUnassigned: true },\n      sort: defaultSort\n    },\n    {\n      title: "후보B - 수업 횟수 최대",\n      desc: "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.",\n      options: {\n        sessionCountFirst: true,\n        strengthenSearch: "sessions",\n        maxUnassigned: 1\n      },\n      sort: defaultSort\n    }\n  ];\n  function strengthenCandidate(baseline, sorted, eligibleIds, allMemberIds, options, pinned, primary) {\n    let best = baseline;\n    let bestScore = candidateSearchScore(best, primary, options.maxUnassigned);\n    function consider(opts) {\n      const attempt = buildCandidate(\n        baseline.title,\n        baseline.desc,\n        sorted,\n        eligibleIds,\n        allMemberIds,\n        opts,\n        pinned\n      );\n      const attemptScore = candidateSearchScore(\n        attempt,\n        primary,\n        options.maxUnassigned\n      );\n      if (isCandidateWorse(bestScore, attemptScore)) {\n        best = attempt;\n        bestScore = attemptScore;\n      }\n    }\n    const flippedOptions = Object.assign({}, options, {\n      sessionCountFirst: !options.sessionCountFirst\n    });\n    consider(flippedOptions);\n    [options, flippedOptions].forEach(\n      (o) => consider(Object.assign({}, o, { forbidInefficient: true }))\n    );\n    if (state.locations.length >= 2) {\n      [options, flippedOptions].forEach((optsVariant) => {\n        DAYS.forEach((d, day) => {\n          state.locations.forEach((loc) => {\n            consider(\n              Object.assign({}, optsVariant, {\n                pinnedLocationDay: { day, locationId: loc.id }\n              })\n            );\n          });\n        });\n      });\n    }\n    return best;\n  }\n  function repairUnassigned(baseline, sorted, eligibleIds, allMemberIds, options, pinned, primary) {\n    let best = baseline;\n    let bestScore = candidateSearchScore(best, primary, options.maxUnassigned);\n    function tryForce(ids) {\n      const forcedOptions = Object.assign({}, options, {\n        forceOnceMemberIds: ids\n      });\n      const attempt = buildCandidate(\n        baseline.title,\n        baseline.desc,\n        sorted,\n        eligibleIds,\n        allMemberIds,\n        forcedOptions,\n        pinned\n      );\n      const attemptScore = candidateSearchScore(\n        attempt,\n        primary,\n        options.maxUnassigned\n      );\n      if (!isCandidateWorse(attemptScore, bestScore)) {\n        best = attempt;\n        bestScore = attemptScore;\n        return true;\n      }\n      return false;\n    }\n    if (baseline.unassignedMembers.length > 0 && baseline.unassignedMembers.length <= 6) {\n      tryForce(baseline.unassignedMembers.map((m) => m.id));\n    }\n    const tried = /* @__PURE__ */ new Set();\n    let guard = 0;\n    while (guard < 6) {\n      guard++;\n      const target = best.unassignedMembers.find((m) => !tried.has(m.id));\n      if (!target) break;\n      tried.add(target.id);\n      tryForce([target.id]);\n    }\n    return best;\n  }\n  function buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned, dayOrder) {\n    const strategy = STRATEGIES[strategyIndex];\n    const sorted = strategy.sort(eligible, jitter);\n    const strategyOptions = typeof strategy.options === "function" ? strategy.options() : strategy.options;\n    const globalOptions = {};\n    if (dayOrder) globalOptions.stage1DayOrder = dayOrder;\n    const options = Object.assign({}, strategyOptions, globalOptions);\n    let cand = buildCandidate(\n      strategy.title,\n      strategy.desc,\n      sorted,\n      eligibleIds,\n      allMemberIds,\n      options,\n      pinned\n    );\n    if (strategyOptions.strengthenSearch) {\n      cand = strengthenCandidate(\n        cand,\n        sorted,\n        eligibleIds,\n        allMemberIds,\n        options,\n        pinned,\n        strategyOptions.strengthenSearch\n      );\n      if (cand.unassignedMembers.length > 0) {\n        cand = repairUnassigned(\n          cand,\n          sorted,\n          eligibleIds,\n          allMemberIds,\n          options,\n          pinned,\n          strategyOptions.strengthenSearch\n        );\n      }\n    }\n    cand.strategyIndex = strategyIndex;\n    return cand;\n  }\n  function candidateSearchScore(cand, primary, maxUnassigned) {\n    const count = new Set(cand.assigned.map((r) => r.memberId)).size;\n    const sessions = cand.assigned.length;\n    const travel = totalTravelCount(cand.assigned);\n    const ineff = totalInefficientMoveCount(cand.assigned);\n    const capOk = typeof maxUnassigned === "number" && cand.unassignedMembers.length > maxUnassigned ? 0 : 1;\n    const idle = schedule2TotalIdleMinutes(cand.assigned);\n    const balanced = sessions * SESSION_VALUE_MINUTES - travel * TRAVEL_VALUE_MINUTES - idle;\n    return primary === "sessions" ? [capOk, -ineff, sessions, count, -travel, -idle] : [capOk, count, -ineff, balanced, sessions, -travel, -idle];\n  }\n  function isCandidateWorse(a, b) {\n    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];\n    return false;\n  }\n  function makeSeededRandom(seed) {\n    let s = seed >>> 0;\n    return function() {\n      s |= 0;\n      s = s + 1831565813 | 0;\n      let t = Math.imul(s ^ s >>> 15, 1 | s);\n      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;\n      return ((t ^ t >>> 14) >>> 0) / 4294967296;\n    };\n  }\n  function shuffledDayOrder(randomFn) {\n    const order = DAYS.map((_, i) => i);\n    for (let i = order.length - 1; i > 0; i--) {\n      const j = Math.floor(randomFn() * (i + 1));\n      const tmp = order[i];\n      order[i] = order[j];\n      order[j] = tmp;\n    }\n    return order;\n  }\n  function yieldToUI() {\n    if (typeof document === "undefined" || document.hidden) {\n      return new Promise((resolve) => setTimeout(resolve, 0));\n    }\n    return new Promise(\n      (resolve) => requestAnimationFrame(() => setTimeout(resolve, 0))\n    );\n  }\n  function checkGenerationCancelled() {\n    if (runtime.generationCancelRequested) throw new GenerationCancelledError();\n  }\n  function* greedyAttemptInputs(strategyIndex, eligible, attempts) {\n    const rand = makeSeededRandom(strategyIndex + 1);\n    yield { jitter: new Map(eligible.map((r) => [r.id, 0])), dayOrder: void 0 };\n    for (let i = 0; i < attempts; i++) {\n      const jitter = new Map(eligible.map((r) => [r.id, rand()]));\n      const dayOrder = shuffledDayOrder(rand);\n      yield { jitter, dayOrder };\n    }\n  }\n  var TRAVEL_VALUE_MINUTES = 60;\n  var SESSION_VALUE_MINUTES = TRAVEL_VALUE_MINUTES;\n\n  // src/engine/chainDpCore.js\n  var idleFirst = false;\n  function isIdleFirst() {\n    return idleFirst;\n  }\n  function setIdleFirst(on) {\n    idleFirst = on;\n  }\n  function sessionDurationFor2(member) {\n    return (member && (member.category || "상담")) === "상담" ? CONSULT_DURATION_MIN_2 : SESSION_DURATION_MIN_2;\n  }\n  function maxSessionsFor2(member) {\n    if (!member) return 1;\n    if (currentOnceLimitIds2().includes(member.id)) return 1;\n    return (member.category || "상담") === "상담" ? 1 : MAX_SESSIONS_PER_MEMBER;\n  }\n  function requiredGapMin2(locA, locB) {\n    const raw = travelMinutes(locA, locB);\n    return raw > 0 ? Math.ceil(raw / SLOT_MIN) * SLOT_MIN : 0;\n  }\n  function buildDayNodes(dayRequests, weightFn, jitterFn, locationsFor = candidateLocationsForRequest) {\n    const nodes = [];\n    dayRequests.forEach((r) => {\n      const member = memberById(r.memberId);\n      const duration = sessionDurationFor2(member);\n      const end = r.startSlot + durationToSlots(duration);\n      locationsFor(r).forEach((locationId) => {\n        const weight = weightFn(r.memberId, r.startSlot, locationId, r.day);\n        if (!weight) return;\n        nodes.push({\n          id: r.id,\n          memberId: r.memberId,\n          day: r.day,\n          startSlot: r.startSlot,\n          duration,\n          locationId,\n          end,\n          weight,\n          jitter: jitterFn ? jitterFn() : 0\n        });\n      });\n    });\n    return nodes;\n  }\n  function runChainDP(nodes, maxTravelsPerDay, ineffInfo, coveragePriority) {\n    if (maxTravelsPerDay === void 0) maxTravelsPerDay = MAX_TRAVELS_PER_DAY;\n    nodes = nodes.slice().sort((a, b) => a.end - b.end || a.startSlot - b.startSlot);\n    const n = nodes.length;\n    const dp = new Array(n), tc = new Array(n), tm = new Array(n), idle = new Array(n), js = new Array(n), ineff = new Array(n), prev = new Array(n), twoBackLocIdx = new Array(n);\n    const prevOrNull = (k) => prev[k] !== -1 ? prev[k] : null;\n    const locOfIndex = (k) => nodes[k].locationId;\n    function better(dpA, ineffA, tcA, tmA, idleA, jsA, dpB, ineffB, tcB, tmB, idleB, jsB) {\n      const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;\n      if (coveragePriority || hardWeightGap) {\n        if (dpA !== dpB) return dpA > dpB;\n        if (ineffA !== ineffB) return ineffA < ineffB;\n      } else {\n        if (ineffA !== ineffB) return ineffA < ineffB;\n        if (dpA !== dpB) return dpA > dpB;\n      }\n      if (idleFirst && idleA !== idleB) return idleA < idleB;\n      if (tcA !== tcB) return tcA < tcB;\n      if (tmA !== tmB) return tmA < tmB;\n      if (idleA !== idleB) return idleA < idleB;\n      return jsA < jsB;\n    }\n    const locIndex = /* @__PURE__ */ new Map();\n    nodes.forEach((nd) => {\n      if (!locIndex.has(nd.locationId)) locIndex.set(nd.locationId, locIndex.size);\n    });\n    const locIds = Array.from(locIndex.keys());\n    const L = locIds.length;\n    const travelOf = new Array(L * L), gapNeedOf = new Array(L * L);\n    for (let a = 0; a < L; a++)\n      for (let b = 0; b < L; b++) {\n        travelOf[a * L + b] = travelMinutes(locIds[a], locIds[b]);\n        gapNeedOf[a * L + b] = requiredGapMin2(locIds[a], locIds[b]);\n      }\n    const locIdxOf = nodes.map((nd) => locIndex.get(nd.locationId));\n    const ineffOf = new Array((L + 1) * L * L);\n    for (let a = 0; a <= L; a++)\n      for (let b = 0; b < L; b++)\n        for (let c = 0; c < L; c++)\n          ineffOf[(a * L + b) * L + c] = isInefficientRoundTrip(\n            ineffInfo,\n            a === L ? null : locIds[a],\n            locIds[b],\n            locIds[c]\n          ) ? 1 : 0;\n    const memberIndex = /* @__PURE__ */ new Map();\n    nodes.forEach((nd) => {\n      if (!memberIndex.has(nd.memberId))\n        memberIndex.set(nd.memberId, memberIndex.size);\n    });\n    const W = Math.max(1, Math.ceil(memberIndex.size / 32));\n    const memberBits = new Uint32Array(n * W);\n    const memberIdxOf = nodes.map((nd) => memberIndex.get(nd.memberId));\n    const soloIds = soloTravelMemberIds();\n    const noTravelOut = new Uint8Array(n);\n    for (let i = 0; i < n; i++) {\n      const node = nodes[i];\n      let bestDp = node.weight, bestIneff = 0, bestTc = 0, bestTm = 0, bestIdle = 0, bestJs = node.jitter || 0, bestPrev = -1;\n      const mIdx = memberIdxOf[i];\n      const mWord = mIdx >>> 5, mMask = 1 << (mIdx & 31);\n      for (let j = 0; j < i; j++) {\n        const p = nodes[j];\n        if (p.end > node.startSlot) break;\n        const pair = locIdxOf[j] * L + locIdxOf[i];\n        const gapNeed = gapNeedOf[pair];\n        const gapActual = (node.startSlot - p.end) * SLOT_MIN;\n        if (gapActual < gapNeed) continue;\n        const travel = travelOf[pair];\n        const addsTravel = travel > 0 ? 1 : 0;\n        const newTc = tc[j] + addsTravel;\n        if (newTc > maxTravelsPerDay) continue;\n        if (memberBits[j * W + mWord] & mMask) continue;\n        if (addsTravel && noTravelOut[j]) continue;\n        const newDp = dp[j] + node.weight;\n        const newTm = tm[j] + travel;\n        const newIdle = idle[j] + (gapActual - gapNeed);\n        const newJs = js[j] + (node.jitter || 0);\n        const newIneff = ineff[j] + ineffOf[(twoBackLocIdx[j] * L + locIdxOf[j]) * L + locIdxOf[i]];\n        if (better(\n          newDp,\n          newIneff,\n          newTc,\n          newTm,\n          newIdle,\n          newJs,\n          bestDp,\n          bestIneff,\n          bestTc,\n          bestTm,\n          bestIdle,\n          bestJs\n        )) {\n          bestDp = newDp;\n          bestIneff = newIneff;\n          bestTc = newTc;\n          bestTm = newTm;\n          bestIdle = newIdle;\n          bestJs = newJs;\n          bestPrev = j;\n        }\n      }\n      dp[i] = bestDp;\n      ineff[i] = bestIneff;\n      tc[i] = bestTc;\n      tm[i] = bestTm;\n      idle[i] = bestIdle;\n      js[i] = bestJs;\n      prev[i] = bestPrev;\n      const twoBack = roundTripOriginLoc(i, prevOrNull, locOfIndex);\n      twoBackLocIdx[i] = twoBack === null ? L : locIndex.get(twoBack);\n      noTravelOut[i] = bestPrev !== -1 && soloIds.has(node.memberId) && travelOf[locIdxOf[bestPrev] * L + locIdxOf[i]] > 0 ? 1 : 0;\n      if (bestPrev !== -1)\n        memberBits.set(\n          memberBits.subarray(bestPrev * W, bestPrev * W + W),\n          i * W\n        );\n      memberBits[i * W + mWord] |= mMask;\n    }\n    let bestEnd = -1, bestDpAll = 0, bestIneffAll = 0, bestTcAll = 0, bestTmAll = 0, bestIdleAll = 0, bestJsAll = 0;\n    for (let i = 0; i < n; i++) {\n      if (bestEnd === -1 || better(\n        dp[i],\n        ineff[i],\n        tc[i],\n        tm[i],\n        idle[i],\n        js[i],\n        bestDpAll,\n        bestIneffAll,\n        bestTcAll,\n        bestTmAll,\n        bestIdleAll,\n        bestJsAll\n      )) {\n        bestDpAll = dp[i];\n        bestIneffAll = ineff[i];\n        bestTcAll = tc[i];\n        bestTmAll = tm[i];\n        bestIdleAll = idle[i];\n        bestJsAll = js[i];\n        bestEnd = i;\n      }\n    }\n    const chain = [];\n    let cur = bestEnd;\n    while (cur !== -1 && cur !== void 0) {\n      chain.unshift(nodes[cur]);\n      cur = prev[cur];\n    }\n    return chain;\n  }\n\n  // src/engine/rng.js\n  function mulberry32(seed) {\n    return function() {\n      seed |= 0;\n      seed = seed + 1831565813 | 0;\n      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);\n      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;\n      return ((t ^ t >>> 14) >>> 0) / 4294967296;\n    };\n  }\n  function shuffled(arr, randomFn) {\n    const a = arr.slice();\n    for (let i = a.length - 1; i > 0; i--) {\n      const j = Math.floor(randomFn() * (i + 1));\n      [a[i], a[j]] = [a[j], a[i]];\n    }\n    return a;\n  }\n\n  // src/engine/chainDpPolish.js\n  function findEarlierRequestForLocation(requests, minStart, currentStart, locationId) {\n    let earliest = null;\n    requests.forEach((r) => {\n      if (r.startSlot < minStart || r.startSlot >= currentStart) return;\n      if (!candidateLocationsForRequest(r).includes(locationId)) return;\n      if (!earliest || r.startSlot < earliest.startSlot) earliest = r;\n    });\n    return earliest;\n  }\n  function moveNodeToRequest(node, request) {\n    node.id = request.id;\n    node.startSlot = request.startSlot;\n    node.end = request.startSlot + durationToSlots(node.duration);\n  }\n  async function runSchedule2Pipeline(eligibleReqs, reqsByDay, daysWithReqs, stage1DayOrder, runRepair, runPolish, polishBudgetMs, seedOffset, pins = []) {\n    seedOffset = seedOffset || 0;\n    const pinByKey = new Map(pins.map((p) => [pinKey(p), p]));\n    const pinNodesByDay = /* @__PURE__ */ new Map();\n    pins.forEach((p) => {\n      if (!pinNodesByDay.has(p.day)) pinNodesByDay.set(p.day, []);\n      pinNodesByDay.get(p.day).push({ ...p, end: p.startSlot + durationToSlots(p.duration) });\n    });\n    pinNodesByDay.forEach((list) => list.sort((a, b) => a.startSlot - b.startSlot));\n    function isPinned(node) {\n      return pinByKey.size > 0 && pinByKey.has(pinKey(node));\n    }\n    function keepsPins(day, chain) {\n      const dayPins = pinNodesByDay.get(day);\n      if (!dayPins) return true;\n      const keys = new Set(chain.map(pinKey));\n      return dayPins.every((p) => keys.has(pinKey(p)));\n    }\n    const FIXED_PIN_WEIGHT = 1e9;\n    const ineffInfo = inefficientRoundTripLocationInfo();\n    const soloIds = soloTravelMemberIds();\n    function dayChainAllowed(chain, day) {\n      return !dayChainViolation(chain, soloIds) && keepsPins(day, chain);\n    }\n    let yieldOverheadMs = 0;\n    function now() {\n      return performance.now() - yieldOverheadMs;\n    }\n    let lastYieldAt = performance.now();\n    const YIELD_INTERVAL_MS = 48;\n    async function maybeYield() {\n      checkGenerationCancelled();\n      const t = performance.now();\n      if (t - lastYieldAt < YIELD_INTERVAL_MS) return;\n      await yieldToUI();\n      yieldOverheadMs += performance.now() - t;\n      lastYieldAt = performance.now();\n      checkGenerationCancelled();\n    }\n    const stage1RandomFn = mulberry32(112233 + seedOffset);\n    const assignedCountByMember = /* @__PURE__ */ new Map();\n    const assignedDaysByMember = /* @__PURE__ */ new Map();\n    const dayChains = /* @__PURE__ */ new Map();\n    const REPAIR_DEADLINE = now() + 3e3;\n    const reqsByMemberDay = /* @__PURE__ */ new Map();\n    eligibleReqs.forEach((r) => {\n      if (!reqsByMemberDay.has(r.memberId))\n        reqsByMemberDay.set(r.memberId, /* @__PURE__ */ new Map());\n      const byDay = reqsByMemberDay.get(r.memberId);\n      if (!byDay.has(r.day)) byDay.set(r.day, []);\n      byDay.get(r.day).push(r);\n    });\n    function reqsFor(memberId, day) {\n      const byDay = reqsByMemberDay.get(memberId);\n      return byDay && byDay.get(day) || [];\n    }\n    function reqAt(memberId, day, startSlot) {\n      return reqsFor(memberId, day).find((r) => r.startSlot === startSlot);\n    }\n    const locationsByReq = /* @__PURE__ */ new Map();\n    function locationsForReq(r) {\n      let locs = locationsByReq.get(r);\n      if (!locs) {\n        locs = candidateLocationsForRequest(r);\n        locationsByReq.set(r, locs);\n      }\n      return locs;\n    }\n    function dayNodes(dayRequests, weightFn, jitterFn) {\n      const withPins = pinByKey.size === 0 ? weightFn : (memberId, startSlot, locationId, day) => pinByKey.has(pinKey({ memberId, day, startSlot, locationId })) ? FIXED_PIN_WEIGHT : weightFn(memberId, startSlot, locationId, day);\n      return buildDayNodes(dayRequests, withPins, jitterFn, locationsForReq);\n    }\n    function dayBlocked(memberId, day, leavingDay) {\n      const days = assignedDaysByMember.get(memberId);\n      if (!days || days.size === 0) return false;\n      const others = leavingDay === void 0 ? days : [...days].filter((d) => d !== leavingDay);\n      return !!memberDayViolation(memberId, day, others);\n    }\n    function isEligibleForDay(memberId, day) {\n      const cap = maxSessionsFor2(memberById(memberId));\n      if ((assignedCountByMember.get(memberId) || 0) >= cap) return false;\n      return !dayBlocked(memberId, day);\n    }\n    function countSession(day, node) {\n      assignedCountByMember.set(\n        node.memberId,\n        (assignedCountByMember.get(node.memberId) || 0) + 1\n      );\n      if (!assignedDaysByMember.has(node.memberId))\n        assignedDaysByMember.set(node.memberId, /* @__PURE__ */ new Set());\n      assignedDaysByMember.get(node.memberId).add(day);\n    }\n    function commit(day, node) {\n      if (!isPinned(node)) countSession(day, node);\n    }\n    pinNodesByDay.forEach((list, day) => list.forEach((p) => countSession(day, p)));\n    function uncommit(day, node) {\n      if (isPinned(node)) return;\n      assignedCountByMember.set(\n        node.memberId,\n        assignedCountByMember.get(node.memberId) - 1\n      );\n      assignedDaysByMember.get(node.memberId).delete(day);\n    }\n    function dominantLocationFor(day) {\n      const membersByLoc = /* @__PURE__ */ new Map();\n      reqsByDay.get(day).forEach((r) => {\n        if ((assignedCountByMember.get(r.memberId) || 0) !== 0) return;\n        locationsForReq(r).forEach((locId) => {\n          if (!membersByLoc.has(locId)) membersByLoc.set(locId, /* @__PURE__ */ new Set());\n          membersByLoc.get(locId).add(r.memberId);\n        });\n      });\n      let dominantLoc = null, dominantCount = -1;\n      membersByLoc.forEach((set, locId) => {\n        if (set.size > dominantCount) {\n          dominantCount = set.size;\n          dominantLoc = locId;\n        }\n      });\n      return dominantLoc;\n    }\n    stage1DayOrder.forEach((day) => {\n      const dominantLoc = dominantLocationFor(day);\n      const nodes = dayNodes(\n        reqsByDay.get(day),\n        (memberId, startSlot, locationId) => {\n          if ((assignedCountByMember.get(memberId) || 0) !== 0) return 0;\n          return locationId === dominantLoc ? 1.02 : 1;\n        },\n        () => stage1RandomFn()\n      );\n      let chain = runChainDP(nodes, void 0, ineffInfo, true);\n      if (!keepsPins(day, chain)) chain = (pinNodesByDay.get(day) || []).slice();\n      chain.forEach((node) => commit(day, node));\n      dayChains.set(day, chain);\n    });\n    const PIN_WEIGHT = 1e6;\n    daysWithReqs.forEach((day) => {\n      const existingChain = dayChains.get(day) || [];\n      existingChain.forEach((node) => uncommit(day, node));\n      const pinnedKeys = new Set(\n        existingChain.map(\n          (n) => n.memberId + "|" + n.startSlot + "|" + n.locationId\n        )\n      );\n      const pinnedMemberIds = new Set(existingChain.map((n) => n.memberId));\n      const nodes = dayNodes(\n        reqsByDay.get(day),\n        (memberId, startSlot, locationId) => {\n          if (pinnedKeys.has(memberId + "|" + startSlot + "|" + locationId))\n            return PIN_WEIGHT;\n          if (pinnedMemberIds.has(memberId)) return 0;\n          return isEligibleForDay(memberId, day) ? 1 : 0;\n        },\n        () => stage1RandomFn()\n      );\n      let chain = runChainDP(nodes, void 0, ineffInfo);\n      if (!keepsPins(day, chain)) chain = existingChain;\n      chain.forEach((node) => commit(day, node));\n      dayChains.set(day, chain);\n    });\n    const MAX_EJECTION_DEPTH = 3;\n    const targetMemberIds = scheduleTargetMemberIds();\n    function isCurrentlyAssigned(memberId) {\n      return (assignedCountByMember.get(memberId) || 0) > 0;\n    }\n    const excludedIdSet2 = new Set(currentExcludedIds2());\n    function tryPlaceMember(memberId, excludeDays, depth) {\n      if (depth > MAX_EJECTION_DEPTH) return false;\n      if (now() > REPAIR_DEADLINE) return false;\n      const candidateDays = daysWithReqs.filter(\n        (day) => !excludeDays.has(day) && !dayBlocked(memberId, day) && reqsByDay.get(day).some((r) => r.memberId === memberId)\n      );\n      for (const day of candidateDays) {\n        const chain0 = dayChains.get(day) || [];\n        const dayReqsForMember = reqsFor(memberId, day);\n        const candNodes = dayNodes(dayReqsForMember, () => 1);\n        for (const cand of candNodes) {\n          let insertAt = 0;\n          while (insertAt < chain0.length && chain0[insertAt].startSlot < cand.startSlot)\n            insertAt++;\n          let feasible = true;\n          if (insertAt > 0) {\n            const prev = chain0[insertAt - 1];\n            const prevEnd = prev.startSlot + durationToSlots(prev.duration);\n            if (cand.startSlot < prevEnd || (cand.startSlot - prevEnd) * SLOT_MIN < requiredGapMin2(prev.locationId, cand.locationId))\n              feasible = false;\n          }\n          if (feasible && insertAt < chain0.length) {\n            const next = chain0[insertAt];\n            if (next.startSlot < cand.end || (next.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, next.locationId))\n              feasible = false;\n          }\n          if (!feasible) continue;\n          const newNode = {\n            id: cand.id,\n            memberId,\n            day,\n            startSlot: cand.startSlot,\n            duration: cand.duration,\n            locationId: cand.locationId,\n            end: cand.end\n          };\n          const newChain = chain0.slice();\n          newChain.splice(insertAt, 0, newNode);\n          if (!dayChainAllowed(newChain, day)) continue;\n          commit(day, newNode);\n          dayChains.set(day, newChain);\n          return true;\n        }\n        for (const cand of candNodes) {\n          const chain = dayChains.get(day) || [];\n          const overlapping = /* @__PURE__ */ new Set();\n          chain.forEach((n) => {\n            const nEnd = n.startSlot + durationToSlots(n.duration);\n            if (cand.startSlot < nEnd && n.startSlot < cand.end)\n              overlapping.add(n.memberId);\n          });\n          let otherMemberId = null;\n          if (overlapping.size === 1) {\n            otherMemberId = [...overlapping][0];\n          } else if (overlapping.size === 0) {\n            const sorted = chain.slice().sort((a, b) => a.startSlot - b.startSlot);\n            let idx = 0;\n            while (idx < sorted.length && sorted[idx].startSlot < cand.startSlot)\n              idx++;\n            const prevN = idx > 0 ? sorted[idx - 1] : null;\n            const nextN = idx < sorted.length ? sorted[idx] : null;\n            const prevBad = prevN && (cand.startSlot - (prevN.startSlot + durationToSlots(prevN.duration))) * SLOT_MIN < requiredGapMin2(prevN.locationId, cand.locationId);\n            const nextBad = nextN && (nextN.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, nextN.locationId);\n            if (prevBad && nextBad && prevN.memberId !== nextN.memberId) continue;\n            if (prevBad) otherMemberId = prevN.memberId;\n            else if (nextBad) otherMemberId = nextN.memberId;\n            else continue;\n          } else {\n            continue;\n          }\n          const otherNode = chain.find((n) => n.memberId === otherMemberId);\n          if (isPinned(otherNode)) continue;\n          const remainingChain = chain.filter(\n            (n) => n.memberId !== otherMemberId\n          );\n          let insertAt = 0;\n          while (insertAt < remainingChain.length && remainingChain[insertAt].startSlot < cand.startSlot)\n            insertAt++;\n          let feasible = true;\n          if (insertAt > 0) {\n            const prev = remainingChain[insertAt - 1];\n            const prevEnd = prev.startSlot + durationToSlots(prev.duration);\n            const gapMin = (cand.startSlot - prevEnd) * SLOT_MIN;\n            if (gapMin < requiredGapMin2(prev.locationId, cand.locationId))\n              feasible = false;\n          }\n          if (feasible && insertAt < remainingChain.length) {\n            const next = remainingChain[insertAt];\n            const gapMin = (next.startSlot - cand.end) * SLOT_MIN;\n            if (gapMin < requiredGapMin2(cand.locationId, next.locationId))\n              feasible = false;\n          }\n          if (!feasible) continue;\n          const newNode = {\n            id: cand.id,\n            memberId,\n            day,\n            startSlot: cand.startSlot,\n            duration: cand.duration,\n            locationId: cand.locationId,\n            end: cand.end\n          };\n          const newChain = remainingChain.slice();\n          newChain.splice(insertAt, 0, newNode);\n          if (!dayChainAllowed(newChain, day)) continue;\n          uncommit(day, otherNode);\n          commit(day, newNode);\n          dayChains.set(day, newChain);\n          if (tryPlaceMember(\n            otherMemberId,\n            /* @__PURE__ */ new Set([...excludeDays, day]),\n            depth + 1\n          )) {\n            return true;\n          }\n          uncommit(day, newNode);\n          commit(day, otherNode);\n          dayChains.set(day, chain);\n        }\n      }\n      return false;\n    }\n    function stillUnassignedIds() {\n      return targetMemberIds.filter((id) => !isCurrentlyAssigned(id));\n    }\n    if (runRepair) {\n      let tryRebuildDayFor = function(memberId, day) {\n        const beforeUnassigned = stillUnassignedIds().length;\n        const existingChain = dayChains.get(day) || [];\n        existingChain.forEach((node) => uncommit(day, node));\n        const nodes = dayNodes(reqsByDay.get(day), (mId) => {\n          if (mId === memberId) return REBUILD_TARGET_WEIGHT;\n          return isEligibleForDay(mId, day) ? 1 : 0;\n        });\n        const newChain = runChainDP(nodes, void 0, ineffInfo);\n        if (!newChain.some((n) => n.memberId === memberId) || !keepsPins(day, newChain)) {\n          existingChain.forEach((node) => commit(day, node));\n          dayChains.set(day, existingChain);\n          return false;\n        }\n        newChain.forEach((node) => commit(day, node));\n        dayChains.set(day, newChain);\n        const afterUnassigned = stillUnassignedIds().length;\n        if (afterUnassigned < beforeUnassigned || afterUnassigned === beforeUnassigned && newChain.length >= existingChain.length) {\n          return true;\n        }\n        newChain.forEach((node) => uncommit(day, node));\n        existingChain.forEach((node) => commit(day, node));\n        dayChains.set(day, existingChain);\n        return false;\n      };\n      for (const memberId of stillUnassignedIds()) {\n        await maybeYield();\n        if (isCurrentlyAssigned(memberId)) continue;\n        tryPlaceMember(memberId, /* @__PURE__ */ new Set(), 0);\n      }\n      const REBUILD_TARGET_WEIGHT = 1e6;\n      for (const memberId of stillUnassignedIds()) {\n        await maybeYield();\n        if (now() > REPAIR_DEADLINE) break;\n        if (isCurrentlyAssigned(memberId)) continue;\n        const candidateDays = daysWithReqs.filter(\n          (day) => reqsByDay.get(day).some((r) => r.memberId === memberId)\n        );\n        for (const day of candidateDays) {\n          if (tryRebuildDayFor(memberId, day)) break;\n        }\n      }\n      let addedExtra = true;\n      let extraPassCount = 0;\n      while (addedExtra && extraPassCount < 5) {\n        addedExtra = false;\n        extraPassCount++;\n        const extraCandidateIds = state.members.filter((m) => !excludedIdSet2.has(m.id)).map((m) => m.id).filter((id) => {\n          const count = assignedCountByMember.get(id) || 0;\n          return count > 0 && count < maxSessionsFor2(memberById(id));\n        });\n        for (const memberId of extraCandidateIds) {\n          await maybeYield();\n          if (tryPlaceMember(memberId, /* @__PURE__ */ new Set(), 0)) addedExtra = true;\n        }\n      }\n    }\n    if (runPolish) {\n      let fewerTravelOrIdle = function(travelA, idleA, travelB, idleB) {\n        if (isIdleFirst() && idleA !== idleB) return idleA < idleB;\n        return travelA < travelB;\n      }, dayIdleMinutes = function(chain) {\n        const sorted = [...chain].sort((a, b) => a.startSlot - b.startSlot);\n        let idle = 0;\n        for (let i = 1; i < sorted.length; i++) {\n          const prev = sorted[i - 1], cur = sorted[i];\n          const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;\n          idle += Math.max(\n            0,\n            gapMin - requiredGapMin2(prev.locationId, cur.locationId)\n          );\n        }\n        return idle;\n      }, isTravelIdleBetter = function(travelA, idleA, travelB, idleB, ineffA, ineffB) {\n        ineffA = ineffA || 0;\n        ineffB = ineffB || 0;\n        if (ineffA !== ineffB) return ineffA < ineffB;\n        if (isIdleFirst() && idleA !== idleB) return idleA < idleB;\n        const scoreA = travelA * TRAVEL_VALUE_MINUTES + idleA;\n        const scoreB = travelB * TRAVEL_VALUE_MINUTES + idleB;\n        if (scoreA !== scoreB) return scoreA < scoreB;\n        if (travelA !== travelB) return travelA < travelB;\n        return idleA < idleB;\n      }, travelIdleImproves = function(deltaTravel, deltaIdle, deltaIneff) {\n        deltaIneff = deltaIneff || 0;\n        if (deltaIneff > 0) return false;\n        if (deltaIneff < 0) return true;\n        if (isIdleFirst() && deltaIdle !== 0) return deltaIdle < 0;\n        if (deltaTravel > 0) return false;\n        if (deltaTravel === 0) return deltaIdle < 0;\n        return deltaIdle <= -deltaTravel * TRAVEL_VALUE_MINUTES;\n      }, tryRelocateSession = function(node) {\n        if (isPinned(node)) return false;\n        const memberId = node.memberId;\n        const currentDay = node.day;\n        const currentChainWithout = (dayChains.get(currentDay) || []).filter(\n          (n) => n !== node\n        );\n        const beforeCurrentDayTravel = totalTravelCount(\n          dayChains.get(currentDay) || []\n        );\n        const beforeCurrentDayIdle = dayIdleMinutes(\n          dayChains.get(currentDay) || []\n        );\n        const beforeCurrentDayIneff = dailyInefficientMoveCount(\n          dayChains.get(currentDay) || [],\n          ineffInfo\n        );\n        const currentDayWithoutTravel = totalTravelCount(currentChainWithout);\n        const currentDayWithoutIdle = dayIdleMinutes(currentChainWithout);\n        const currentDayWithoutIneff = dailyInefficientMoveCount(\n          currentChainWithout,\n          ineffInfo\n        );\n        let bestMove = null;\n        const leavingAllowed = dayChainAllowed(currentChainWithout, currentDay);\n        daysWithReqs.forEach((day) => {\n          if (day !== currentDay) {\n            if (!leavingAllowed) return;\n            if (dayBlocked(memberId, day, currentDay)) return;\n          }\n          const dayReqsForMember = reqsFor(memberId, day);\n          if (dayReqsForMember.length === 0) return;\n          const candNodes = dayNodes(dayReqsForMember, () => 1);\n          const baseChain = day === currentDay ? currentChainWithout : dayChains.get(day) || [];\n          const beforeTargetDayTravel = day === currentDay ? 0 : totalTravelCount(baseChain);\n          const beforeTargetDayIdle = day === currentDay ? 0 : dayIdleMinutes(baseChain);\n          const beforeTargetDayIneff = day === currentDay ? 0 : dailyInefficientMoveCount(baseChain, ineffInfo);\n          candNodes.forEach((cand) => {\n            if (day === currentDay && cand.startSlot === node.startSlot && cand.locationId === node.locationId)\n              return;\n            let insertAt = 0;\n            while (insertAt < baseChain.length && baseChain[insertAt].startSlot < cand.startSlot)\n              insertAt++;\n            let feasible = true;\n            if (insertAt > 0) {\n              const prev = baseChain[insertAt - 1];\n              const prevEnd = prev.startSlot + durationToSlots(prev.duration);\n              if (cand.startSlot < prevEnd || (cand.startSlot - prevEnd) * SLOT_MIN < requiredGapMin2(prev.locationId, cand.locationId))\n                feasible = false;\n            }\n            if (feasible && insertAt < baseChain.length) {\n              const next = baseChain[insertAt];\n              if (next.startSlot < cand.end || (next.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, next.locationId))\n                feasible = false;\n            }\n            if (!feasible) return;\n            const newNode = {\n              id: cand.id,\n              memberId,\n              day,\n              startSlot: cand.startSlot,\n              duration: cand.duration,\n              locationId: cand.locationId,\n              end: cand.end\n            };\n            const newChain = baseChain.slice();\n            newChain.splice(insertAt, 0, newNode);\n            if (!dayChainAllowed(newChain, day)) return;\n            let deltaTravel, deltaIdle, deltaIneff;\n            if (day === currentDay) {\n              deltaTravel = totalTravelCount(newChain) - beforeCurrentDayTravel;\n              deltaIdle = dayIdleMinutes(newChain) - beforeCurrentDayIdle;\n              deltaIneff = dailyInefficientMoveCount(newChain, ineffInfo) - beforeCurrentDayIneff;\n            } else {\n              deltaTravel = currentDayWithoutTravel + totalTravelCount(newChain) - (beforeCurrentDayTravel + beforeTargetDayTravel);\n              deltaIdle = currentDayWithoutIdle + dayIdleMinutes(newChain) - (beforeCurrentDayIdle + beforeTargetDayIdle);\n              deltaIneff = currentDayWithoutIneff + dailyInefficientMoveCount(newChain, ineffInfo) - (beforeCurrentDayIneff + beforeTargetDayIneff);\n            }\n            const improves = travelIdleImproves(\n              deltaTravel,\n              deltaIdle,\n              deltaIneff\n            );\n            if (improves && (!bestMove || isTravelIdleBetter(\n              deltaTravel,\n              deltaIdle,\n              bestMove.deltaTravel,\n              bestMove.deltaIdle,\n              deltaIneff,\n              bestMove.deltaIneff\n            ))) {\n              bestMove = {\n                sameDay: day === currentDay,\n                targetDay: day,\n                newTargetChain: newChain,\n                deltaTravel,\n                deltaIdle,\n                deltaIneff\n              };\n            }\n          });\n        });\n        if (!bestMove) return false;\n        uncommit(currentDay, node);\n        if (bestMove.sameDay) {\n          dayChains.set(currentDay, bestMove.newTargetChain);\n        } else {\n          dayChains.set(currentDay, currentChainWithout);\n          dayChains.set(bestMove.targetDay, bestMove.newTargetChain);\n        }\n        const addedNode = bestMove.newTargetChain.find(\n          (n) => n.memberId === memberId\n        );\n        commit(bestMove.targetDay, addedNode);\n        return true;\n      }, insertFeasible = function(chainWithout, cand) {\n        let insertAt = 0;\n        while (insertAt < chainWithout.length && chainWithout[insertAt].startSlot < cand.startSlot)\n          insertAt++;\n        if (insertAt > 0) {\n          const prev = chainWithout[insertAt - 1];\n          const prevEnd = prev.startSlot + durationToSlots(prev.duration);\n          if (cand.startSlot < prevEnd || (cand.startSlot - prevEnd) * SLOT_MIN < requiredGapMin2(prev.locationId, cand.locationId))\n            return null;\n        }\n        if (insertAt < chainWithout.length) {\n          const next = chainWithout[insertAt];\n          if (next.startSlot < cand.end || (next.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, next.locationId))\n            return null;\n        }\n        const newChain = chainWithout.slice();\n        newChain.splice(insertAt, 0, cand);\n        if (!dayChainAllowed(newChain, cand.day)) return null;\n        return newChain;\n      }, tryCrossDaySwap = function(node1, node2) {\n        if (node1.day === node2.day || node1.memberId === node2.memberId)\n          return false;\n        if (isPinned(node1) || isPinned(node2)) return false;\n        const day1 = node1.day, day2 = node2.day, member1 = node1.memberId, member2 = node2.memberId;\n        if (!reqKeySet.has(member1 + "|" + day2 + "|" + node2.startSlot))\n          return false;\n        if (!reqKeySet.has(member2 + "|" + day1 + "|" + node1.startSlot))\n          return false;\n        const req1InDay2 = reqAt(member1, day2, node2.startSlot);\n        const req2InDay1 = reqAt(member2, day1, node1.startSlot);\n        if (!locationsForReq(req1InDay2).includes(node2.locationId))\n          return false;\n        if (!locationsForReq(req2InDay1).includes(node1.locationId))\n          return false;\n        if (dayBlocked(member1, day2, day1)) return false;\n        if (dayBlocked(member2, day1, day2)) return false;\n        const dur1 = sessionDurationFor2(memberById(member1));\n        const dur2 = sessionDurationFor2(memberById(member2));\n        const newInDay2 = {\n          id: req1InDay2.id,\n          memberId: member1,\n          day: day2,\n          startSlot: node2.startSlot,\n          duration: dur1,\n          locationId: node2.locationId,\n          end: node2.startSlot + durationToSlots(dur1)\n        };\n        const newInDay1 = {\n          id: req2InDay1.id,\n          memberId: member2,\n          day: day1,\n          startSlot: node1.startSlot,\n          duration: dur2,\n          locationId: node1.locationId,\n          end: node1.startSlot + durationToSlots(dur2)\n        };\n        const chain1 = insertFeasible(\n          (dayChains.get(day1) || []).filter((n) => n !== node1),\n          newInDay1\n        );\n        if (!chain1) return false;\n        const chain2 = insertFeasible(\n          (dayChains.get(day2) || []).filter((n) => n !== node2),\n          newInDay2\n        );\n        if (!chain2) return false;\n        const beforeTravel = totalTravelCount(dayChains.get(day1) || []) + totalTravelCount(dayChains.get(day2) || []);\n        const afterTravel = totalTravelCount(chain1) + totalTravelCount(chain2);\n        const beforeIdle = dayIdleMinutes(dayChains.get(day1) || []) + dayIdleMinutes(dayChains.get(day2) || []);\n        const afterIdle = dayIdleMinutes(chain1) + dayIdleMinutes(chain2);\n        const beforeIneff = dailyInefficientMoveCount(dayChains.get(day1) || [], ineffInfo) + dailyInefficientMoveCount(dayChains.get(day2) || [], ineffInfo);\n        const afterIneff = dailyInefficientMoveCount(chain1, ineffInfo) + dailyInefficientMoveCount(chain2, ineffInfo);\n        if (!travelIdleImproves(\n          afterTravel - beforeTravel,\n          afterIdle - beforeIdle,\n          afterIneff - beforeIneff\n        ))\n          return false;\n        uncommit(day1, node1);\n        uncommit(day2, node2);\n        commit(day1, newInDay1);\n        commit(day2, newInDay2);\n        dayChains.set(day1, chain1);\n        dayChains.set(day2, chain2);\n        return true;\n      }, snapshotChainState = function() {\n        return {\n          dayChains: new Map(dayChains),\n          counts: new Map(assignedCountByMember),\n          days: new Map(\n            Array.from(assignedDaysByMember, ([k, v]) => [k, new Set(v)])\n          )\n        };\n      }, restoreChainState = function(snap) {\n        dayChains.clear();\n        snap.dayChains.forEach((v, k) => dayChains.set(k, v));\n        assignedCountByMember.clear();\n        snap.counts.forEach((v, k) => assignedCountByMember.set(k, v));\n        assignedDaysByMember.clear();\n        snap.days.forEach((v, k) => assignedDaysByMember.set(k, v));\n      }, tryPlaceMemberChain = function(placeMemberId, excludeDays, depth, touchedDays, protectedMemberId) {\n        if (depth > MAX_RELOCATE_EJECT_DEPTH) return false;\n        for (const day of daysWithReqs) {\n          if (excludeDays.has(day)) continue;\n          if (dayBlocked(placeMemberId, day)) continue;\n          const reqs = reqsFor(placeMemberId, day);\n          if (reqs.length === 0) continue;\n          const candNodes = dayNodes(reqs, () => 1);\n          const chain = dayChains.get(day) || [];\n          for (const cand of candNodes) {\n            const newNode = {\n              id: cand.id,\n              memberId: placeMemberId,\n              day,\n              startSlot: cand.startSlot,\n              duration: cand.duration,\n              locationId: cand.locationId,\n              end: cand.end\n            };\n            const newChain = insertFeasible(chain, newNode);\n            if (newChain) {\n              dayChains.set(day, newChain);\n              commit(day, newNode);\n              touchedDays.add(day);\n              return true;\n            }\n          }\n          for (const cand of candNodes) {\n            const overlapping = /* @__PURE__ */ new Set();\n            chain.forEach((n) => {\n              const nEnd = n.startSlot + durationToSlots(n.duration);\n              if (cand.startSlot < nEnd && n.startSlot < cand.end)\n                overlapping.add(n.memberId);\n            });\n            let otherMemberId = null;\n            if (overlapping.size === 1) {\n              otherMemberId = [...overlapping][0];\n            } else if (overlapping.size === 0) {\n              const sorted = chain.slice().sort((a, b) => a.startSlot - b.startSlot);\n              let idx = 0;\n              while (idx < sorted.length && sorted[idx].startSlot < cand.startSlot)\n                idx++;\n              const prevN = idx > 0 ? sorted[idx - 1] : null;\n              const nextN = idx < sorted.length ? sorted[idx] : null;\n              const prevBad = prevN && (cand.startSlot - (prevN.startSlot + durationToSlots(prevN.duration))) * SLOT_MIN < requiredGapMin2(prevN.locationId, cand.locationId);\n              const nextBad = nextN && (nextN.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, nextN.locationId);\n              if (prevBad && nextBad && prevN.memberId !== nextN.memberId)\n                continue;\n              if (prevBad) otherMemberId = prevN.memberId;\n              else if (nextBad) otherMemberId = nextN.memberId;\n              else continue;\n            } else continue;\n            if (otherMemberId === protectedMemberId) continue;\n            const otherNode = chain.find((n) => n.memberId === otherMemberId);\n            if (isPinned(otherNode)) continue;\n            const remaining = chain.filter((n) => n.memberId !== otherMemberId);\n            const newNode = {\n              id: cand.id,\n              memberId: placeMemberId,\n              day,\n              startSlot: cand.startSlot,\n              duration: cand.duration,\n              locationId: cand.locationId,\n              end: cand.end\n            };\n            const newChain = insertFeasible(remaining, newNode);\n            if (!newChain) continue;\n            uncommit(day, otherNode);\n            commit(day, newNode);\n            dayChains.set(day, newChain);\n            touchedDays.add(day);\n            if (tryPlaceMemberChain(\n              otherMemberId,\n              /* @__PURE__ */ new Set([...excludeDays, day]),\n              depth + 1,\n              touchedDays,\n              protectedMemberId\n            ))\n              return true;\n            uncommit(day, newNode);\n            commit(day, otherNode);\n            dayChains.set(day, chain);\n          }\n        }\n        return false;\n      }, tryEjectChainMove = function(node, acceptFn) {\n        if (isPinned(node)) return false;\n        const snap = snapshotChainState();\n        const memberId = node.memberId;\n        const currentDay = node.day;\n        const touchedDays = /* @__PURE__ */ new Set([currentDay]);\n        const chain0 = dayChains.get(currentDay) || [];\n        uncommit(currentDay, node);\n        dayChains.set(\n          currentDay,\n          chain0.filter((n) => n !== node)\n        );\n        const placed = tryPlaceMemberChain(\n          memberId,\n          /* @__PURE__ */ new Set(),\n          0,\n          touchedDays,\n          memberId\n        );\n        const allowed = placed && [...touchedDays].every(\n          (d) => dayChainAllowed(dayChains.get(d) || [], d)\n        );\n        if (!allowed) {\n          restoreChainState(snap);\n          return false;\n        }\n        let beforeTravel = 0, beforeIdle = 0, beforeIneff = 0, afterTravel = 0, afterIdle = 0, afterIneff = 0;\n        touchedDays.forEach((day) => {\n          beforeTravel += totalTravelCount(snap.dayChains.get(day) || []);\n          beforeIdle += dayIdleMinutes(snap.dayChains.get(day) || []);\n          beforeIneff += dailyInefficientMoveCount(\n            snap.dayChains.get(day) || [],\n            ineffInfo\n          );\n          afterTravel += totalTravelCount(dayChains.get(day) || []);\n          afterIdle += dayIdleMinutes(dayChains.get(day) || []);\n          afterIneff += dailyInefficientMoveCount(\n            dayChains.get(day) || [],\n            ineffInfo\n          );\n        });\n        const deltaTravel = afterTravel - beforeTravel;\n        const deltaIdle = afterIdle - beforeIdle;\n        const deltaIneff = afterIneff - beforeIneff;\n        if (acceptFn(deltaTravel, deltaIdle, deltaIneff)) return true;\n        restoreChainState(snap);\n        return false;\n      }, trySessionCountSwap = function(randomFn, acceptFn) {\n        const doubles = [], singles = [];\n        assignedCountByMember.forEach((count, id) => {\n          if (count === 0) return;\n          if (maxSessionsFor2(memberById(id)) < 2) return;\n          if (count === 2) doubles.push(id);\n          else if (count === 1) singles.push(id);\n        });\n        if (doubles.length === 0 || singles.length === 0) return false;\n        const memberA = doubles[Math.floor(randomFn() * doubles.length)];\n        const memberB = singles[Math.floor(randomFn() * singles.length)];\n        if (memberA === memberB) return false;\n        const snap = snapshotChainState();\n        const touchedDays = /* @__PURE__ */ new Set();\n        const aNodes = [];\n        dayChains.forEach(\n          (chain, day) => chain.forEach((n) => {\n            if (n.memberId === memberA) aNodes.push({ day, node: n });\n          })\n        );\n        if (aNodes.length !== 2) {\n          restoreChainState(snap);\n          return false;\n        }\n        const removed = aNodes[Math.floor(randomFn() * aNodes.length)];\n        if (isPinned(removed.node)) {\n          restoreChainState(snap);\n          return false;\n        }\n        uncommit(removed.day, removed.node);\n        dayChains.set(\n          removed.day,\n          (dayChains.get(removed.day) || []).filter((n) => n !== removed.node)\n        );\n        touchedDays.add(removed.day);\n        const placed = tryPlaceMemberChain(\n          memberB,\n          /* @__PURE__ */ new Set(),\n          0,\n          touchedDays,\n          null\n        );\n        const allowed = placed && [...touchedDays].every(\n          (d) => dayChainAllowed(dayChains.get(d) || [], d)\n        );\n        if (!allowed) {\n          restoreChainState(snap);\n          return false;\n        }\n        let beforeTravel = 0, beforeIdle = 0, beforeIneff = 0, afterTravel = 0, afterIdle = 0, afterIneff = 0;\n        touchedDays.forEach((day) => {\n          beforeTravel += totalTravelCount(snap.dayChains.get(day) || []);\n          beforeIdle += dayIdleMinutes(snap.dayChains.get(day) || []);\n          beforeIneff += dailyInefficientMoveCount(\n            snap.dayChains.get(day) || [],\n            ineffInfo\n          );\n          afterTravel += totalTravelCount(dayChains.get(day) || []);\n          afterIdle += dayIdleMinutes(dayChains.get(day) || []);\n          afterIneff += dailyInefficientMoveCount(\n            dayChains.get(day) || [],\n            ineffInfo\n          );\n        });\n        const deltaTravel = afterTravel - beforeTravel;\n        const deltaIdle = afterIdle - beforeIdle;\n        const deltaIneff = afterIneff - beforeIneff;\n        if (acceptFn(deltaTravel, deltaIdle, deltaIneff)) return true;\n        restoreChainState(snap);\n        return false;\n      };\n      const polishStart = now();\n      const polishBudget = polishBudgetMs || 8e3;\n      const POLISH_DEADLINE = polishStart + polishBudget;\n      const STAGE6_DEADLINE = polishStart + polishBudget * 0.25;\n      const STAGE65_DEADLINE = polishStart + polishBudget * 0.55;\n      const SA_DEADLINE = polishStart + polishBudget * 0.8;\n      daysWithReqs.forEach((day) => {\n        const beforeUnassignedCount = stillUnassignedIds().length;\n        const beforeTotalSessions = Array.from(dayChains.values()).reduce(\n          (sum, c) => sum + c.length,\n          0\n        );\n        const existingChain = dayChains.get(day) || [];\n        const beforeIneff = dailyInefficientMoveCount(existingChain, ineffInfo);\n        existingChain.forEach((node) => uncommit(day, node));\n        const nodes = dayNodes(\n          reqsByDay.get(day),\n          (mId) => isEligibleForDay(mId, day) ? 1 : 0\n        );\n        const newChain = runChainDP(nodes, void 0, ineffInfo);\n        newChain.forEach((node) => commit(day, node));\n        dayChains.set(day, newChain);\n        const afterTotalSessions = Array.from(dayChains.values()).reduce(\n          (sum, c) => sum + c.length,\n          0\n        );\n        const afterIneff = dailyInefficientMoveCount(newChain, ineffInfo);\n        const worse = !keepsPins(day, newChain) || stillUnassignedIds().length > beforeUnassignedCount || afterIneff > beforeIneff || afterIneff === beforeIneff && afterTotalSessions < beforeTotalSessions;\n        if (worse) {\n          newChain.forEach((node) => uncommit(day, node));\n          existingChain.forEach((node) => commit(day, node));\n          dayChains.set(day, existingChain);\n        }\n      });\n      const stage6RandomFn = mulberry32(445566 + seedOffset);\n      stage6: for (let i = 0; i < daysWithReqs.length && now() < STAGE6_DEADLINE; i++) {\n        for (let j = i + 1; j < daysWithReqs.length; j++) {\n          let attemptOrder = function(firstDay, secondDay, jitterFn) {\n            const firstNodes = dayNodes(\n              reqsByDay.get(firstDay),\n              (mId) => isEligibleForDay(mId, firstDay) ? 1 : 0,\n              jitterFn\n            );\n            const firstChain = runChainDP(firstNodes, void 0, ineffInfo);\n            firstChain.forEach((node) => commit(firstDay, node));\n            dayChains.set(firstDay, firstChain);\n            const secondNodes = dayNodes(\n              reqsByDay.get(secondDay),\n              (mId) => isEligibleForDay(mId, secondDay) ? 1 : 0,\n              jitterFn\n            );\n            const secondChain = runChainDP(secondNodes, void 0, ineffInfo);\n            secondChain.forEach((node) => commit(secondDay, node));\n            dayChains.set(secondDay, secondChain);\n            const outcome = {\n              unassigned: stillUnassignedIds().length,\n              totalSessions: Array.from(dayChains.values()).reduce(\n                (sum, c) => sum + c.length,\n                0\n              ),\n              pairTravel: totalTravelCount(firstChain) + totalTravelCount(secondChain),\n              pairIdle: dayIdleMinutes(firstChain) + dayIdleMinutes(secondChain),\n              pairIneff: dailyInefficientMoveCount(firstChain, ineffInfo) + dailyInefficientMoveCount(secondChain, ineffInfo),\n              chainA: firstDay === dayA ? firstChain : secondChain,\n              chainB: firstDay === dayA ? secondChain : firstChain\n            };\n            firstChain.forEach((node) => uncommit(firstDay, node));\n            secondChain.forEach((node) => uncommit(secondDay, node));\n            dayChains.set(firstDay, []);\n            dayChains.set(secondDay, []);\n            return outcome;\n          };\n          await maybeYield();\n          if (now() >= STAGE6_DEADLINE) break stage6;\n          const dayA = daysWithReqs[i], dayB = daysWithReqs[j];\n          const existingA = dayChains.get(dayA) || [];\n          const existingB = dayChains.get(dayB) || [];\n          const beforeUnassignedCount = stillUnassignedIds().length;\n          const beforeTotalSessions = Array.from(dayChains.values()).reduce(\n            (sum, c) => sum + c.length,\n            0\n          );\n          const beforePairTravel = totalTravelCount(existingA) + totalTravelCount(existingB);\n          const beforePairIdle = dayIdleMinutes(existingA) + dayIdleMinutes(existingB);\n          const beforePairIneff = dailyInefficientMoveCount(existingA, ineffInfo) + dailyInefficientMoveCount(existingB, ineffInfo);\n          existingA.forEach((node) => uncommit(dayA, node));\n          existingB.forEach((node) => uncommit(dayB, node));\n          dayChains.set(dayA, []);\n          dayChains.set(dayB, []);\n          const attempts = [\n            attemptOrder(dayA, dayB, null),\n            attemptOrder(dayB, dayA, null)\n          ];\n          for (let k = 0; k < 8 && now() < STAGE6_DEADLINE; k++) {\n            await maybeYield();\n            attempts.push(attemptOrder(dayA, dayB, stage6RandomFn));\n            attempts.push(attemptOrder(dayB, dayA, stage6RandomFn));\n          }\n          let bestOption = null;\n          attempts.forEach((opt) => {\n            if (!keepsPins(dayA, opt.chainA) || !keepsPins(dayB, opt.chainB))\n              return;\n            if (opt.unassigned > beforeUnassignedCount) return;\n            if (opt.pairIneff > beforePairIneff) return;\n            if (opt.pairIneff === beforePairIneff) {\n              if (opt.totalSessions < beforeTotalSessions) return;\n              if (!fewerTravelOrIdle(\n                opt.pairTravel,\n                opt.pairIdle,\n                beforePairTravel,\n                beforePairIdle\n              ))\n                return;\n            }\n            const better = !bestOption || opt.pairIneff < bestOption.pairIneff || opt.pairIneff === bestOption.pairIneff && fewerTravelOrIdle(\n              opt.pairTravel,\n              opt.pairIdle,\n              bestOption.pairTravel,\n              bestOption.pairIdle\n            );\n            if (better) bestOption = opt;\n          });\n          if (bestOption) {\n            bestOption.chainA.forEach((node) => commit(dayA, node));\n            bestOption.chainB.forEach((node) => commit(dayB, node));\n            dayChains.set(dayA, bestOption.chainA);\n            dayChains.set(dayB, bestOption.chainB);\n          } else {\n            existingA.forEach((node) => commit(dayA, node));\n            existingB.forEach((node) => commit(dayB, node));\n            dayChains.set(dayA, existingA);\n            dayChains.set(dayB, existingB);\n          }\n        }\n      }\n      const baselineUnassigned = stillUnassignedIds().length;\n      const baselineSessions = Array.from(dayChains.values()).reduce(\n        (sum, c) => sum + c.length,\n        0\n      );\n      const baselineTravel = Array.from(dayChains.values()).reduce(\n        (sum, c) => sum + totalTravelCount(c),\n        0\n      );\n      const baselineIneff = Array.from(dayChains.values()).reduce(\n        (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),\n        0\n      );\n      const baselineIdle = Array.from(dayChains.values()).reduce(\n        (sum, c) => sum + dayIdleMinutes(c),\n        0\n      );\n      let bestSnapshot = {\n        unassigned: baselineUnassigned,\n        sessions: baselineSessions,\n        travel: baselineTravel,\n        idle: baselineIdle,\n        ineff: baselineIneff,\n        chains: new Map(dayChains)\n      };\n      const polishRandomFn = mulberry32(778899 + seedOffset);\n      for (let attempt = 0; attempt < 200 && now() < STAGE65_DEADLINE; attempt++) {\n        await maybeYield();\n        dayChains.forEach(\n          (chain, day) => chain.forEach((node) => uncommit(day, node))\n        );\n        shuffled(daysWithReqs, polishRandomFn).forEach((day) => {\n          const dominantLoc = dominantLocationFor(day);\n          const nodes = dayNodes(\n            reqsByDay.get(day),\n            (mId, startSlot, locationId) => {\n              if (!isEligibleForDay(mId, day)) return 0;\n              return locationId === dominantLoc ? 1.02 : 1;\n            },\n            () => polishRandomFn()\n          );\n          const chain = runChainDP(nodes, void 0, ineffInfo);\n          chain.forEach((node) => commit(day, node));\n          dayChains.set(day, chain);\n        });\n        const attemptUnassigned = stillUnassignedIds().length;\n        const attemptSessions = Array.from(dayChains.values()).reduce(\n          (sum, c) => sum + c.length,\n          0\n        );\n        const attemptTravel = Array.from(dayChains.values()).reduce(\n          (sum, c) => sum + totalTravelCount(c),\n          0\n        );\n        const attemptIneff = Array.from(dayChains.values()).reduce(\n          (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),\n          0\n        );\n        const attemptIdle = Array.from(dayChains.values()).reduce(\n          (sum, c) => sum + dayIdleMinutes(c),\n          0\n        );\n        const accept = daysWithReqs.every((d) => keepsPins(d, dayChains.get(d) || [])) && attemptUnassigned <= bestSnapshot.unassigned && (attemptIneff < bestSnapshot.ineff || attemptIneff === bestSnapshot.ineff && attemptSessions >= bestSnapshot.sessions && fewerTravelOrIdle(\n          attemptTravel,\n          attemptIdle,\n          bestSnapshot.travel,\n          bestSnapshot.idle\n        ));\n        if (accept) {\n          bestSnapshot = {\n            unassigned: attemptUnassigned,\n            sessions: attemptSessions,\n            travel: attemptTravel,\n            idle: attemptIdle,\n            ineff: attemptIneff,\n            chains: new Map(dayChains)\n          };\n        }\n      }\n      dayChains.forEach(\n        (chain, day) => chain.forEach((node) => uncommit(day, node))\n      );\n      bestSnapshot.chains.forEach((chain, day) => {\n        chain.forEach((node) => commit(day, node));\n        dayChains.set(day, chain);\n      });\n      const reqKeySet = new Set(\n        eligibleReqs.map((r) => r.memberId + "|" + r.day + "|" + r.startSlot)\n      );\n      const MAX_RELOCATE_EJECT_DEPTH = 3;\n      {\n        let saTotalTravel = function() {\n          let sum = 0;\n          dayChains.forEach((chain) => {\n            sum += totalTravelCount(chain);\n          });\n          return sum;\n        }, saTotalIdle = function() {\n          let sum = 0;\n          dayChains.forEach((chain) => {\n            sum += dayIdleMinutes(chain);\n          });\n          return sum;\n        }, saTotalIneff = function() {\n          let sum = 0;\n          dayChains.forEach((chain) => {\n            sum += dailyInefficientMoveCount(chain, ineffInfo);\n          });\n          return sum;\n        }, pickRandomNode = function(randomFn) {\n          const all = Array.from(dayChains.values()).flat().filter((n) => !isPinned(n));\n          if (all.length === 0) return null;\n          return all[Math.floor(randomFn() * all.length)];\n        }, saProposeRelocate = function(randomFn) {\n          const node = pickRandomNode(randomFn);\n          if (!node) return null;\n          const memberId = node.memberId, currentDay = node.day;\n          const currentChainWithout = (dayChains.get(currentDay) || []).filter(\n            (n) => n !== node\n          );\n          const options = [];\n          daysWithReqs.forEach((day) => {\n            if (day !== currentDay && dayBlocked(memberId, day, currentDay))\n              return;\n            reqsFor(memberId, day).forEach(\n              (r) => options.push({ day, startSlot: r.startSlot, req: r })\n            );\n          });\n          if (options.length === 0) return null;\n          const picked = options[Math.floor(randomFn() * options.length)];\n          if (picked.day !== currentDay && !dayChainAllowed(currentChainWithout, currentDay))\n            return null;\n          const locOptions = locationsForReq(picked.req);\n          if (locOptions.length === 0) return null;\n          const locationId = locOptions[Math.floor(randomFn() * locOptions.length)];\n          if (picked.day === currentDay && picked.startSlot === node.startSlot && locationId === node.locationId)\n            return null;\n          const duration = sessionDurationFor2(memberById(memberId));\n          const cand = {\n            id: picked.req.id,\n            memberId,\n            day: picked.day,\n            startSlot: picked.startSlot,\n            duration,\n            locationId,\n            end: picked.startSlot + durationToSlots(duration)\n          };\n          const baseChain = picked.day === currentDay ? currentChainWithout : dayChains.get(picked.day) || [];\n          const newChain = insertFeasible(baseChain, cand);\n          if (!newChain) return null;\n          let deltaTravel, deltaIdle, deltaIneff;\n          if (picked.day === currentDay) {\n            deltaTravel = totalTravelCount(newChain) - totalTravelCount(dayChains.get(currentDay) || []);\n            deltaIdle = dayIdleMinutes(newChain) - dayIdleMinutes(dayChains.get(currentDay) || []);\n            deltaIneff = dailyInefficientMoveCount(newChain, ineffInfo) - dailyInefficientMoveCount(\n              dayChains.get(currentDay) || [],\n              ineffInfo\n            );\n          } else {\n            const beforeCur = dayChains.get(currentDay) || [];\n            const beforeTgt = dayChains.get(picked.day) || [];\n            deltaTravel = totalTravelCount(currentChainWithout) + totalTravelCount(newChain) - (totalTravelCount(beforeCur) + totalTravelCount(beforeTgt));\n            deltaIdle = dayIdleMinutes(currentChainWithout) + dayIdleMinutes(newChain) - (dayIdleMinutes(beforeCur) + dayIdleMinutes(beforeTgt));\n            deltaIneff = dailyInefficientMoveCount(currentChainWithout, ineffInfo) + dailyInefficientMoveCount(newChain, ineffInfo) - (dailyInefficientMoveCount(beforeCur, ineffInfo) + dailyInefficientMoveCount(beforeTgt, ineffInfo));\n          }\n          const cost = deltaTravel * SA_TRAVEL_WEIGHT + deltaIdle;\n          return {\n            cost,\n            deltaIneff,\n            apply: () => {\n              uncommit(currentDay, node);\n              if (picked.day === currentDay) {\n                dayChains.set(currentDay, newChain);\n              } else {\n                dayChains.set(currentDay, currentChainWithout);\n                dayChains.set(picked.day, newChain);\n              }\n              const addedNode = newChain.find(\n                (n) => n.memberId === memberId && n.startSlot === picked.startSlot && n.locationId === locationId\n              );\n              commit(picked.day, addedNode);\n            }\n          };\n        }, saProposeSwap = function(randomFn) {\n          const n1 = pickRandomNode(randomFn);\n          const n2 = pickRandomNode(randomFn);\n          if (!n1 || !n2 || n1 === n2 || n1.day === n2.day || n1.memberId === n2.memberId)\n            return null;\n          const day1 = n1.day, day2 = n2.day, member1 = n1.memberId, member2 = n2.memberId;\n          if (!reqKeySet.has(member1 + "|" + day2 + "|" + n2.startSlot))\n            return null;\n          if (!reqKeySet.has(member2 + "|" + day1 + "|" + n1.startSlot))\n            return null;\n          const req1InDay2 = reqAt(member1, day2, n2.startSlot);\n          const req2InDay1 = reqAt(member2, day1, n1.startSlot);\n          if (!locationsForReq(req1InDay2).includes(n2.locationId))\n            return null;\n          if (!locationsForReq(req2InDay1).includes(n1.locationId))\n            return null;\n          if (dayBlocked(member1, day2, day1)) return null;\n          if (dayBlocked(member2, day1, day2)) return null;\n          const dur1 = sessionDurationFor2(memberById(member1));\n          const dur2 = sessionDurationFor2(memberById(member2));\n          const newInDay2 = {\n            id: req1InDay2.id,\n            memberId: member1,\n            day: day2,\n            startSlot: n2.startSlot,\n            duration: dur1,\n            locationId: n2.locationId,\n            end: n2.startSlot + durationToSlots(dur1)\n          };\n          const newInDay1 = {\n            id: req2InDay1.id,\n            memberId: member2,\n            day: day1,\n            startSlot: n1.startSlot,\n            duration: dur2,\n            locationId: n1.locationId,\n            end: n1.startSlot + durationToSlots(dur2)\n          };\n          const chain1 = insertFeasible(\n            (dayChains.get(day1) || []).filter((n) => n !== n1),\n            newInDay1\n          );\n          if (!chain1) return null;\n          const chain2 = insertFeasible(\n            (dayChains.get(day2) || []).filter((n) => n !== n2),\n            newInDay2\n          );\n          if (!chain2) return null;\n          const beforeTravel = totalTravelCount(dayChains.get(day1) || []) + totalTravelCount(dayChains.get(day2) || []);\n          const afterTravel = totalTravelCount(chain1) + totalTravelCount(chain2);\n          const beforeIdle = dayIdleMinutes(dayChains.get(day1) || []) + dayIdleMinutes(dayChains.get(day2) || []);\n          const afterIdle = dayIdleMinutes(chain1) + dayIdleMinutes(chain2);\n          const beforeIneff = dailyInefficientMoveCount(dayChains.get(day1) || [], ineffInfo) + dailyInefficientMoveCount(dayChains.get(day2) || [], ineffInfo);\n          const afterIneff = dailyInefficientMoveCount(chain1, ineffInfo) + dailyInefficientMoveCount(chain2, ineffInfo);\n          const cost = (afterTravel - beforeTravel) * SA_TRAVEL_WEIGHT + (afterIdle - beforeIdle);\n          return {\n            cost,\n            deltaIneff: afterIneff - beforeIneff,\n            apply: () => {\n              uncommit(day1, n1);\n              uncommit(day2, n2);\n              commit(day1, newInDay1);\n              commit(day2, newInDay2);\n              dayChains.set(day1, chain1);\n              dayChains.set(day2, chain2);\n            }\n          };\n        }, saAccepts = function(cost, deltaIneff) {\n          if (deltaIneff > 0) return false;\n          if (deltaIneff < 0) return true;\n          return cost <= 0 || saRandomFn() < Math.exp(-cost / temperature);\n        };\n        const SA_TRAVEL_WEIGHT = isIdleFirst() ? 0.01 : TRAVEL_VALUE_MINUTES;\n        const saRandomFn = mulberry32(552233 + seedOffset);\n        const SA_START_TEMP = 200, SA_END_TEMP = 1;\n        const saStart = now();\n        const saDuration = Math.max(1, SA_DEADLINE - saStart);\n        let temperature = SA_START_TEMP;\n        let bestSnapshotSA = new Map(dayChains);\n        let bestTravelSA = saTotalTravel();\n        let bestIdleSA = saTotalIdle();\n        let bestIneffSA = saTotalIneff();\n        while (now() < SA_DEADLINE) {\n          await maybeYield();\n          const elapsedFrac = Math.min(1, (now() - saStart) / saDuration);\n          temperature = SA_START_TEMP * Math.pow(SA_END_TEMP / SA_START_TEMP, elapsedFrac);\n          let applied = false;\n          const moveRoll = saRandomFn();\n          if (moveRoll < 0.15) {\n            applied = trySessionCountSwap(saRandomFn, (dt, di, dineff) => {\n              const cost = dt * SA_TRAVEL_WEIGHT + di;\n              return saAccepts(cost, dineff);\n            });\n          } else if (moveRoll < 0.35) {\n            const node = pickRandomNode(saRandomFn);\n            if (node) {\n              applied = tryEjectChainMove(node, (dt, di, dineff) => {\n                const cost = dt * SA_TRAVEL_WEIGHT + di;\n                return saAccepts(cost, dineff);\n              });\n            }\n          } else {\n            const proposal = saRandomFn() < 0.35 ? saProposeSwap(saRandomFn) : saProposeRelocate(saRandomFn);\n            if (proposal) {\n              const accept = saAccepts(proposal.cost, proposal.deltaIneff);\n              if (accept) {\n                proposal.apply();\n                applied = true;\n              }\n            }\n          }\n          if (applied) {\n            const curTravel = saTotalTravel();\n            const curIdle = saTotalIdle();\n            const curIneff = saTotalIneff();\n            const curScore = curTravel * SA_TRAVEL_WEIGHT + curIdle;\n            const bestScore = bestTravelSA * SA_TRAVEL_WEIGHT + bestIdleSA;\n            if (curIneff < bestIneffSA || curIneff === bestIneffSA && (curScore < bestScore || curScore === bestScore && curTravel < bestTravelSA)) {\n              bestTravelSA = curTravel;\n              bestIdleSA = curIdle;\n              bestIneffSA = curIneff;\n              bestSnapshotSA = new Map(dayChains);\n            }\n          }\n        }\n        dayChains.forEach(\n          (chain, day) => chain.forEach((node) => uncommit(day, node))\n        );\n        bestSnapshotSA.forEach((chain, day) => {\n          chain.forEach((node) => commit(day, node));\n          dayChains.set(day, chain);\n        });\n      }\n      const relocateRandomFn = mulberry32(334455 + seedOffset);\n      let improvedInPass = true;\n      let passCount = 0;\n      while (improvedInPass && passCount < 30 && now() < POLISH_DEADLINE) {\n        await maybeYield();\n        improvedInPass = false;\n        passCount++;\n        const flatNodes = shuffled(\n          Array.from(dayChains.values()).flat(),\n          relocateRandomFn\n        );\n        for (const node of flatNodes) {\n          await maybeYield();\n          if (now() >= POLISH_DEADLINE) break;\n          const stillThere = (dayChains.get(node.day) || []).includes(node);\n          if (!stillThere) continue;\n          if (tryRelocateSession(node)) {\n            improvedInPass = true;\n            continue;\n          }\n          if (tryEjectChainMove(node, travelIdleImproves)) improvedInPass = true;\n        }\n        if (now() >= POLISH_DEADLINE) break;\n        const flatNodes2 = shuffled(\n          Array.from(dayChains.values()).flat(),\n          relocateRandomFn\n        );\n        outer: for (let i = 0; i < flatNodes2.length; i++) {\n          for (let k = i + 1; k < flatNodes2.length; k++) {\n            await maybeYield();\n            if (now() >= POLISH_DEADLINE) break outer;\n            const n1 = flatNodes2[i], n2 = flatNodes2[k];\n            const n1There = (dayChains.get(n1.day) || []).includes(n1);\n            const n2There = (dayChains.get(n2.day) || []).includes(n2);\n            if (!n1There || !n2There) continue;\n            if (tryCrossDaySwap(n1, n2)) improvedInPass = true;\n          }\n        }\n        for (let attempt = 0; attempt < 60 && now() < POLISH_DEADLINE; attempt++) {\n          await maybeYield();\n          if (trySessionCountSwap(relocateRandomFn, travelIdleImproves))\n            improvedInPass = true;\n        }\n      }\n      daysWithReqs.forEach((day) => {\n        const chain = (dayChains.get(day) || []).slice().sort((a, b) => a.startSlot - b.startSlot);\n        for (let idx = 1; idx < chain.length; idx++) {\n          const prev = chain[idx - 1];\n          const node = chain[idx];\n          if (isPinned(node)) continue;\n          const minStart = prev.startSlot + durationToSlots(prev.duration) + durationToSlots(requiredGapMin2(prev.locationId, node.locationId));\n          if (node.startSlot <= minStart) continue;\n          const earlierReq = findEarlierRequestForLocation(\n            reqsFor(node.memberId, day),\n            minStart,\n            node.startSlot,\n            node.locationId\n          );\n          if (!earlierReq) continue;\n          moveNodeToRequest(node, earlierReq);\n        }\n        dayChains.set(day, chain);\n      });\n    }\n    const assigned = [];\n    dayChains.forEach((chain) => assigned.push(...chain));\n    const unassignedMembers = unassignedMembersFor(assigned, targetMemberIds);\n    return { assigned, unassignedMembers };\n  }\n\n  // src/engine/engineWorker.js\n  var ctx = null;\n  var greedyCursor = null;\n  function greedyInput(strategyIndex, attempt) {\n    if (!greedyCursor || greedyCursor.strategyIndex !== strategyIndex || greedyCursor.attempt > attempt) {\n      greedyCursor = {\n        strategyIndex,\n        attempt: -1,\n        input: null,\n        gen: greedyAttemptInputs(strategyIndex, ctx.eligible, ctx.attempts)\n      };\n    }\n    while (greedyCursor.attempt < attempt) {\n      greedyCursor.input = greedyCursor.gen.next().value;\n      greedyCursor.attempt++;\n    }\n    return greedyCursor.input;\n  }\n  var handlers = {\n    async polish(msg) {\n      const result = await runSchedule2Pipeline(\n        ctx.eligibleReqs,\n        ctx.reqsByDay,\n        ctx.daysWithReqs,\n        msg.order,\n        true,\n        true,\n        msg.budgetMs,\n        msg.seedOffset,\n        ctx.pins || []\n      );\n      return {\n        assigned: result.assigned,\n        unassignedMemberIds: result.unassignedMembers.map((m) => m.id)\n      };\n    },\n    async greedy(msg) {\n      const input = greedyInput(msg.strategyIndex, msg.attempt);\n      const cand = buildCandidateFromStrategy(\n        msg.strategyIndex,\n        ctx.eligible,\n        ctx.eligibleIdSet,\n        ctx.allMemberIdSet,\n        input.jitter,\n        ctx.pins || [],\n        input.dayOrder\n      );\n      cand.unassignedMembers = cand.unassignedMembers.map((m) => m.id);\n      return cand;\n    }\n  };\n  self.onmessage = async (event) => {\n    const msg = event.data;\n    if (msg.type === "init") {\n      Object.assign(state, msg.state);\n      runtime.availableCells = new Set(msg.availableCells);\n      setIdleFirst(!!msg.idleFirst);\n      ctx = msg;\n      if (msg.kind === "greedy") {\n        ctx.eligibleIdSet = new Set(msg.eligibleIds);\n        ctx.allMemberIdSet = new Set(msg.allMemberIds);\n      }\n      greedyCursor = null;\n      return;\n    }\n    if (msg.type !== "run") return;\n    try {\n      const result = await withSelectionOverride(\n        ctx.excludedIds,\n        ctx.onceLimitIds,\n        () => handlers[ctx.kind](msg)\n      );\n      self.postMessage({ index: msg.index, result });\n    } catch (err) {\n      self.postMessage({\n        index: msg.index,\n        error: String(err && err.stack || err)\n      });\n    }\n  };\n})();\n'], { type: "text/javascript" })
+      new Blob([`(() => {
+  // src/constants.js
+  var DAYS = ["월", "화", "수", "목", "금", "토"];
+  var START_MIN = 12 * 60;
+  var END_MIN = 24 * 60;
+  var SLOT_MIN = 10;
+  var SLOT_COUNT = (END_MIN - START_MIN) / SLOT_MIN;
+  var SESSION_DURATION_MIN = 60;
+  var BREAK_MIN = 0;
+  var ALLOWED_GAP_MIN = 10;
+  var SOLO_TRAVEL_LOCATION_NAMES = ["상암점", "여의도점", "마포점"];
+  var INEFFICIENT_ROUNDTRIP_LOCATION_NAMES = ["마포점", "여의도점", "상암점"];
+  var MAX_SESSIONS_PER_MEMBER = 2;
+  var MAX_TRAVELS_PER_DAY = 2;
+  var FORCE_ONCE_WEIGHT = 1e6;
+  var COVERAGE_WEIGHT_GAP_THRESHOLD = 1e4;
+  var SESSION_DURATION_MIN_2 = 60;
+  var CONSULT_DURATION_MIN_2 = 30;
+  var OLD_SLOT_MIN = 30;
+  var SLOT_SCALE = OLD_SLOT_MIN / SLOT_MIN;
+  var DEFAULT_BUSINESS_START_MIN = 14 * 60;
+  var DEFAULT_BUSINESS_END_MIN = 23 * 60 + 30;
+  var DEFAULT_BUSINESS_START_SLOT = (DEFAULT_BUSINESS_START_MIN - START_MIN) / SLOT_MIN;
+  var DEFAULT_BUSINESS_END_SLOT = (DEFAULT_BUSINESS_END_MIN - START_MIN) / SLOT_MIN;
+
+  // src/utils.js
+  function durationToSlots(min) {
+    return min / SLOT_MIN;
+  }
+  var TIME_SELECT_STEP_SLOTS = 10 / SLOT_MIN;
+
+  // src/selectionOverride.js
+  var selectionOverride = null;
+  async function withSelectionOverride(excludedIds, onceLimitIds, asyncFn) {
+    const prev = selectionOverride;
+    selectionOverride = {
+      excludedIds: excludedIds.slice(),
+      onceLimitIds: onceLimitIds.slice()
+    };
+    try {
+      return await asyncFn();
+    } finally {
+      selectionOverride = prev;
+    }
+  }
+  function currentExcludedIds() {
+    return selectionOverride ? selectionOverride.excludedIds : state.excludedMemberIds3;
+  }
+  function currentOnceLimitIds() {
+    return selectionOverride ? selectionOverride.onceLimitIds : state.onceLimitedMemberIds3;
+  }
+  function currentExcludedIds2() {
+    return selectionOverride ? selectionOverride.excludedIds : state.excludedMemberIds3;
+  }
+  function currentOnceLimitIds2() {
+    return selectionOverride ? selectionOverride.onceLimitIds : state.onceLimitedMemberIds3;
+  }
+
+  // src/domain.js
+  var memberPosIndex = { list: null, posById: /* @__PURE__ */ new Map() };
+  function memberById(id) {
+    const list = state.members;
+    if (memberPosIndex.list === list) {
+      const pos = memberPosIndex.posById.get(id);
+      const m = pos === void 0 ? void 0 : list[pos];
+      if (m && m.id === id) return m;
+    }
+    const found = list.find((m) => m.id === id);
+    if (found) {
+      const posById = /* @__PURE__ */ new Map();
+      list.forEach((m, i) => {
+        if (m && !posById.has(m.id)) posById.set(m.id, i);
+      });
+      memberPosIndex = { list, posById };
+    }
+    return found;
+  }
+  var knownLocationCache = { ids: [], set: /* @__PURE__ */ new Set() };
+  function knownLocationIdSet() {
+    const list = state.locations;
+    const ids = knownLocationCache.ids;
+    let same = ids.length === list.length;
+    for (let i = 0; same && i < list.length; i++) same = list[i].id === ids[i];
+    if (!same) {
+      const nextIds = list.map((l) => l.id);
+      knownLocationCache = { ids: nextIds, set: new Set(nextIds) };
+    }
+    return knownLocationCache.set;
+  }
+  function maxSessionsFor(member) {
+    if (!member) return 1;
+    if (currentOnceLimitIds().includes(member.id)) return 1;
+    return (member.category || "상담") === "상담" ? 1 : MAX_SESSIONS_PER_MEMBER;
+  }
+  function isAdjacentDay(day, days) {
+    for (const d of days) {
+      if (Math.abs(d - day) === 1) return true;
+    }
+    return false;
+  }
+  function memberDayViolation(memberId, day, otherDays) {
+    for (const d of otherDays) if (d === day) return "sameDay";
+    if (isAdjacentDay(day, otherDays) && (state.noConsecutiveDayMemberIds || []).includes(memberId))
+      return "consecutiveDay";
+    return null;
+  }
+  function soloTravelMemberIds() {
+    const soloTravelLocationIds = state.locations.filter((l) => SOLO_TRAVEL_LOCATION_NAMES.includes(l.name)).map((l) => l.id);
+    if (soloTravelLocationIds.length !== SOLO_TRAVEL_LOCATION_NAMES.length)
+      return /* @__PURE__ */ new Set();
+    return new Set(
+      state.members.filter(
+        (m) => soloTravelLocationIds.every((id) => m.locationIds.includes(id))
+      ).map((m) => m.id)
+    );
+  }
+  function breaksSoloTravel(memberId, prevLocId, locId, nextLocId, soloIds) {
+    return soloIds.has(memberId) && !!prevLocId && !!nextLocId && travelMinutes(prevLocId, locId) > 0 && travelMinutes(locId, nextLocId) > 0;
+  }
+  function chainBreaksSoloTravel(chain, soloIds) {
+    for (let i = 1; i + 1 < chain.length; i++) {
+      const cur = chain[i];
+      if (breaksSoloTravel(
+        cur.memberId,
+        chain[i - 1].locationId,
+        cur.locationId,
+        chain[i + 1].locationId,
+        soloIds
+      ))
+        return true;
+    }
+    return false;
+  }
+  function pairKey(idA, idB) {
+    const a = String(idA), b = String(idB);
+    return a < b ? a + "|" + b : b + "|" + a;
+  }
+  function isValidTravelMinutes(v) {
+    return typeof v === "number" && Number.isFinite(v) && v >= 0;
+  }
+  function travelMinutes(locIdA, locIdB) {
+    if (!locIdA || !locIdB || locIdA === locIdB) return 0;
+    const v = state.travelTimes[pairKey(locIdA, locIdB)];
+    return isValidTravelMinutes(v) ? v : Infinity;
+  }
+  function scheduleTargetMemberIds() {
+    const excluded = new Set(currentExcludedIds());
+    const submitted = new Set(state.requests.map((r) => r.memberId));
+    return state.members.filter((m) => submitted.has(m.id) && !excluded.has(m.id)).map((m) => m.id);
+  }
+  function unassignedMembersFor(assigned, targetIds = scheduleTargetMemberIds()) {
+    const assignedIds = new Set(assigned.map((r) => r.memberId));
+    return [...targetIds].filter((id) => !assignedIds.has(id)).map((id) => memberById(id)).filter(Boolean);
+  }
+  function inefficientRoundTripLocationInfo() {
+    const matches = state.locations.filter(
+      (l) => INEFFICIENT_ROUNDTRIP_LOCATION_NAMES.includes(l.name)
+    );
+    if (matches.length !== INEFFICIENT_ROUNDTRIP_LOCATION_NAMES.length)
+      return null;
+    const idByName = new Map(matches.map((l) => [l.name, l.id]));
+    return {
+      ids: new Set(idByName.values()),
+      mapoId: idByName.get("마포점"),
+      yeouidoId: idByName.get("여의도점")
+    };
+  }
+  function roundTripOriginLoc(start, prevOf, locOf) {
+    const loc = locOf(start);
+    let n = prevOf(start);
+    while (n != null && locOf(n) === loc) n = prevOf(n);
+    return n == null ? null : locOf(n);
+  }
+  function isInefficientRoundTrip(info, locA, locB, locC) {
+    if (!info || locA == null || locB == null || locC == null) return false;
+    if (locA !== locC || locA === locB) return false;
+    if (!info.ids.has(locA) || !info.ids.has(locB)) return false;
+    const isMapoYeouido = locA === info.mapoId && locB === info.yeouidoId || locA === info.yeouidoId && locB === info.mapoId;
+    return !isMapoYeouido;
+  }
+
+  // src/state.js
+  var CURRENT_SCHEMA_VERSION = 3;
+  var state = {
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    availableCells: [],
+    // array of "day-slot" strings
+    locations: [],
+    // {id, name, color} — color는 LOCATION_PALETTE의 색(표시 전용)
+    travelTimes: {},
+    // { "locIdA|locIdB": minutes }
+    members: [],
+    // {id, name, locationIds: [locId, ...]}
+    requests: [],
+    // {id, memberId, locationId, day, startSlot, duration}
+    // "수업 스케줄 생성3" 전용 설정 (생성1·생성2 엔진을 withSelectionOverride로 재사용해 후보 3개를 한 화면에 보여줌)
+    onceLimitedMemberIds3: [],
+    // 스케줄 생성3에서 최대 1회만 배정되어야 하는 회원 id 목록
+    excludedMemberIds3: [],
+    // 스케줄 생성3에서 후보 생성 시 아예 제외할 회원 id 목록
+    // "수업 스케줄 생성"의 연속 요일 배정 제외 회원 id 목록 — 두 수업 사이에 최소 하루를 둔다
+    // (정책: domain.js의 memberDayViolation). 엔진이 state에서 바로 읽는다(selectionOverride 대상 아님).
+    noConsecutiveDayMemberIds: []
+  };
+  var runtime = {
+    availableCells: /* @__PURE__ */ new Set(),
+    // 후보 풀 저장소(원본 슬롯). 화면의 카드·역할은 여기서 매번 파생한다(schedule3.js의
+    // candidatePoolEntries → candidateSelection.js의 selectCandidates) — 카드 구조는 저장하지 않는다.
+    // candidates: 그리디 전략 0(인원 최대)·전략 1(수업 횟수 최대)의 결과.
+    candidates: [],
+    // candidateAList: 체인 DP 탐색 그룹 3개의 결과. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.
+    // extraCandidates(선택): 회원별 추가 탐색이 찾은 미배정 1명 추가·절충 후보(schedule3.js extraCandidates).
+    // extraSearchDone(선택): 그 탐색('미배정 1명 추가안 더 찾기')을 이번 생성 결과에 대해 끝까지 마쳤으면 true.
+    schedule3Result: { candidateAList: [null, null, null] },
+    // 세 생성 버튼 중 하나라도 계산 중이면 true — 동시에 두 계산이 겹치면 selectionOverride가
+    // 서로 다른 페이지의 회원 선택 목록을 잘못 참조할 수 있어(withSelectionOverride 참고), 이 플래그로 막는다.
+    generationInProgress: false,
+    // 생성2/생성3의 다듬기 파이프라인(담금질 기법 등)은 수 초~수십 초가 걸릴 수 있어, 사용자가
+    // "취소"를 누르면 다음 양보 지점(yieldToUI 직후)에서 즉시 멈출 수 있도록 이 플래그로 신호를
+    // 보낸다. 실제 중단은 GenerationCancelledError를 던져 호출 스택을 그대로 타고 올라가
+    // 각 생성 버튼 핸들러의 catch에서 잡는 방식으로 처리한다.
+    generationCancelRequested: false,
+    currentPage: "settings",
+    // 백업 복원 직후 reload()할 때 beforeunload/visibilitychange 핸들러가 옛 메모리 상태로
+    // saveState()를 한 번 더 실행해 방금 덮어쓴 localStorage를 되돌리지 않도록 막는 플래그.
+    suppressAutosave: false,
+    storageError: null,
+    // 저장분이 있는데 읽지 못했으면(미래 schemaVersion·손상) 기본값으로 덮어쓰지 않도록 저장을 막는다.
+    loadError: null,
+    // 재최적화 실행 계측(schedule3.js logReoptimize): 세션 한정, 저장하지 않는다.
+    reoptimizeLog: []
+  };
+  var GenerationCancelledError = class extends Error {
+  };
+  var wakeLockSentinel = null;
+  async function acquireWakeLock() {
+    if (!("wakeLock" in navigator)) return;
+    try {
+      wakeLockSentinel = await navigator.wakeLock.request("screen");
+    } catch {
+      wakeLockSentinel = null;
+    }
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible" && runtime.generationInProgress) {
+        acquireWakeLock();
+      }
+    });
+  }
+  var LEGACY_START_MIN = 13 * 60;
+
+  // src/engine/pins.js
+  function pinKey(r) {
+    return r.memberId + "|" + r.day + "|" + r.startSlot + "|" + r.locationId;
+  }
+
+  // src/engine/scheduleCompare.js
+  function schedule2TotalIdleMinutes(assigned) {
+    let idle = 0;
+    const byDay = /* @__PURE__ */ new Map();
+    assigned.forEach((r) => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    byDay.forEach((reqs) => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1], cur = sorted[i];
+        const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;
+        const needMin = requiredGapMin2(prev.locationId, cur.locationId);
+        idle += Math.max(0, gapMin - needMin);
+      }
+    });
+    return idle;
+  }
+
+  // src/engine/greedy.js
+  function candidateLocationsFor(memberId) {
+    const member = memberById(memberId);
+    if (!member || !Array.isArray(member.locationIds)) return [];
+    const knownLocationIds = knownLocationIdSet();
+    return member.locationIds.filter((id) => knownLocationIds.has(id));
+  }
+  function candidateLocationsForRequest(req) {
+    const excluded = req.excludedLocationIds || [];
+    const base = candidateLocationsFor(req.memberId).filter(
+      (id) => id !== null && !excluded.includes(id)
+    );
+    const knownLocationIds = knownLocationIdSet();
+    const extra = (req.extraLocationIds || []).filter(
+      (id) => knownLocationIds.has(id) && !base.includes(id)
+    );
+    return base.concat(extra);
+  }
+  function requiredGapMin(locA, locB) {
+    const raw = Math.max(BREAK_MIN, travelMinutes(locA, locB));
+    return Math.ceil(raw / SLOT_MIN) * SLOT_MIN;
+  }
+  var DAYTIME_END_MIN = 18 * 60;
+  function isDaytimeStart(cand) {
+    return START_MIN + cand.startSlot * SLOT_MIN < DAYTIME_END_MIN;
+  }
+  function isHalfHourStart(cand) {
+    return (START_MIN + cand.startSlot * SLOT_MIN) % 30 === 0;
+  }
+  function dailyTravelCount(chain) {
+    let count = 0;
+    for (let i = 1; i < chain.length; i++) {
+      if (travelMinutes(chain[i - 1].locationId, chain[i].locationId) > 0)
+        count++;
+    }
+    return count;
+  }
+  function dayChainViolation(chain, soloIds) {
+    for (let i = 1; i < chain.length; i++) {
+      const prev = chain[i - 1], cur = chain[i];
+      if ((cur.startSlot - prev.end) * SLOT_MIN < requiredGapMin(prev.locationId, cur.locationId))
+        return "gap";
+    }
+    if (dailyTravelCount(chain) > MAX_TRAVELS_PER_DAY) return "dailyTravel";
+    if (chainBreaksSoloTravel(chain, soloIds)) return "soloTravel";
+    return null;
+  }
+  function dailyInefficientMoveCount(chain, info) {
+    info = info === void 0 ? inefficientRoundTripLocationInfo() : info;
+    const locs = [];
+    chain.forEach((s) => {
+      if (locs[locs.length - 1] !== s.locationId) locs.push(s.locationId);
+    });
+    let count = 0;
+    for (let i = 1; i < locs.length - 1; i++) {
+      if (isInefficientRoundTrip(info, locs[i - 1], locs[i], locs[i + 1]))
+        count++;
+    }
+    return count;
+  }
+  function greedyAssign(eligibleReqs, options, pinned) {
+    options = options || {};
+    pinned = pinned || [];
+    const travelFirst = !!options.travelFirst;
+    const preferDaytime = !!options.preferDaytime;
+    const groupByLocation = !!options.groupByLocation;
+    const minimizeUnassigned = !!options.minimizeUnassigned;
+    const sessionCountFirst = !!options.sessionCountFirst;
+    const pinnedLocationDay = options.pinnedLocationDay || null;
+    const maxTravelsPerDay = options.maxTravelsPerDay || MAX_TRAVELS_PER_DAY;
+    const maxTravelsPerWeek = options.maxTravelsPerWeek || null;
+    const travelCountOnly = !!options.travelCountOnly;
+    const forceOnceMemberIds = options.forceOnceMemberIds ? new Set(options.forceOnceMemberIds) : null;
+    const externalDayOrder = options.stage1DayOrder || null;
+    const forbidInefficient = !!options.forbidInefficient;
+    const soloTravelIds = soloTravelMemberIds();
+    const ineffInfo = inefficientRoundTripLocationInfo();
+    const priorityRank = new Map(eligibleReqs.map((r, i) => [r.id, i]));
+    const byDay = /* @__PURE__ */ new Map();
+    eligibleReqs.forEach((r) => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    const days = [...byDay.keys()].sort((a, b) => a - b);
+    const allLocIds = state.locations.map((l) => l.id).concat([null]);
+    const memberIdsByDay = /* @__PURE__ */ new Map();
+    function allMemberIdsForDay(day) {
+      let ids = memberIdsByDay.get(day);
+      if (!ids) {
+        ids = new Set((byDay.get(day) || []).map((r) => r.memberId));
+        memberIdsByDay.set(day, ids);
+      }
+      return ids;
+    }
+    const locationsByReq = /* @__PURE__ */ new Map();
+    function locationsForReq(r) {
+      let locs = locationsByReq.get(r);
+      if (!locs) {
+        locs = candidateLocationsForRequest(r);
+        locationsByReq.set(r, locs);
+      }
+      return locs;
+    }
+    const locIndexOf = new Map(allLocIds.map((id, i) => [id, i]));
+    const LOCS = allLocIds.length;
+    const needOfPair = new Array(LOCS * LOCS), travelOfPair = new Array(LOCS * LOCS);
+    allLocIds.forEach(
+      (a, i) => allLocIds.forEach((b, j) => {
+        needOfPair[i * LOCS + j] = requiredGapMin(a, b);
+        travelOfPair[i * LOCS + j] = travelMinutes(a, b);
+      })
+    );
+    const memberBitOf = /* @__PURE__ */ new Map();
+    eligibleReqs.forEach((r) => {
+      if (!memberBitOf.has(r.memberId)) memberBitOf.set(r.memberId, memberBitOf.size);
+    });
+    const MEMBER_WORDS = Math.max(1, Math.ceil(memberBitOf.size / 32));
+    function pairNeed(predIdx, predLoc, locId, locIdx) {
+      return locIdx === void 0 ? requiredGapMin(predLoc, locId) : needOfPair[predIdx * LOCS + locIdx];
+    }
+    function pairTravel(predIdx, predLoc, locId, locIdx) {
+      return locIdx === void 0 ? travelMinutes(predLoc, locId) : travelOfPair[predIdx * LOCS + locIdx];
+    }
+    function runPass(stage1Order, allowGapMin) {
+      const assigned = [];
+      const memberDays = /* @__PURE__ */ new Map();
+      const chainByDay = /* @__PURE__ */ new Map();
+      function withinCaps(memberId, day) {
+        const usedDays = memberDays.get(memberId);
+        if (!usedDays) return true;
+        if (memberDayViolation(memberId, day, usedDays)) return false;
+        if (usedDays.size >= maxSessionsFor(memberById(memberId)))
+          return false;
+        return true;
+      }
+      function commit(day, located) {
+        assigned.push(located);
+        if (!memberDays.has(located.memberId))
+          memberDays.set(located.memberId, /* @__PURE__ */ new Set());
+        memberDays.get(located.memberId).add(day);
+        if (!chainByDay.has(day)) chainByDay.set(day, []);
+        chainByDay.get(day).push(located);
+      }
+      function weeklyTravelUsedExcluding(day) {
+        let total = 0;
+        chainByDay.forEach((chain, d) => {
+          if (d === day) return;
+          total += dailyTravelCount(chain);
+        });
+        return total;
+      }
+      function buildBestChain(day, eligibleMemberIds, weightFn, endBefore, onlyLocationId, coveragePriority) {
+        weightFn = weightFn || (() => 1);
+        const otherDaysTravelUsed = maxTravelsPerWeek != null ? weeklyTravelUsedExcluding(day) : 0;
+        const cands = (byDay.get(day) || []).filter(
+          (r) => eligibleMemberIds.has(r.memberId) && (!endBefore || r.startSlot + durationToSlots(r.duration) <= endBefore.slot)
+        );
+        const nodes = [];
+        cands.forEach((cand) => {
+          const memberLocs = locationsForReq(cand);
+          const locs = onlyLocationId ? memberLocs.includes(onlyLocationId) ? [onlyLocationId] : [] : memberLocs;
+          locs.forEach((locId) => {
+            nodes.push({
+              cand,
+              locationId: locId,
+              end: cand.startSlot + durationToSlots(cand.duration)
+            });
+          });
+        });
+        nodes.sort(
+          (a, b) => a.end - b.end || priorityRank.get(a.cand.id) - priorityRank.get(b.cand.id)
+        );
+        const index = /* @__PURE__ */ new Map();
+        function indexList(end, locId) {
+          const byEnd = index.get(locId);
+          return byEnd && byEnd.get(end);
+        }
+        function timeCostOf(n) {
+          return n.travelMinutesSum + n.idleMinutesSum;
+        }
+        function addToIndex(node) {
+          let byEnd = index.get(node.locationId);
+          if (!byEnd) {
+            byEnd = /* @__PURE__ */ new Map();
+            index.set(node.locationId, byEnd);
+          }
+          let list = byEnd.get(node.end);
+          if (!list) {
+            list = [];
+            byEnd.set(node.end, list);
+          }
+          list.push(node);
+          list.sort(
+            (a, b) => travelFirst ? a.travelCount - b.travelCount || b.dp - a.dp || a.ineffCount - b.ineffCount || (travelCountOnly ? 0 : a.travelMinutesSum - b.travelMinutesSum || timeCostOf(a) - timeCostOf(b) || b.alignedScore - a.alignedScore || a.soloSlackPenalty - b.soloSlackPenalty) || (preferDaytime ? b.daytimeScore - a.daytimeScore : 0) || (groupByLocation ? b.groupScore - a.groupScore : 0) : (coveragePriority || Math.abs(a.dp - b.dp) >= COVERAGE_WEIGHT_GAP_THRESHOLD ? b.dp - a.dp || a.ineffCount - b.ineffCount : a.ineffCount - b.ineffCount || b.dp - a.dp) || a.travelCount - b.travelCount || (travelCountOnly ? 0 : a.travelMinutesSum - b.travelMinutesSum || timeCostOf(a) - timeCostOf(b) || b.alignedScore - a.alignedScore || a.soloSlackPenalty - b.soloSlackPenalty) || (preferDaytime ? b.daytimeScore - a.daytimeScore : 0) || (groupByLocation ? b.groupScore - a.groupScore : 0)
+          );
+        }
+        function chainScore(node) {
+          let s = 0, n = node;
+          while (n) {
+            s += priorityRank.get(n.cand.id);
+            n = n.prev;
+          }
+          return s;
+        }
+        function isBetterPair(dpA, countA, ineffA, travelA, timeCostA, alignedA, slackPenA, daytimeA, groupA, dpB, countB, ineffB, travelB, timeCostB, alignedB, slackPenB, daytimeB, groupB) {
+          const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;
+          if (travelFirst) {
+            if (countA !== countB) return countA < countB;
+            if (dpA !== dpB) return dpA > dpB;
+            if (ineffA !== ineffB) return ineffA < ineffB;
+          } else if (coveragePriority || hardWeightGap) {
+            if (dpA !== dpB) return dpA > dpB;
+            if (ineffA !== ineffB) return ineffA < ineffB;
+            if (countA !== countB) return countA < countB;
+          } else {
+            if (ineffA !== ineffB) return ineffA < ineffB;
+            if (dpA !== dpB) return dpA > dpB;
+            if (countA !== countB) return countA < countB;
+          }
+          if (travelCountOnly) return false;
+          if (travelA !== travelB) return travelA < travelB;
+          if (timeCostA !== timeCostB) return timeCostA < timeCostB;
+          if (alignedA !== alignedB) return alignedA > alignedB;
+          if (slackPenA !== slackPenB) return slackPenA < slackPenB;
+          if (preferDaytime && daytimeA !== daytimeB) return daytimeA > daytimeB;
+          if (groupByLocation && groupA !== groupB) return groupA > groupB;
+          return false;
+        }
+        const usedBits = new Uint32Array(nodes.length * MEMBER_WORDS);
+        let best = null;
+        nodes.forEach((node, nodeIdx) => {
+          const memberBit = memberBitOf.get(node.cand.memberId);
+          const memberWord = memberBit >>> 5, memberMask = 1 << (memberBit & 31);
+          node.bitBase = nodeIdx * MEMBER_WORDS;
+          let bestPrev = null, bestPrevDp = -Infinity, bestResultTravelOnly = Infinity, bestResultTimeCost = Infinity, bestResultAligned = -Infinity, bestResultSlackPen = Infinity, bestResultDaytime = -Infinity, bestResultGroup = -Infinity, bestTravelCount = Infinity, bestResultIneffCount = Infinity, bestTransitionMin = 0, bestSlackMin = 0;
+          const nodeLocIdx = locIndexOf.get(node.locationId);
+          allLocIds.forEach((predLoc, predIdx) => {
+            const need = pairNeed(predIdx, predLoc, node.locationId, nodeLocIdx);
+            const transitionMin = pairTravel(
+              predIdx,
+              predLoc,
+              node.locationId,
+              nodeLocIdx
+            );
+            for (let slackMin = 0; slackMin <= allowGapMin; slackMin += SLOT_MIN) {
+              const reqEnd2 = node.cand.startSlot - (need + slackMin) / SLOT_MIN;
+              const list = indexList(reqEnd2, predLoc);
+              if (!list) continue;
+              for (const prevNode of list) {
+                if (usedBits[prevNode.bitBase + memberWord] & memberMask) continue;
+                if (soloTravelIds.has(prevNode.cand.memberId) && prevNode.arrivedViaTravel && transitionMin > 0)
+                  continue;
+                const tc = prevNode.travelCount + (transitionMin > 0 ? 1 : 0);
+                if (tc > maxTravelsPerDay) continue;
+                if (maxTravelsPerWeek != null && otherDaysTravelUsed + tc > maxTravelsPerWeek)
+                  continue;
+                const resultTravelOnly = prevNode.travelMinutesSum + transitionMin;
+                const resultTimeCost = resultTravelOnly + prevNode.idleMinutesSum + slackMin;
+                const slackPenalty = soloTravelIds.has(node.cand.memberId) && transitionMin === 0 && slackMin > 0 ? slackMin : 0;
+                const resultSlackPen = prevNode.soloSlackPenalty + slackPenalty;
+                const resultIneffCount = prevNode.ineffCount + (isInefficientRoundTrip(
+                  ineffInfo,
+                  prevNode.twoBackLoc,
+                  prevNode.locationId,
+                  node.locationId
+                ) ? 1 : 0);
+                if (forbidInefficient && resultIneffCount > prevNode.ineffCount)
+                  continue;
+                if (!bestPrev || isBetterPair(
+                  prevNode.dp,
+                  tc,
+                  resultIneffCount,
+                  resultTravelOnly,
+                  resultTimeCost,
+                  prevNode.alignedScore,
+                  resultSlackPen,
+                  prevNode.daytimeScore,
+                  prevNode.groupScore,
+                  bestPrevDp,
+                  bestTravelCount,
+                  bestResultIneffCount,
+                  bestResultTravelOnly,
+                  bestResultTimeCost,
+                  bestResultAligned,
+                  bestResultSlackPen,
+                  bestResultDaytime,
+                  bestResultGroup
+                )) {
+                  bestPrevDp = prevNode.dp;
+                  bestPrev = prevNode;
+                  bestTravelCount = tc;
+                  bestResultIneffCount = resultIneffCount;
+                  bestResultTravelOnly = resultTravelOnly;
+                  bestResultTimeCost = resultTimeCost;
+                  bestTransitionMin = transitionMin;
+                  bestSlackMin = slackMin;
+                  bestResultAligned = prevNode.alignedScore;
+                  bestResultSlackPen = resultSlackPen;
+                  bestResultDaytime = prevNode.daytimeScore;
+                  bestResultGroup = prevNode.groupScore;
+                }
+                break;
+              }
+            }
+          });
+          const daytimeBonus = isDaytimeStart(node.cand) ? 1 : 0;
+          if (bestPrev) {
+            node.dp = bestPrev.dp + weightFn(node.cand.memberId);
+            node.prev = bestPrev;
+            node.travelCount = bestTravelCount;
+            node.ineffCount = bestResultIneffCount;
+            node.travelMinutesSum = bestPrev.travelMinutesSum + bestTransitionMin;
+            node.idleMinutesSum = bestPrev.idleMinutesSum + bestSlackMin;
+            node.alignedScore = bestPrev.alignedScore;
+            node.soloSlackPenalty = bestResultSlackPen;
+            node.daytimeScore = bestPrev.daytimeScore + daytimeBonus;
+            node.groupScore = bestPrev.groupScore + (bestPrev.locationId === node.locationId ? 1 : 0);
+            usedBits.copyWithin(
+              node.bitBase,
+              bestPrev.bitBase,
+              bestPrev.bitBase + MEMBER_WORDS
+            );
+            node.arrivedViaTravel = bestPrev.locationId !== node.locationId;
+          } else {
+            node.dp = weightFn(node.cand.memberId);
+            node.prev = null;
+            node.travelCount = 0;
+            node.ineffCount = 0;
+            node.travelMinutesSum = 0;
+            node.idleMinutesSum = 0;
+            node.alignedScore = isHalfHourStart(node.cand) ? 1 : 0;
+            node.soloSlackPenalty = 0;
+            node.daytimeScore = daytimeBonus;
+            node.groupScore = 0;
+            node.arrivedViaTravel = false;
+          }
+          usedBits[node.bitBase + memberWord] |= memberMask;
+          node.twoBackLoc = roundTripOriginLoc(
+            node,
+            (n) => n.prev,
+            (n) => n.locationId
+          );
+          if (node.dp > -Infinity) {
+            addToIndex(node);
+            const nodeTimeCost = timeCostOf(node);
+            const bestTimeCost = best ? timeCostOf(best) : null;
+            const tie = best && node.dp === best.dp && node.ineffCount === best.ineffCount && node.travelCount === best.travelCount && (travelCountOnly || node.travelMinutesSum === best.travelMinutesSum) && (travelCountOnly || nodeTimeCost === bestTimeCost) && (travelCountOnly || node.alignedScore === best.alignedScore) && (travelCountOnly || node.soloSlackPenalty === best.soloSlackPenalty) && (!preferDaytime || node.daytimeScore === best.daytimeScore) && (!groupByLocation || node.groupScore === best.groupScore);
+            if (!best || isBetterPair(
+              node.dp,
+              node.travelCount,
+              node.ineffCount,
+              node.travelMinutesSum,
+              nodeTimeCost,
+              node.alignedScore,
+              node.soloSlackPenalty,
+              node.daytimeScore,
+              node.groupScore,
+              best.dp,
+              best.travelCount,
+              best.ineffCount,
+              best.travelMinutesSum,
+              bestTimeCost,
+              best.alignedScore,
+              best.soloSlackPenalty,
+              best.daytimeScore,
+              best.groupScore
+            ) || tie && chainScore(node) < chainScore(best))
+              best = node;
+          }
+        });
+        let chosen = best;
+        if (endBefore) {
+          chosen = null;
+          allLocIds.forEach((loc) => {
+            const need = requiredGapMin(loc, endBefore.locationId);
+            const transitionMin = travelMinutes(loc, endBefore.locationId);
+            if (endBefore.noTravelIn && transitionMin > 0) return;
+            for (let slackMin = 0; slackMin <= allowGapMin; slackMin += SLOT_MIN) {
+              const gapSlots = (need + slackMin) / SLOT_MIN;
+              const list = indexList(endBefore.slot - gapSlots, loc);
+              if (!list || list.length === 0) continue;
+              const node = list.find(
+                (n) => !(soloTravelIds.has(n.cand.memberId) && n.arrivedViaTravel && transitionMin > 0)
+              );
+              if (!node) continue;
+              const nodeIneffCount = node.ineffCount + (isInefficientRoundTrip(
+                ineffInfo,
+                node.twoBackLoc,
+                node.locationId,
+                endBefore.locationId
+              ) ? 1 : 0);
+              if (forbidInefficient && nodeIneffCount > node.ineffCount) continue;
+              const nodeTimeCost = timeCostOf(node);
+              const chosenTimeCost = chosen ? timeCostOf(chosen) : null;
+              if (!chosen || isBetterPair(
+                node.dp,
+                node.travelCount,
+                nodeIneffCount,
+                node.travelMinutesSum,
+                nodeTimeCost,
+                node.alignedScore,
+                node.soloSlackPenalty,
+                node.daytimeScore,
+                node.groupScore,
+                chosen.dp,
+                chosen.travelCount,
+                chosen.ineffCount,
+                chosen.travelMinutesSum,
+                chosenTimeCost,
+                chosen.alignedScore,
+                chosen.soloSlackPenalty,
+                chosen.daytimeScore,
+                chosen.groupScore
+              )) {
+                chosen = node;
+              }
+            }
+          });
+        }
+        if (!chosen) return [];
+        const chain = [];
+        let cur = chosen;
+        while (cur) {
+          chain.unshift({
+            id: cur.cand.id,
+            memberId: cur.cand.memberId,
+            day,
+            startSlot: cur.cand.startSlot,
+            duration: cur.cand.duration,
+            locationId: cur.locationId
+          });
+          cur = cur.prev;
+        }
+        return chain;
+      }
+      function extendExistingChain(day, eligibleMemberIds, coveragePriority) {
+        let chain = chainByDay.get(day) || [];
+        if (chain.length === 0) return;
+        const usedMembers = new Set(chain.map((s) => s.memberId));
+        const dayCands = byDay.get(day) || [];
+        let extending = true;
+        while (extending) {
+          extending = false;
+          const chainEnd = chain[chain.length - 1];
+          const chainTwoBackLoc = roundTripOriginLoc(
+            chain.length - 1,
+            (i) => i > 0 ? i - 1 : null,
+            (i) => chain[i].locationId
+          );
+          const chainEndArrivedViaTravel = chain.length >= 2 && chain[chain.length - 2].locationId !== chainEnd.locationId;
+          const chainEndIsSoloTravelMember = soloTravelIds.has(chainEnd.memberId) && chainEndArrivedViaTravel;
+          let bestCand = null, bestLocated = null, bestCost = Infinity;
+          dayCands.forEach((cand) => {
+            if (!eligibleMemberIds.has(cand.memberId) || usedMembers.has(cand.memberId))
+              return;
+            let bestLoc = null;
+            locationsForReq(cand).forEach((locId) => {
+              const need = requiredGapMin(chainEnd.locationId, locId);
+              const actual = (cand.startSlot - (chainEnd.startSlot + durationToSlots(chainEnd.duration))) * SLOT_MIN;
+              if (actual < need || actual > need + allowGapMin) return;
+              const cost = travelMinutes(chainEnd.locationId, locId);
+              if (chainEndIsSoloTravelMember && cost > 0) return;
+              if ((forbidInefficient || !coveragePriority) && isInefficientRoundTrip(
+                ineffInfo,
+                chainTwoBackLoc,
+                chainEnd.locationId,
+                locId
+              ))
+                return;
+              if (!bestLoc || cost < bestLoc.cost) bestLoc = { locId, cost };
+            });
+            if (!bestLoc) return;
+            if (travelFirst && bestLoc.cost > 0) return;
+            if (!bestCand || bestLoc.cost < bestCost || bestLoc.cost === bestCost && priorityRank.get(cand.id) < priorityRank.get(bestCand.id)) {
+              bestCand = cand;
+              bestCost = bestLoc.cost;
+              bestLocated = {
+                id: cand.id,
+                memberId: cand.memberId,
+                day,
+                startSlot: cand.startSlot,
+                duration: cand.duration,
+                locationId: bestLoc.locId
+              };
+            }
+          });
+          if (bestLocated) {
+            const projectedChain = [...chain, bestLocated];
+            if (dailyTravelCount(projectedChain) > maxTravelsPerDay) break;
+            if (maxTravelsPerWeek != null && weeklyTravelUsedExcluding(day) + dailyTravelCount(projectedChain) > maxTravelsPerWeek)
+              break;
+            commit(day, bestLocated);
+            chain = chainByDay.get(day);
+            usedMembers.add(bestCand.memberId);
+            extending = true;
+          }
+        }
+      }
+      function endBeforeOf(chain) {
+        const first = chain[0];
+        const second = chain[1];
+        return {
+          slot: first.startSlot,
+          locationId: first.locationId,
+          noTravelIn: !!second && soloTravelIds.has(first.memberId) && travelMinutes(first.locationId, second.locationId) > 0
+        };
+      }
+      function extendChainBackward(day, eligibleMemberIds, weightFn, coveragePriority) {
+        const chain = chainByDay.get(day) || [];
+        if (chain.length === 0) return;
+        const usedMembers = new Set(chain.map((s) => s.memberId));
+        const remaining = new Set(
+          [...eligibleMemberIds].filter((id) => !usedMembers.has(id))
+        );
+        if (remaining.size === 0) return;
+        const frontChain = buildBestChain(
+          day,
+          remaining,
+          weightFn,
+          endBeforeOf(chain),
+          null,
+          coveragePriority
+        );
+        if (frontChain.length === 0) return;
+        const combined = [...frontChain, ...chain];
+        if (dailyTravelCount(combined) > maxTravelsPerDay) return;
+        if (forbidInefficient && dailyInefficientMoveCount(combined, ineffInfo) > dailyInefficientMoveCount(chain, ineffInfo))
+          return;
+        if (maxTravelsPerWeek != null && weeklyTravelUsedExcluding(day) + dailyTravelCount(combined) > maxTravelsPerWeek)
+          return;
+        frontChain.forEach((s) => {
+          assigned.push(s);
+          if (!memberDays.has(s.memberId)) memberDays.set(s.memberId, /* @__PURE__ */ new Set());
+          memberDays.get(s.memberId).add(day);
+        });
+        chainByDay.set(day, combined);
+      }
+      function fillDay(day, eligibleMemberIds, weightFn, coveragePriority) {
+        if ((chainByDay.get(day) || []).length > 0) {
+          extendExistingChain(day, eligibleMemberIds, coveragePriority);
+          extendChainBackward(day, eligibleMemberIds, weightFn, coveragePriority);
+        } else {
+          buildBestChain(
+            day,
+            eligibleMemberIds,
+            weightFn,
+            null,
+            null,
+            coveragePriority
+          ).forEach((s) => commit(day, s));
+        }
+      }
+      function fairnessWeight(memberId) {
+        if (forceOnceMemberIds && forceOnceMemberIds.has(memberId)) {
+          const usedDays = memberDays.get(memberId);
+          if (!usedDays || usedDays.size === 0) return FORCE_ONCE_WEIGHT;
+        }
+        return 1;
+      }
+      if (pinned.length > 0) {
+        [...pinned].sort((a, b) => a.day - b.day || a.startSlot - b.startSlot).forEach((p) => commit(p.day, { ...p }));
+        [...new Set(pinned.map((p) => p.day))].forEach(
+          (day) => extendChainBackward(
+            day,
+            new Set(
+              [...allMemberIdsForDay(day)].filter((id) => withinCaps(id, day))
+            ),
+            fairnessWeight
+          )
+        );
+      }
+      if (pinnedLocationDay && !pinned.some((p) => p.day === pinnedLocationDay.day) && (byDay.get(pinnedLocationDay.day) || []).length > 0) {
+        buildBestChain(
+          pinnedLocationDay.day,
+          new Set(
+            [...allMemberIdsForDay(pinnedLocationDay.day)].filter(
+              (id) => withinCaps(id, pinnedLocationDay.day)
+            )
+          ),
+          fairnessWeight,
+          null,
+          pinnedLocationDay.locationId
+        ).forEach((s) => commit(pinnedLocationDay.day, s));
+      }
+      stage1Order.forEach((day) => {
+        const elig = new Set(
+          [...allMemberIdsForDay(day)].filter((id) => {
+            if (!sessionCountFirst) {
+              const usedDays = memberDays.get(id);
+              if (usedDays && usedDays.size >= 1) return false;
+            }
+            return withinCaps(id, day);
+          })
+        );
+        fillDay(day, elig, fairnessWeight, !sessionCountFirst);
+      });
+      days.forEach((day) => {
+        const elig = new Set(
+          [...allMemberIdsForDay(day)].filter((id) => {
+            if (!withinCaps(id, day)) return false;
+            const usedDays = memberDays.get(id);
+            if (usedDays && isAdjacentDay(day, usedDays)) return false;
+            return true;
+          })
+        );
+        fillDay(day, elig);
+      });
+      days.forEach((day) => {
+        const elig = new Set(
+          [...allMemberIdsForDay(day)].filter((id) => withinCaps(id, day))
+        );
+        fillDay(day, elig);
+      });
+      return assigned;
+    }
+    function runWithGapPolicy(allowGapMin) {
+      const naturalResult = runPass(days, allowGapMin);
+      if (!minimizeUnassigned && !externalDayOrder) return naturalResult;
+      let best = naturalResult;
+      let bestMemberCount = new Set(best.map((r) => r.memberId)).size;
+      function consider(order) {
+        const attempt = runPass(order, allowGapMin);
+        const attemptMemberCount = new Set(attempt.map((r) => r.memberId)).size;
+        if (attemptMemberCount > bestMemberCount || attemptMemberCount === bestMemberCount && attempt.length > best.length) {
+          best = attempt;
+          bestMemberCount = attemptMemberCount;
+        }
+      }
+      if (minimizeUnassigned) {
+        consider(
+          [...days].sort(
+            (a, b) => allMemberIdsForDay(a).size - allMemberIdsForDay(b).size
+          )
+        );
+      }
+      if (externalDayOrder) {
+        consider(externalDayOrder.filter((d) => byDay.has(d)));
+      }
+      return best;
+    }
+    const strictResult = runWithGapPolicy(0);
+    const looseResult = ALLOWED_GAP_MIN > 0 ? runWithGapPolicy(ALLOWED_GAP_MIN) : strictResult;
+    return looseResult.length > strictResult.length ? looseResult : strictResult;
+  }
+  function totalTravelMinutes(assigned) {
+    let total = 0;
+    const byDay = /* @__PURE__ */ new Map();
+    assigned.forEach((r) => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    byDay.forEach((reqs) => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        total += travelMinutes(sorted[i - 1].locationId, sorted[i].locationId);
+      }
+    });
+    return total;
+  }
+  function totalTravelCount(assigned) {
+    let total = 0;
+    const byDay = /* @__PURE__ */ new Map();
+    assigned.forEach((r) => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    byDay.forEach((reqs) => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      for (let i = 1; i < sorted.length; i++) {
+        if (travelMinutes(sorted[i - 1].locationId, sorted[i].locationId) > 0)
+          total++;
+      }
+    });
+    return total;
+  }
+  function totalInefficientMoveCount(assigned, info) {
+    info = info === void 0 ? inefficientRoundTripLocationInfo() : info;
+    let total = 0;
+    const byDay = /* @__PURE__ */ new Map();
+    assigned.forEach((r) => {
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    byDay.forEach((reqs) => {
+      const sorted = [...reqs].sort((a, b) => a.startSlot - b.startSlot);
+      total += dailyInefficientMoveCount(sorted, info);
+    });
+    return total;
+  }
+  function buildCandidate(title, desc, sortedReqs, eligibleSet, allMemberIds, options, pinned) {
+    const assigned = greedyAssign(
+      sortedReqs.filter((r) => eligibleSet.has(r.id)),
+      options,
+      pinned
+    );
+    const unassignedMembers = unassignedMembersFor(assigned, allMemberIds);
+    return {
+      title,
+      desc,
+      assigned,
+      unassignedMembers,
+      travelMinutes: totalTravelMinutes(assigned)
+    };
+  }
+  var CONTENTION_BUCKET_SLOTS = durationToSlots(SESSION_DURATION_MIN);
+  function reqEnd(r) {
+    return r.startSlot + durationToSlots(r.duration);
+  }
+  function endBucket(r) {
+    return Math.floor(reqEnd(r) / CONTENTION_BUCKET_SLOTS);
+  }
+  function defaultSort(eligible, jitter) {
+    return [...eligible].sort(
+      (a, b) => a.day - b.day || endBucket(a) - endBucket(b) || jitter.get(a.id) - jitter.get(b.id) || reqEnd(a) - reqEnd(b)
+    );
+  }
+  var STRATEGIES = [
+    {
+      title: "후보A - 인원 최대",
+      desc: "미배정 없음 → 비효율 이동 없음 → 수업 수·이동 횟수·빈 시간 균형(수업 1건 = 이동 1번) 순으로 배정합니다.",
+      // minimizeUnassigned: 기본 요일 순서로 한 번 배정해보고, 신청 가능한 회원이 적은
+      // 요일부터 먼저 채우는 대안 순서로도 한 번 더 시도해본 뒤, 미배정 회원이 더 적은
+      // 쪽(동점이면 총 세션 수가 많은 쪽)을 택한다 — 예전에는 이 대안 시도를 별도 후보(H)로
+      // 분리해뒀지만, 대안이 기본 순서보다 나쁠 수는 없는 구조라(runWithGapPolicy 참고) 후보A
+      // 자체에 통합했다. 분리해뒀을 때는 후보A와 후보H가 대부분 똑같거나, 다르면 항상 후보H가
+      // 후보A보다 낫거나 같아서 후보A를 고를 이유가 없는 중복이었다.
+      options: { strengthenSearch: "count", minimizeUnassigned: true },
+      sort: defaultSort
+    },
+    {
+      title: "후보B - 수업 횟수 최대",
+      desc: "수업 횟수 최대 → 인원 최대 (미배정 1명까지 허용) → 이동 횟수 최저 순으로 배정합니다.",
+      options: {
+        sessionCountFirst: true,
+        strengthenSearch: "sessions",
+        maxUnassigned: 1
+      },
+      sort: defaultSort
+    }
+  ];
+  function strengthenCandidate(baseline, sorted, eligibleIds, allMemberIds, options, pinned, primary) {
+    let best = baseline;
+    let bestScore = candidateSearchScore(best, primary, options.maxUnassigned);
+    function consider(opts) {
+      const attempt = buildCandidate(
+        baseline.title,
+        baseline.desc,
+        sorted,
+        eligibleIds,
+        allMemberIds,
+        opts,
+        pinned
+      );
+      const attemptScore = candidateSearchScore(
+        attempt,
+        primary,
+        options.maxUnassigned
+      );
+      if (isCandidateWorse(bestScore, attemptScore)) {
+        best = attempt;
+        bestScore = attemptScore;
+      }
+    }
+    const flippedOptions = Object.assign({}, options, {
+      sessionCountFirst: !options.sessionCountFirst
+    });
+    consider(flippedOptions);
+    [options, flippedOptions].forEach(
+      (o) => consider(Object.assign({}, o, { forbidInefficient: true }))
+    );
+    if (state.locations.length >= 2) {
+      [options, flippedOptions].forEach((optsVariant) => {
+        DAYS.forEach((d, day) => {
+          state.locations.forEach((loc) => {
+            consider(
+              Object.assign({}, optsVariant, {
+                pinnedLocationDay: { day, locationId: loc.id }
+              })
+            );
+          });
+        });
+      });
+    }
+    return best;
+  }
+  function repairUnassigned(baseline, sorted, eligibleIds, allMemberIds, options, pinned, primary) {
+    let best = baseline;
+    let bestScore = candidateSearchScore(best, primary, options.maxUnassigned);
+    function tryForce(ids) {
+      const forcedOptions = Object.assign({}, options, {
+        forceOnceMemberIds: ids
+      });
+      const attempt = buildCandidate(
+        baseline.title,
+        baseline.desc,
+        sorted,
+        eligibleIds,
+        allMemberIds,
+        forcedOptions,
+        pinned
+      );
+      const attemptScore = candidateSearchScore(
+        attempt,
+        primary,
+        options.maxUnassigned
+      );
+      if (!isCandidateWorse(attemptScore, bestScore)) {
+        best = attempt;
+        bestScore = attemptScore;
+        return true;
+      }
+      return false;
+    }
+    if (baseline.unassignedMembers.length > 0 && baseline.unassignedMembers.length <= 6) {
+      tryForce(baseline.unassignedMembers.map((m) => m.id));
+    }
+    const tried = /* @__PURE__ */ new Set();
+    let guard = 0;
+    while (guard < 6) {
+      guard++;
+      const target = best.unassignedMembers.find((m) => !tried.has(m.id));
+      if (!target) break;
+      tried.add(target.id);
+      tryForce([target.id]);
+    }
+    return best;
+  }
+  function buildCandidateFromStrategy(strategyIndex, eligible, eligibleIds, allMemberIds, jitter, pinned, dayOrder) {
+    const strategy = STRATEGIES[strategyIndex];
+    const sorted = strategy.sort(eligible, jitter);
+    const strategyOptions = typeof strategy.options === "function" ? strategy.options() : strategy.options;
+    const globalOptions = {};
+    if (dayOrder) globalOptions.stage1DayOrder = dayOrder;
+    const options = Object.assign({}, strategyOptions, globalOptions);
+    let cand = buildCandidate(
+      strategy.title,
+      strategy.desc,
+      sorted,
+      eligibleIds,
+      allMemberIds,
+      options,
+      pinned
+    );
+    if (strategyOptions.strengthenSearch) {
+      cand = strengthenCandidate(
+        cand,
+        sorted,
+        eligibleIds,
+        allMemberIds,
+        options,
+        pinned,
+        strategyOptions.strengthenSearch
+      );
+      if (cand.unassignedMembers.length > 0) {
+        cand = repairUnassigned(
+          cand,
+          sorted,
+          eligibleIds,
+          allMemberIds,
+          options,
+          pinned,
+          strategyOptions.strengthenSearch
+        );
+      }
+    }
+    cand.strategyIndex = strategyIndex;
+    return cand;
+  }
+  function candidateSearchScore(cand, primary, maxUnassigned) {
+    const count = new Set(cand.assigned.map((r) => r.memberId)).size;
+    const sessions = cand.assigned.length;
+    const travel = totalTravelCount(cand.assigned);
+    const ineff = totalInefficientMoveCount(cand.assigned);
+    const capOk = typeof maxUnassigned === "number" && cand.unassignedMembers.length > maxUnassigned ? 0 : 1;
+    const idle = schedule2TotalIdleMinutes(cand.assigned);
+    const balanced = sessions * SESSION_VALUE_MINUTES - travel * TRAVEL_VALUE_MINUTES - idle;
+    return primary === "sessions" ? [capOk, -ineff, sessions, count, -travel, -idle] : [capOk, count, -ineff, balanced, sessions, -travel, -idle];
+  }
+  function isCandidateWorse(a, b) {
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
+    return false;
+  }
+  function makeSeededRandom(seed) {
+    let s = seed >>> 0;
+    return function() {
+      s |= 0;
+      s = s + 1831565813 | 0;
+      let t = Math.imul(s ^ s >>> 15, 1 | s);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function shuffledDayOrder(randomFn) {
+    const order = DAYS.map((_, i) => i);
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(randomFn() * (i + 1));
+      const tmp = order[i];
+      order[i] = order[j];
+      order[j] = tmp;
+    }
+    return order;
+  }
+  function yieldToUI() {
+    if (typeof document === "undefined" || document.hidden) {
+      return new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    return new Promise(
+      (resolve) => requestAnimationFrame(() => setTimeout(resolve, 0))
+    );
+  }
+  function checkGenerationCancelled() {
+    if (runtime.generationCancelRequested) throw new GenerationCancelledError();
+  }
+  function* greedyAttemptInputs(strategyIndex, eligible, attempts) {
+    const rand = makeSeededRandom(strategyIndex + 1);
+    yield { jitter: new Map(eligible.map((r) => [r.id, 0])), dayOrder: void 0 };
+    for (let i = 0; i < attempts; i++) {
+      const jitter = new Map(eligible.map((r) => [r.id, rand()]));
+      const dayOrder = shuffledDayOrder(rand);
+      yield { jitter, dayOrder };
+    }
+  }
+  var TRAVEL_VALUE_MINUTES = 60;
+  var SESSION_VALUE_MINUTES = TRAVEL_VALUE_MINUTES;
+
+  // src/engine/chainDpCore.js
+  var idleFirst = false;
+  function isIdleFirst() {
+    return idleFirst;
+  }
+  function setIdleFirst(on) {
+    idleFirst = on;
+  }
+  function sessionDurationFor2(member) {
+    return (member && (member.category || "상담")) === "상담" ? CONSULT_DURATION_MIN_2 : SESSION_DURATION_MIN_2;
+  }
+  function maxSessionsFor2(member) {
+    if (!member) return 1;
+    if (currentOnceLimitIds2().includes(member.id)) return 1;
+    return (member.category || "상담") === "상담" ? 1 : MAX_SESSIONS_PER_MEMBER;
+  }
+  function requiredGapMin2(locA, locB) {
+    const raw = travelMinutes(locA, locB);
+    return raw > 0 ? Math.ceil(raw / SLOT_MIN) * SLOT_MIN : 0;
+  }
+  function buildDayNodes(dayRequests, weightFn, jitterFn, locationsFor = candidateLocationsForRequest) {
+    const nodes = [];
+    dayRequests.forEach((r) => {
+      const member = memberById(r.memberId);
+      const duration = sessionDurationFor2(member);
+      const end = r.startSlot + durationToSlots(duration);
+      locationsFor(r).forEach((locationId) => {
+        const weight = weightFn(r.memberId, r.startSlot, locationId, r.day);
+        if (!weight) return;
+        nodes.push({
+          id: r.id,
+          memberId: r.memberId,
+          day: r.day,
+          startSlot: r.startSlot,
+          duration,
+          locationId,
+          end,
+          weight,
+          jitter: jitterFn ? jitterFn() : 0
+        });
+      });
+    });
+    return nodes;
+  }
+  function runChainDP(nodes, maxTravelsPerDay, ineffInfo, coveragePriority) {
+    if (maxTravelsPerDay === void 0) maxTravelsPerDay = MAX_TRAVELS_PER_DAY;
+    nodes = nodes.slice().sort((a, b) => a.end - b.end || a.startSlot - b.startSlot);
+    const n = nodes.length;
+    const dp = new Array(n), tc = new Array(n), tm = new Array(n), idle = new Array(n), js = new Array(n), ineff = new Array(n), prev = new Array(n), twoBackLocIdx = new Array(n);
+    const prevOrNull = (k) => prev[k] !== -1 ? prev[k] : null;
+    const locOfIndex = (k) => nodes[k].locationId;
+    function better(dpA, ineffA, tcA, tmA, idleA, jsA, dpB, ineffB, tcB, tmB, idleB, jsB) {
+      const hardWeightGap = Math.abs(dpA - dpB) >= COVERAGE_WEIGHT_GAP_THRESHOLD;
+      if (coveragePriority || hardWeightGap) {
+        if (dpA !== dpB) return dpA > dpB;
+        if (ineffA !== ineffB) return ineffA < ineffB;
+      } else {
+        if (ineffA !== ineffB) return ineffA < ineffB;
+        if (dpA !== dpB) return dpA > dpB;
+      }
+      if (idleFirst && idleA !== idleB) return idleA < idleB;
+      if (tcA !== tcB) return tcA < tcB;
+      if (tmA !== tmB) return tmA < tmB;
+      if (idleA !== idleB) return idleA < idleB;
+      return jsA < jsB;
+    }
+    const locIndex = /* @__PURE__ */ new Map();
+    nodes.forEach((nd) => {
+      if (!locIndex.has(nd.locationId)) locIndex.set(nd.locationId, locIndex.size);
+    });
+    const locIds = Array.from(locIndex.keys());
+    const L = locIds.length;
+    const travelOf = new Array(L * L), gapNeedOf = new Array(L * L);
+    for (let a = 0; a < L; a++)
+      for (let b = 0; b < L; b++) {
+        travelOf[a * L + b] = travelMinutes(locIds[a], locIds[b]);
+        gapNeedOf[a * L + b] = requiredGapMin2(locIds[a], locIds[b]);
+      }
+    const locIdxOf = nodes.map((nd) => locIndex.get(nd.locationId));
+    const ineffOf = new Array((L + 1) * L * L);
+    for (let a = 0; a <= L; a++)
+      for (let b = 0; b < L; b++)
+        for (let c = 0; c < L; c++)
+          ineffOf[(a * L + b) * L + c] = isInefficientRoundTrip(
+            ineffInfo,
+            a === L ? null : locIds[a],
+            locIds[b],
+            locIds[c]
+          ) ? 1 : 0;
+    const memberIndex = /* @__PURE__ */ new Map();
+    nodes.forEach((nd) => {
+      if (!memberIndex.has(nd.memberId))
+        memberIndex.set(nd.memberId, memberIndex.size);
+    });
+    const W = Math.max(1, Math.ceil(memberIndex.size / 32));
+    const memberBits = new Uint32Array(n * W);
+    const memberIdxOf = nodes.map((nd) => memberIndex.get(nd.memberId));
+    const soloIds = soloTravelMemberIds();
+    const noTravelOut = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const node = nodes[i];
+      let bestDp = node.weight, bestIneff = 0, bestTc = 0, bestTm = 0, bestIdle = 0, bestJs = node.jitter || 0, bestPrev = -1;
+      const mIdx = memberIdxOf[i];
+      const mWord = mIdx >>> 5, mMask = 1 << (mIdx & 31);
+      for (let j = 0; j < i; j++) {
+        const p = nodes[j];
+        if (p.end > node.startSlot) break;
+        const pair = locIdxOf[j] * L + locIdxOf[i];
+        const gapNeed = gapNeedOf[pair];
+        const gapActual = (node.startSlot - p.end) * SLOT_MIN;
+        if (gapActual < gapNeed) continue;
+        const travel = travelOf[pair];
+        const addsTravel = travel > 0 ? 1 : 0;
+        const newTc = tc[j] + addsTravel;
+        if (newTc > maxTravelsPerDay) continue;
+        if (memberBits[j * W + mWord] & mMask) continue;
+        if (addsTravel && noTravelOut[j]) continue;
+        const newDp = dp[j] + node.weight;
+        const newTm = tm[j] + travel;
+        const newIdle = idle[j] + (gapActual - gapNeed);
+        const newJs = js[j] + (node.jitter || 0);
+        const newIneff = ineff[j] + ineffOf[(twoBackLocIdx[j] * L + locIdxOf[j]) * L + locIdxOf[i]];
+        if (better(
+          newDp,
+          newIneff,
+          newTc,
+          newTm,
+          newIdle,
+          newJs,
+          bestDp,
+          bestIneff,
+          bestTc,
+          bestTm,
+          bestIdle,
+          bestJs
+        )) {
+          bestDp = newDp;
+          bestIneff = newIneff;
+          bestTc = newTc;
+          bestTm = newTm;
+          bestIdle = newIdle;
+          bestJs = newJs;
+          bestPrev = j;
+        }
+      }
+      dp[i] = bestDp;
+      ineff[i] = bestIneff;
+      tc[i] = bestTc;
+      tm[i] = bestTm;
+      idle[i] = bestIdle;
+      js[i] = bestJs;
+      prev[i] = bestPrev;
+      const twoBack = roundTripOriginLoc(i, prevOrNull, locOfIndex);
+      twoBackLocIdx[i] = twoBack === null ? L : locIndex.get(twoBack);
+      noTravelOut[i] = bestPrev !== -1 && soloIds.has(node.memberId) && travelOf[locIdxOf[bestPrev] * L + locIdxOf[i]] > 0 ? 1 : 0;
+      if (bestPrev !== -1)
+        memberBits.set(
+          memberBits.subarray(bestPrev * W, bestPrev * W + W),
+          i * W
+        );
+      memberBits[i * W + mWord] |= mMask;
+    }
+    let bestEnd = -1, bestDpAll = 0, bestIneffAll = 0, bestTcAll = 0, bestTmAll = 0, bestIdleAll = 0, bestJsAll = 0;
+    for (let i = 0; i < n; i++) {
+      if (bestEnd === -1 || better(
+        dp[i],
+        ineff[i],
+        tc[i],
+        tm[i],
+        idle[i],
+        js[i],
+        bestDpAll,
+        bestIneffAll,
+        bestTcAll,
+        bestTmAll,
+        bestIdleAll,
+        bestJsAll
+      )) {
+        bestDpAll = dp[i];
+        bestIneffAll = ineff[i];
+        bestTcAll = tc[i];
+        bestTmAll = tm[i];
+        bestIdleAll = idle[i];
+        bestJsAll = js[i];
+        bestEnd = i;
+      }
+    }
+    const chain = [];
+    let cur = bestEnd;
+    while (cur !== -1 && cur !== void 0) {
+      chain.unshift(nodes[cur]);
+      cur = prev[cur];
+    }
+    return chain;
+  }
+
+  // src/engine/rng.js
+  function mulberry32(seed) {
+    return function() {
+      seed |= 0;
+      seed = seed + 1831565813 | 0;
+      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  function shuffled(arr, randomFn) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(randomFn() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  // src/engine/chainDpPolish.js
+  function findEarlierRequestForLocation(requests, minStart, currentStart, locationId) {
+    let earliest = null;
+    requests.forEach((r) => {
+      if (r.startSlot < minStart || r.startSlot >= currentStart) return;
+      if (!candidateLocationsForRequest(r).includes(locationId)) return;
+      if (!earliest || r.startSlot < earliest.startSlot) earliest = r;
+    });
+    return earliest;
+  }
+  function moveNodeToRequest(node, request) {
+    node.id = request.id;
+    node.startSlot = request.startSlot;
+    node.end = request.startSlot + durationToSlots(node.duration);
+  }
+  async function runSchedule2Pipeline(eligibleReqs, reqsByDay, daysWithReqs, stage1DayOrder, runRepair, runPolish, polishBudgetMs, seedOffset, pins = []) {
+    seedOffset = seedOffset || 0;
+    const pinByKey = new Map(pins.map((p) => [pinKey(p), p]));
+    const pinNodesByDay = /* @__PURE__ */ new Map();
+    pins.forEach((p) => {
+      if (!pinNodesByDay.has(p.day)) pinNodesByDay.set(p.day, []);
+      pinNodesByDay.get(p.day).push({ ...p, end: p.startSlot + durationToSlots(p.duration) });
+    });
+    pinNodesByDay.forEach((list) => list.sort((a, b) => a.startSlot - b.startSlot));
+    function isPinned(node) {
+      return pinByKey.size > 0 && pinByKey.has(pinKey(node));
+    }
+    function keepsPins(day, chain) {
+      const dayPins = pinNodesByDay.get(day);
+      if (!dayPins) return true;
+      const keys = new Set(chain.map(pinKey));
+      return dayPins.every((p) => keys.has(pinKey(p)));
+    }
+    const FIXED_PIN_WEIGHT = 1e9;
+    const ineffInfo = inefficientRoundTripLocationInfo();
+    const soloIds = soloTravelMemberIds();
+    function dayChainAllowed(chain, day) {
+      return !dayChainViolation(chain, soloIds) && keepsPins(day, chain);
+    }
+    let yieldOverheadMs = 0;
+    function now() {
+      return performance.now() - yieldOverheadMs;
+    }
+    let lastYieldAt = performance.now();
+    const YIELD_INTERVAL_MS = 48;
+    async function maybeYield() {
+      checkGenerationCancelled();
+      const t = performance.now();
+      if (t - lastYieldAt < YIELD_INTERVAL_MS) return;
+      await yieldToUI();
+      yieldOverheadMs += performance.now() - t;
+      lastYieldAt = performance.now();
+      checkGenerationCancelled();
+    }
+    const stage1RandomFn = mulberry32(112233 + seedOffset);
+    const assignedCountByMember = /* @__PURE__ */ new Map();
+    const assignedDaysByMember = /* @__PURE__ */ new Map();
+    const dayChains = /* @__PURE__ */ new Map();
+    const REPAIR_DEADLINE = now() + 3e3;
+    const reqsByMemberDay = /* @__PURE__ */ new Map();
+    eligibleReqs.forEach((r) => {
+      if (!reqsByMemberDay.has(r.memberId))
+        reqsByMemberDay.set(r.memberId, /* @__PURE__ */ new Map());
+      const byDay = reqsByMemberDay.get(r.memberId);
+      if (!byDay.has(r.day)) byDay.set(r.day, []);
+      byDay.get(r.day).push(r);
+    });
+    function reqsFor(memberId, day) {
+      const byDay = reqsByMemberDay.get(memberId);
+      return byDay && byDay.get(day) || [];
+    }
+    function reqAt(memberId, day, startSlot) {
+      return reqsFor(memberId, day).find((r) => r.startSlot === startSlot);
+    }
+    const locationsByReq = /* @__PURE__ */ new Map();
+    function locationsForReq(r) {
+      let locs = locationsByReq.get(r);
+      if (!locs) {
+        locs = candidateLocationsForRequest(r);
+        locationsByReq.set(r, locs);
+      }
+      return locs;
+    }
+    function dayNodes(dayRequests, weightFn, jitterFn) {
+      const withPins = pinByKey.size === 0 ? weightFn : (memberId, startSlot, locationId, day) => pinByKey.has(pinKey({ memberId, day, startSlot, locationId })) ? FIXED_PIN_WEIGHT : weightFn(memberId, startSlot, locationId, day);
+      return buildDayNodes(dayRequests, withPins, jitterFn, locationsForReq);
+    }
+    function dayBlocked(memberId, day, leavingDay) {
+      const days = assignedDaysByMember.get(memberId);
+      if (!days || days.size === 0) return false;
+      const others = leavingDay === void 0 ? days : [...days].filter((d) => d !== leavingDay);
+      return !!memberDayViolation(memberId, day, others);
+    }
+    function isEligibleForDay(memberId, day) {
+      const cap = maxSessionsFor2(memberById(memberId));
+      if ((assignedCountByMember.get(memberId) || 0) >= cap) return false;
+      return !dayBlocked(memberId, day);
+    }
+    function countSession(day, node) {
+      assignedCountByMember.set(
+        node.memberId,
+        (assignedCountByMember.get(node.memberId) || 0) + 1
+      );
+      if (!assignedDaysByMember.has(node.memberId))
+        assignedDaysByMember.set(node.memberId, /* @__PURE__ */ new Set());
+      assignedDaysByMember.get(node.memberId).add(day);
+    }
+    function commit(day, node) {
+      if (!isPinned(node)) countSession(day, node);
+    }
+    pinNodesByDay.forEach((list, day) => list.forEach((p) => countSession(day, p)));
+    function uncommit(day, node) {
+      if (isPinned(node)) return;
+      assignedCountByMember.set(
+        node.memberId,
+        assignedCountByMember.get(node.memberId) - 1
+      );
+      assignedDaysByMember.get(node.memberId).delete(day);
+    }
+    function dominantLocationFor(day) {
+      const membersByLoc = /* @__PURE__ */ new Map();
+      reqsByDay.get(day).forEach((r) => {
+        if ((assignedCountByMember.get(r.memberId) || 0) !== 0) return;
+        locationsForReq(r).forEach((locId) => {
+          if (!membersByLoc.has(locId)) membersByLoc.set(locId, /* @__PURE__ */ new Set());
+          membersByLoc.get(locId).add(r.memberId);
+        });
+      });
+      let dominantLoc = null, dominantCount = -1;
+      membersByLoc.forEach((set, locId) => {
+        if (set.size > dominantCount) {
+          dominantCount = set.size;
+          dominantLoc = locId;
+        }
+      });
+      return dominantLoc;
+    }
+    stage1DayOrder.forEach((day) => {
+      const dominantLoc = dominantLocationFor(day);
+      const nodes = dayNodes(
+        reqsByDay.get(day),
+        (memberId, startSlot, locationId) => {
+          if ((assignedCountByMember.get(memberId) || 0) !== 0) return 0;
+          return locationId === dominantLoc ? 1.02 : 1;
+        },
+        () => stage1RandomFn()
+      );
+      let chain = runChainDP(nodes, void 0, ineffInfo, true);
+      if (!keepsPins(day, chain)) chain = (pinNodesByDay.get(day) || []).slice();
+      chain.forEach((node) => commit(day, node));
+      dayChains.set(day, chain);
+    });
+    const PIN_WEIGHT = 1e6;
+    daysWithReqs.forEach((day) => {
+      const existingChain = dayChains.get(day) || [];
+      existingChain.forEach((node) => uncommit(day, node));
+      const pinnedKeys = new Set(
+        existingChain.map(
+          (n) => n.memberId + "|" + n.startSlot + "|" + n.locationId
+        )
+      );
+      const pinnedMemberIds = new Set(existingChain.map((n) => n.memberId));
+      const nodes = dayNodes(
+        reqsByDay.get(day),
+        (memberId, startSlot, locationId) => {
+          if (pinnedKeys.has(memberId + "|" + startSlot + "|" + locationId))
+            return PIN_WEIGHT;
+          if (pinnedMemberIds.has(memberId)) return 0;
+          return isEligibleForDay(memberId, day) ? 1 : 0;
+        },
+        () => stage1RandomFn()
+      );
+      let chain = runChainDP(nodes, void 0, ineffInfo);
+      if (!keepsPins(day, chain)) chain = existingChain;
+      chain.forEach((node) => commit(day, node));
+      dayChains.set(day, chain);
+    });
+    const MAX_EJECTION_DEPTH = 3;
+    const targetMemberIds = scheduleTargetMemberIds();
+    function isCurrentlyAssigned(memberId) {
+      return (assignedCountByMember.get(memberId) || 0) > 0;
+    }
+    const excludedIdSet2 = new Set(currentExcludedIds2());
+    function tryPlaceMember(memberId, excludeDays, depth) {
+      if (depth > MAX_EJECTION_DEPTH) return false;
+      if (now() > REPAIR_DEADLINE) return false;
+      const candidateDays = daysWithReqs.filter(
+        (day) => !excludeDays.has(day) && !dayBlocked(memberId, day) && reqsByDay.get(day).some((r) => r.memberId === memberId)
+      );
+      for (const day of candidateDays) {
+        const chain0 = dayChains.get(day) || [];
+        const dayReqsForMember = reqsFor(memberId, day);
+        const candNodes = dayNodes(dayReqsForMember, () => 1);
+        for (const cand of candNodes) {
+          let insertAt = 0;
+          while (insertAt < chain0.length && chain0[insertAt].startSlot < cand.startSlot)
+            insertAt++;
+          let feasible = true;
+          if (insertAt > 0) {
+            const prev = chain0[insertAt - 1];
+            const prevEnd = prev.startSlot + durationToSlots(prev.duration);
+            if (cand.startSlot < prevEnd || (cand.startSlot - prevEnd) * SLOT_MIN < requiredGapMin2(prev.locationId, cand.locationId))
+              feasible = false;
+          }
+          if (feasible && insertAt < chain0.length) {
+            const next = chain0[insertAt];
+            if (next.startSlot < cand.end || (next.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, next.locationId))
+              feasible = false;
+          }
+          if (!feasible) continue;
+          const newNode = {
+            id: cand.id,
+            memberId,
+            day,
+            startSlot: cand.startSlot,
+            duration: cand.duration,
+            locationId: cand.locationId,
+            end: cand.end
+          };
+          const newChain = chain0.slice();
+          newChain.splice(insertAt, 0, newNode);
+          if (!dayChainAllowed(newChain, day)) continue;
+          commit(day, newNode);
+          dayChains.set(day, newChain);
+          return true;
+        }
+        for (const cand of candNodes) {
+          const chain = dayChains.get(day) || [];
+          const overlapping = /* @__PURE__ */ new Set();
+          chain.forEach((n) => {
+            const nEnd = n.startSlot + durationToSlots(n.duration);
+            if (cand.startSlot < nEnd && n.startSlot < cand.end)
+              overlapping.add(n.memberId);
+          });
+          let otherMemberId = null;
+          if (overlapping.size === 1) {
+            otherMemberId = [...overlapping][0];
+          } else if (overlapping.size === 0) {
+            const sorted = chain.slice().sort((a, b) => a.startSlot - b.startSlot);
+            let idx = 0;
+            while (idx < sorted.length && sorted[idx].startSlot < cand.startSlot)
+              idx++;
+            const prevN = idx > 0 ? sorted[idx - 1] : null;
+            const nextN = idx < sorted.length ? sorted[idx] : null;
+            const prevBad = prevN && (cand.startSlot - (prevN.startSlot + durationToSlots(prevN.duration))) * SLOT_MIN < requiredGapMin2(prevN.locationId, cand.locationId);
+            const nextBad = nextN && (nextN.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, nextN.locationId);
+            if (prevBad && nextBad && prevN.memberId !== nextN.memberId) continue;
+            if (prevBad) otherMemberId = prevN.memberId;
+            else if (nextBad) otherMemberId = nextN.memberId;
+            else continue;
+          } else {
+            continue;
+          }
+          const otherNode = chain.find((n) => n.memberId === otherMemberId);
+          if (isPinned(otherNode)) continue;
+          const remainingChain = chain.filter(
+            (n) => n.memberId !== otherMemberId
+          );
+          let insertAt = 0;
+          while (insertAt < remainingChain.length && remainingChain[insertAt].startSlot < cand.startSlot)
+            insertAt++;
+          let feasible = true;
+          if (insertAt > 0) {
+            const prev = remainingChain[insertAt - 1];
+            const prevEnd = prev.startSlot + durationToSlots(prev.duration);
+            const gapMin = (cand.startSlot - prevEnd) * SLOT_MIN;
+            if (gapMin < requiredGapMin2(prev.locationId, cand.locationId))
+              feasible = false;
+          }
+          if (feasible && insertAt < remainingChain.length) {
+            const next = remainingChain[insertAt];
+            const gapMin = (next.startSlot - cand.end) * SLOT_MIN;
+            if (gapMin < requiredGapMin2(cand.locationId, next.locationId))
+              feasible = false;
+          }
+          if (!feasible) continue;
+          const newNode = {
+            id: cand.id,
+            memberId,
+            day,
+            startSlot: cand.startSlot,
+            duration: cand.duration,
+            locationId: cand.locationId,
+            end: cand.end
+          };
+          const newChain = remainingChain.slice();
+          newChain.splice(insertAt, 0, newNode);
+          if (!dayChainAllowed(newChain, day)) continue;
+          uncommit(day, otherNode);
+          commit(day, newNode);
+          dayChains.set(day, newChain);
+          if (tryPlaceMember(
+            otherMemberId,
+            /* @__PURE__ */ new Set([...excludeDays, day]),
+            depth + 1
+          )) {
+            return true;
+          }
+          uncommit(day, newNode);
+          commit(day, otherNode);
+          dayChains.set(day, chain);
+        }
+      }
+      return false;
+    }
+    function stillUnassignedIds() {
+      return targetMemberIds.filter((id) => !isCurrentlyAssigned(id));
+    }
+    if (runRepair) {
+      let tryRebuildDayFor = function(memberId, day) {
+        const beforeUnassigned = stillUnassignedIds().length;
+        const existingChain = dayChains.get(day) || [];
+        existingChain.forEach((node) => uncommit(day, node));
+        const nodes = dayNodes(reqsByDay.get(day), (mId) => {
+          if (mId === memberId) return REBUILD_TARGET_WEIGHT;
+          return isEligibleForDay(mId, day) ? 1 : 0;
+        });
+        const newChain = runChainDP(nodes, void 0, ineffInfo);
+        if (!newChain.some((n) => n.memberId === memberId) || !keepsPins(day, newChain)) {
+          existingChain.forEach((node) => commit(day, node));
+          dayChains.set(day, existingChain);
+          return false;
+        }
+        newChain.forEach((node) => commit(day, node));
+        dayChains.set(day, newChain);
+        const afterUnassigned = stillUnassignedIds().length;
+        if (afterUnassigned < beforeUnassigned || afterUnassigned === beforeUnassigned && newChain.length >= existingChain.length) {
+          return true;
+        }
+        newChain.forEach((node) => uncommit(day, node));
+        existingChain.forEach((node) => commit(day, node));
+        dayChains.set(day, existingChain);
+        return false;
+      };
+      for (const memberId of stillUnassignedIds()) {
+        await maybeYield();
+        if (isCurrentlyAssigned(memberId)) continue;
+        tryPlaceMember(memberId, /* @__PURE__ */ new Set(), 0);
+      }
+      const REBUILD_TARGET_WEIGHT = 1e6;
+      for (const memberId of stillUnassignedIds()) {
+        await maybeYield();
+        if (now() > REPAIR_DEADLINE) break;
+        if (isCurrentlyAssigned(memberId)) continue;
+        const candidateDays = daysWithReqs.filter(
+          (day) => reqsByDay.get(day).some((r) => r.memberId === memberId)
+        );
+        for (const day of candidateDays) {
+          if (tryRebuildDayFor(memberId, day)) break;
+        }
+      }
+      let addedExtra = true;
+      let extraPassCount = 0;
+      while (addedExtra && extraPassCount < 5) {
+        addedExtra = false;
+        extraPassCount++;
+        const extraCandidateIds = state.members.filter((m) => !excludedIdSet2.has(m.id)).map((m) => m.id).filter((id) => {
+          const count = assignedCountByMember.get(id) || 0;
+          return count > 0 && count < maxSessionsFor2(memberById(id));
+        });
+        for (const memberId of extraCandidateIds) {
+          await maybeYield();
+          if (tryPlaceMember(memberId, /* @__PURE__ */ new Set(), 0)) addedExtra = true;
+        }
+      }
+    }
+    if (runPolish) {
+      let fewerTravelOrIdle = function(travelA, idleA, travelB, idleB) {
+        if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
+        return travelA < travelB;
+      }, dayIdleMinutes = function(chain) {
+        const sorted = [...chain].sort((a, b) => a.startSlot - b.startSlot);
+        let idle = 0;
+        for (let i = 1; i < sorted.length; i++) {
+          const prev = sorted[i - 1], cur = sorted[i];
+          const gapMin = (cur.startSlot - (prev.startSlot + durationToSlots(prev.duration))) * SLOT_MIN;
+          idle += Math.max(
+            0,
+            gapMin - requiredGapMin2(prev.locationId, cur.locationId)
+          );
+        }
+        return idle;
+      }, isTravelIdleBetter = function(travelA, idleA, travelB, idleB, ineffA, ineffB) {
+        ineffA = ineffA || 0;
+        ineffB = ineffB || 0;
+        if (ineffA !== ineffB) return ineffA < ineffB;
+        if (isIdleFirst() && idleA !== idleB) return idleA < idleB;
+        const scoreA = travelA * TRAVEL_VALUE_MINUTES + idleA;
+        const scoreB = travelB * TRAVEL_VALUE_MINUTES + idleB;
+        if (scoreA !== scoreB) return scoreA < scoreB;
+        if (travelA !== travelB) return travelA < travelB;
+        return idleA < idleB;
+      }, travelIdleImproves = function(deltaTravel, deltaIdle, deltaIneff) {
+        deltaIneff = deltaIneff || 0;
+        if (deltaIneff > 0) return false;
+        if (deltaIneff < 0) return true;
+        if (isIdleFirst() && deltaIdle !== 0) return deltaIdle < 0;
+        if (deltaTravel > 0) return false;
+        if (deltaTravel === 0) return deltaIdle < 0;
+        return deltaIdle <= -deltaTravel * TRAVEL_VALUE_MINUTES;
+      }, tryRelocateSession = function(node) {
+        if (isPinned(node)) return false;
+        const memberId = node.memberId;
+        const currentDay = node.day;
+        const currentChainWithout = (dayChains.get(currentDay) || []).filter(
+          (n) => n !== node
+        );
+        const beforeCurrentDayTravel = totalTravelCount(
+          dayChains.get(currentDay) || []
+        );
+        const beforeCurrentDayIdle = dayIdleMinutes(
+          dayChains.get(currentDay) || []
+        );
+        const beforeCurrentDayIneff = dailyInefficientMoveCount(
+          dayChains.get(currentDay) || [],
+          ineffInfo
+        );
+        const currentDayWithoutTravel = totalTravelCount(currentChainWithout);
+        const currentDayWithoutIdle = dayIdleMinutes(currentChainWithout);
+        const currentDayWithoutIneff = dailyInefficientMoveCount(
+          currentChainWithout,
+          ineffInfo
+        );
+        let bestMove = null;
+        const leavingAllowed = dayChainAllowed(currentChainWithout, currentDay);
+        daysWithReqs.forEach((day) => {
+          if (day !== currentDay) {
+            if (!leavingAllowed) return;
+            if (dayBlocked(memberId, day, currentDay)) return;
+          }
+          const dayReqsForMember = reqsFor(memberId, day);
+          if (dayReqsForMember.length === 0) return;
+          const candNodes = dayNodes(dayReqsForMember, () => 1);
+          const baseChain = day === currentDay ? currentChainWithout : dayChains.get(day) || [];
+          const beforeTargetDayTravel = day === currentDay ? 0 : totalTravelCount(baseChain);
+          const beforeTargetDayIdle = day === currentDay ? 0 : dayIdleMinutes(baseChain);
+          const beforeTargetDayIneff = day === currentDay ? 0 : dailyInefficientMoveCount(baseChain, ineffInfo);
+          candNodes.forEach((cand) => {
+            if (day === currentDay && cand.startSlot === node.startSlot && cand.locationId === node.locationId)
+              return;
+            let insertAt = 0;
+            while (insertAt < baseChain.length && baseChain[insertAt].startSlot < cand.startSlot)
+              insertAt++;
+            let feasible = true;
+            if (insertAt > 0) {
+              const prev = baseChain[insertAt - 1];
+              const prevEnd = prev.startSlot + durationToSlots(prev.duration);
+              if (cand.startSlot < prevEnd || (cand.startSlot - prevEnd) * SLOT_MIN < requiredGapMin2(prev.locationId, cand.locationId))
+                feasible = false;
+            }
+            if (feasible && insertAt < baseChain.length) {
+              const next = baseChain[insertAt];
+              if (next.startSlot < cand.end || (next.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, next.locationId))
+                feasible = false;
+            }
+            if (!feasible) return;
+            const newNode = {
+              id: cand.id,
+              memberId,
+              day,
+              startSlot: cand.startSlot,
+              duration: cand.duration,
+              locationId: cand.locationId,
+              end: cand.end
+            };
+            const newChain = baseChain.slice();
+            newChain.splice(insertAt, 0, newNode);
+            if (!dayChainAllowed(newChain, day)) return;
+            let deltaTravel, deltaIdle, deltaIneff;
+            if (day === currentDay) {
+              deltaTravel = totalTravelCount(newChain) - beforeCurrentDayTravel;
+              deltaIdle = dayIdleMinutes(newChain) - beforeCurrentDayIdle;
+              deltaIneff = dailyInefficientMoveCount(newChain, ineffInfo) - beforeCurrentDayIneff;
+            } else {
+              deltaTravel = currentDayWithoutTravel + totalTravelCount(newChain) - (beforeCurrentDayTravel + beforeTargetDayTravel);
+              deltaIdle = currentDayWithoutIdle + dayIdleMinutes(newChain) - (beforeCurrentDayIdle + beforeTargetDayIdle);
+              deltaIneff = currentDayWithoutIneff + dailyInefficientMoveCount(newChain, ineffInfo) - (beforeCurrentDayIneff + beforeTargetDayIneff);
+            }
+            const improves = travelIdleImproves(
+              deltaTravel,
+              deltaIdle,
+              deltaIneff
+            );
+            if (improves && (!bestMove || isTravelIdleBetter(
+              deltaTravel,
+              deltaIdle,
+              bestMove.deltaTravel,
+              bestMove.deltaIdle,
+              deltaIneff,
+              bestMove.deltaIneff
+            ))) {
+              bestMove = {
+                sameDay: day === currentDay,
+                targetDay: day,
+                newTargetChain: newChain,
+                deltaTravel,
+                deltaIdle,
+                deltaIneff
+              };
+            }
+          });
+        });
+        if (!bestMove) return false;
+        uncommit(currentDay, node);
+        if (bestMove.sameDay) {
+          dayChains.set(currentDay, bestMove.newTargetChain);
+        } else {
+          dayChains.set(currentDay, currentChainWithout);
+          dayChains.set(bestMove.targetDay, bestMove.newTargetChain);
+        }
+        const addedNode = bestMove.newTargetChain.find(
+          (n) => n.memberId === memberId
+        );
+        commit(bestMove.targetDay, addedNode);
+        return true;
+      }, insertFeasible = function(chainWithout, cand) {
+        let insertAt = 0;
+        while (insertAt < chainWithout.length && chainWithout[insertAt].startSlot < cand.startSlot)
+          insertAt++;
+        if (insertAt > 0) {
+          const prev = chainWithout[insertAt - 1];
+          const prevEnd = prev.startSlot + durationToSlots(prev.duration);
+          if (cand.startSlot < prevEnd || (cand.startSlot - prevEnd) * SLOT_MIN < requiredGapMin2(prev.locationId, cand.locationId))
+            return null;
+        }
+        if (insertAt < chainWithout.length) {
+          const next = chainWithout[insertAt];
+          if (next.startSlot < cand.end || (next.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, next.locationId))
+            return null;
+        }
+        const newChain = chainWithout.slice();
+        newChain.splice(insertAt, 0, cand);
+        if (!dayChainAllowed(newChain, cand.day)) return null;
+        return newChain;
+      }, tryCrossDaySwap = function(node1, node2) {
+        if (node1.day === node2.day || node1.memberId === node2.memberId)
+          return false;
+        if (isPinned(node1) || isPinned(node2)) return false;
+        const day1 = node1.day, day2 = node2.day, member1 = node1.memberId, member2 = node2.memberId;
+        if (!reqKeySet.has(member1 + "|" + day2 + "|" + node2.startSlot))
+          return false;
+        if (!reqKeySet.has(member2 + "|" + day1 + "|" + node1.startSlot))
+          return false;
+        const req1InDay2 = reqAt(member1, day2, node2.startSlot);
+        const req2InDay1 = reqAt(member2, day1, node1.startSlot);
+        if (!locationsForReq(req1InDay2).includes(node2.locationId))
+          return false;
+        if (!locationsForReq(req2InDay1).includes(node1.locationId))
+          return false;
+        if (dayBlocked(member1, day2, day1)) return false;
+        if (dayBlocked(member2, day1, day2)) return false;
+        const dur1 = sessionDurationFor2(memberById(member1));
+        const dur2 = sessionDurationFor2(memberById(member2));
+        const newInDay2 = {
+          id: req1InDay2.id,
+          memberId: member1,
+          day: day2,
+          startSlot: node2.startSlot,
+          duration: dur1,
+          locationId: node2.locationId,
+          end: node2.startSlot + durationToSlots(dur1)
+        };
+        const newInDay1 = {
+          id: req2InDay1.id,
+          memberId: member2,
+          day: day1,
+          startSlot: node1.startSlot,
+          duration: dur2,
+          locationId: node1.locationId,
+          end: node1.startSlot + durationToSlots(dur2)
+        };
+        const chain1 = insertFeasible(
+          (dayChains.get(day1) || []).filter((n) => n !== node1),
+          newInDay1
+        );
+        if (!chain1) return false;
+        const chain2 = insertFeasible(
+          (dayChains.get(day2) || []).filter((n) => n !== node2),
+          newInDay2
+        );
+        if (!chain2) return false;
+        const beforeTravel = totalTravelCount(dayChains.get(day1) || []) + totalTravelCount(dayChains.get(day2) || []);
+        const afterTravel = totalTravelCount(chain1) + totalTravelCount(chain2);
+        const beforeIdle = dayIdleMinutes(dayChains.get(day1) || []) + dayIdleMinutes(dayChains.get(day2) || []);
+        const afterIdle = dayIdleMinutes(chain1) + dayIdleMinutes(chain2);
+        const beforeIneff = dailyInefficientMoveCount(dayChains.get(day1) || [], ineffInfo) + dailyInefficientMoveCount(dayChains.get(day2) || [], ineffInfo);
+        const afterIneff = dailyInefficientMoveCount(chain1, ineffInfo) + dailyInefficientMoveCount(chain2, ineffInfo);
+        if (!travelIdleImproves(
+          afterTravel - beforeTravel,
+          afterIdle - beforeIdle,
+          afterIneff - beforeIneff
+        ))
+          return false;
+        uncommit(day1, node1);
+        uncommit(day2, node2);
+        commit(day1, newInDay1);
+        commit(day2, newInDay2);
+        dayChains.set(day1, chain1);
+        dayChains.set(day2, chain2);
+        return true;
+      }, snapshotChainState = function() {
+        return {
+          dayChains: new Map(dayChains),
+          counts: new Map(assignedCountByMember),
+          days: new Map(
+            Array.from(assignedDaysByMember, ([k, v]) => [k, new Set(v)])
+          )
+        };
+      }, restoreChainState = function(snap) {
+        dayChains.clear();
+        snap.dayChains.forEach((v, k) => dayChains.set(k, v));
+        assignedCountByMember.clear();
+        snap.counts.forEach((v, k) => assignedCountByMember.set(k, v));
+        assignedDaysByMember.clear();
+        snap.days.forEach((v, k) => assignedDaysByMember.set(k, v));
+      }, tryPlaceMemberChain = function(placeMemberId, excludeDays, depth, touchedDays, protectedMemberId) {
+        if (depth > MAX_RELOCATE_EJECT_DEPTH) return false;
+        for (const day of daysWithReqs) {
+          if (excludeDays.has(day)) continue;
+          if (dayBlocked(placeMemberId, day)) continue;
+          const reqs = reqsFor(placeMemberId, day);
+          if (reqs.length === 0) continue;
+          const candNodes = dayNodes(reqs, () => 1);
+          const chain = dayChains.get(day) || [];
+          for (const cand of candNodes) {
+            const newNode = {
+              id: cand.id,
+              memberId: placeMemberId,
+              day,
+              startSlot: cand.startSlot,
+              duration: cand.duration,
+              locationId: cand.locationId,
+              end: cand.end
+            };
+            const newChain = insertFeasible(chain, newNode);
+            if (newChain) {
+              dayChains.set(day, newChain);
+              commit(day, newNode);
+              touchedDays.add(day);
+              return true;
+            }
+          }
+          for (const cand of candNodes) {
+            const overlapping = /* @__PURE__ */ new Set();
+            chain.forEach((n) => {
+              const nEnd = n.startSlot + durationToSlots(n.duration);
+              if (cand.startSlot < nEnd && n.startSlot < cand.end)
+                overlapping.add(n.memberId);
+            });
+            let otherMemberId = null;
+            if (overlapping.size === 1) {
+              otherMemberId = [...overlapping][0];
+            } else if (overlapping.size === 0) {
+              const sorted = chain.slice().sort((a, b) => a.startSlot - b.startSlot);
+              let idx = 0;
+              while (idx < sorted.length && sorted[idx].startSlot < cand.startSlot)
+                idx++;
+              const prevN = idx > 0 ? sorted[idx - 1] : null;
+              const nextN = idx < sorted.length ? sorted[idx] : null;
+              const prevBad = prevN && (cand.startSlot - (prevN.startSlot + durationToSlots(prevN.duration))) * SLOT_MIN < requiredGapMin2(prevN.locationId, cand.locationId);
+              const nextBad = nextN && (nextN.startSlot - cand.end) * SLOT_MIN < requiredGapMin2(cand.locationId, nextN.locationId);
+              if (prevBad && nextBad && prevN.memberId !== nextN.memberId)
+                continue;
+              if (prevBad) otherMemberId = prevN.memberId;
+              else if (nextBad) otherMemberId = nextN.memberId;
+              else continue;
+            } else continue;
+            if (otherMemberId === protectedMemberId) continue;
+            const otherNode = chain.find((n) => n.memberId === otherMemberId);
+            if (isPinned(otherNode)) continue;
+            const remaining = chain.filter((n) => n.memberId !== otherMemberId);
+            const newNode = {
+              id: cand.id,
+              memberId: placeMemberId,
+              day,
+              startSlot: cand.startSlot,
+              duration: cand.duration,
+              locationId: cand.locationId,
+              end: cand.end
+            };
+            const newChain = insertFeasible(remaining, newNode);
+            if (!newChain) continue;
+            uncommit(day, otherNode);
+            commit(day, newNode);
+            dayChains.set(day, newChain);
+            touchedDays.add(day);
+            if (tryPlaceMemberChain(
+              otherMemberId,
+              /* @__PURE__ */ new Set([...excludeDays, day]),
+              depth + 1,
+              touchedDays,
+              protectedMemberId
+            ))
+              return true;
+            uncommit(day, newNode);
+            commit(day, otherNode);
+            dayChains.set(day, chain);
+          }
+        }
+        return false;
+      }, tryEjectChainMove = function(node, acceptFn) {
+        if (isPinned(node)) return false;
+        const snap = snapshotChainState();
+        const memberId = node.memberId;
+        const currentDay = node.day;
+        const touchedDays = /* @__PURE__ */ new Set([currentDay]);
+        const chain0 = dayChains.get(currentDay) || [];
+        uncommit(currentDay, node);
+        dayChains.set(
+          currentDay,
+          chain0.filter((n) => n !== node)
+        );
+        const placed = tryPlaceMemberChain(
+          memberId,
+          /* @__PURE__ */ new Set(),
+          0,
+          touchedDays,
+          memberId
+        );
+        const allowed = placed && [...touchedDays].every(
+          (d) => dayChainAllowed(dayChains.get(d) || [], d)
+        );
+        if (!allowed) {
+          restoreChainState(snap);
+          return false;
+        }
+        let beforeTravel = 0, beforeIdle = 0, beforeIneff = 0, afterTravel = 0, afterIdle = 0, afterIneff = 0;
+        touchedDays.forEach((day) => {
+          beforeTravel += totalTravelCount(snap.dayChains.get(day) || []);
+          beforeIdle += dayIdleMinutes(snap.dayChains.get(day) || []);
+          beforeIneff += dailyInefficientMoveCount(
+            snap.dayChains.get(day) || [],
+            ineffInfo
+          );
+          afterTravel += totalTravelCount(dayChains.get(day) || []);
+          afterIdle += dayIdleMinutes(dayChains.get(day) || []);
+          afterIneff += dailyInefficientMoveCount(
+            dayChains.get(day) || [],
+            ineffInfo
+          );
+        });
+        const deltaTravel = afterTravel - beforeTravel;
+        const deltaIdle = afterIdle - beforeIdle;
+        const deltaIneff = afterIneff - beforeIneff;
+        if (acceptFn(deltaTravel, deltaIdle, deltaIneff)) return true;
+        restoreChainState(snap);
+        return false;
+      }, trySessionCountSwap = function(randomFn, acceptFn) {
+        const doubles = [], singles = [];
+        assignedCountByMember.forEach((count, id) => {
+          if (count === 0) return;
+          if (maxSessionsFor2(memberById(id)) < 2) return;
+          if (count === 2) doubles.push(id);
+          else if (count === 1) singles.push(id);
+        });
+        if (doubles.length === 0 || singles.length === 0) return false;
+        const memberA = doubles[Math.floor(randomFn() * doubles.length)];
+        const memberB = singles[Math.floor(randomFn() * singles.length)];
+        if (memberA === memberB) return false;
+        const snap = snapshotChainState();
+        const touchedDays = /* @__PURE__ */ new Set();
+        const aNodes = [];
+        dayChains.forEach(
+          (chain, day) => chain.forEach((n) => {
+            if (n.memberId === memberA) aNodes.push({ day, node: n });
+          })
+        );
+        if (aNodes.length !== 2) {
+          restoreChainState(snap);
+          return false;
+        }
+        const removed = aNodes[Math.floor(randomFn() * aNodes.length)];
+        if (isPinned(removed.node)) {
+          restoreChainState(snap);
+          return false;
+        }
+        uncommit(removed.day, removed.node);
+        dayChains.set(
+          removed.day,
+          (dayChains.get(removed.day) || []).filter((n) => n !== removed.node)
+        );
+        touchedDays.add(removed.day);
+        const placed = tryPlaceMemberChain(
+          memberB,
+          /* @__PURE__ */ new Set(),
+          0,
+          touchedDays,
+          null
+        );
+        const allowed = placed && [...touchedDays].every(
+          (d) => dayChainAllowed(dayChains.get(d) || [], d)
+        );
+        if (!allowed) {
+          restoreChainState(snap);
+          return false;
+        }
+        let beforeTravel = 0, beforeIdle = 0, beforeIneff = 0, afterTravel = 0, afterIdle = 0, afterIneff = 0;
+        touchedDays.forEach((day) => {
+          beforeTravel += totalTravelCount(snap.dayChains.get(day) || []);
+          beforeIdle += dayIdleMinutes(snap.dayChains.get(day) || []);
+          beforeIneff += dailyInefficientMoveCount(
+            snap.dayChains.get(day) || [],
+            ineffInfo
+          );
+          afterTravel += totalTravelCount(dayChains.get(day) || []);
+          afterIdle += dayIdleMinutes(dayChains.get(day) || []);
+          afterIneff += dailyInefficientMoveCount(
+            dayChains.get(day) || [],
+            ineffInfo
+          );
+        });
+        const deltaTravel = afterTravel - beforeTravel;
+        const deltaIdle = afterIdle - beforeIdle;
+        const deltaIneff = afterIneff - beforeIneff;
+        if (acceptFn(deltaTravel, deltaIdle, deltaIneff)) return true;
+        restoreChainState(snap);
+        return false;
+      };
+      const polishStart = now();
+      const polishBudget = polishBudgetMs || 8e3;
+      const POLISH_DEADLINE = polishStart + polishBudget;
+      const STAGE6_DEADLINE = polishStart + polishBudget * 0.25;
+      const STAGE65_DEADLINE = polishStart + polishBudget * 0.55;
+      const SA_DEADLINE = polishStart + polishBudget * 0.8;
+      daysWithReqs.forEach((day) => {
+        const beforeUnassignedCount = stillUnassignedIds().length;
+        const beforeTotalSessions = Array.from(dayChains.values()).reduce(
+          (sum, c) => sum + c.length,
+          0
+        );
+        const existingChain = dayChains.get(day) || [];
+        const beforeIneff = dailyInefficientMoveCount(existingChain, ineffInfo);
+        existingChain.forEach((node) => uncommit(day, node));
+        const nodes = dayNodes(
+          reqsByDay.get(day),
+          (mId) => isEligibleForDay(mId, day) ? 1 : 0
+        );
+        const newChain = runChainDP(nodes, void 0, ineffInfo);
+        newChain.forEach((node) => commit(day, node));
+        dayChains.set(day, newChain);
+        const afterTotalSessions = Array.from(dayChains.values()).reduce(
+          (sum, c) => sum + c.length,
+          0
+        );
+        const afterIneff = dailyInefficientMoveCount(newChain, ineffInfo);
+        const worse = !keepsPins(day, newChain) || stillUnassignedIds().length > beforeUnassignedCount || afterIneff > beforeIneff || afterIneff === beforeIneff && afterTotalSessions < beforeTotalSessions;
+        if (worse) {
+          newChain.forEach((node) => uncommit(day, node));
+          existingChain.forEach((node) => commit(day, node));
+          dayChains.set(day, existingChain);
+        }
+      });
+      const stage6RandomFn = mulberry32(445566 + seedOffset);
+      stage6: for (let i = 0; i < daysWithReqs.length && now() < STAGE6_DEADLINE; i++) {
+        for (let j = i + 1; j < daysWithReqs.length; j++) {
+          let attemptOrder = function(firstDay, secondDay, jitterFn) {
+            const firstNodes = dayNodes(
+              reqsByDay.get(firstDay),
+              (mId) => isEligibleForDay(mId, firstDay) ? 1 : 0,
+              jitterFn
+            );
+            const firstChain = runChainDP(firstNodes, void 0, ineffInfo);
+            firstChain.forEach((node) => commit(firstDay, node));
+            dayChains.set(firstDay, firstChain);
+            const secondNodes = dayNodes(
+              reqsByDay.get(secondDay),
+              (mId) => isEligibleForDay(mId, secondDay) ? 1 : 0,
+              jitterFn
+            );
+            const secondChain = runChainDP(secondNodes, void 0, ineffInfo);
+            secondChain.forEach((node) => commit(secondDay, node));
+            dayChains.set(secondDay, secondChain);
+            const outcome = {
+              unassigned: stillUnassignedIds().length,
+              totalSessions: Array.from(dayChains.values()).reduce(
+                (sum, c) => sum + c.length,
+                0
+              ),
+              pairTravel: totalTravelCount(firstChain) + totalTravelCount(secondChain),
+              pairIdle: dayIdleMinutes(firstChain) + dayIdleMinutes(secondChain),
+              pairIneff: dailyInefficientMoveCount(firstChain, ineffInfo) + dailyInefficientMoveCount(secondChain, ineffInfo),
+              chainA: firstDay === dayA ? firstChain : secondChain,
+              chainB: firstDay === dayA ? secondChain : firstChain
+            };
+            firstChain.forEach((node) => uncommit(firstDay, node));
+            secondChain.forEach((node) => uncommit(secondDay, node));
+            dayChains.set(firstDay, []);
+            dayChains.set(secondDay, []);
+            return outcome;
+          };
+          await maybeYield();
+          if (now() >= STAGE6_DEADLINE) break stage6;
+          const dayA = daysWithReqs[i], dayB = daysWithReqs[j];
+          const existingA = dayChains.get(dayA) || [];
+          const existingB = dayChains.get(dayB) || [];
+          const beforeUnassignedCount = stillUnassignedIds().length;
+          const beforeTotalSessions = Array.from(dayChains.values()).reduce(
+            (sum, c) => sum + c.length,
+            0
+          );
+          const beforePairTravel = totalTravelCount(existingA) + totalTravelCount(existingB);
+          const beforePairIdle = dayIdleMinutes(existingA) + dayIdleMinutes(existingB);
+          const beforePairIneff = dailyInefficientMoveCount(existingA, ineffInfo) + dailyInefficientMoveCount(existingB, ineffInfo);
+          existingA.forEach((node) => uncommit(dayA, node));
+          existingB.forEach((node) => uncommit(dayB, node));
+          dayChains.set(dayA, []);
+          dayChains.set(dayB, []);
+          const attempts = [
+            attemptOrder(dayA, dayB, null),
+            attemptOrder(dayB, dayA, null)
+          ];
+          for (let k = 0; k < 8 && now() < STAGE6_DEADLINE; k++) {
+            await maybeYield();
+            attempts.push(attemptOrder(dayA, dayB, stage6RandomFn));
+            attempts.push(attemptOrder(dayB, dayA, stage6RandomFn));
+          }
+          let bestOption = null;
+          attempts.forEach((opt) => {
+            if (!keepsPins(dayA, opt.chainA) || !keepsPins(dayB, opt.chainB))
+              return;
+            if (opt.unassigned > beforeUnassignedCount) return;
+            if (opt.pairIneff > beforePairIneff) return;
+            if (opt.pairIneff === beforePairIneff) {
+              if (opt.totalSessions < beforeTotalSessions) return;
+              if (!fewerTravelOrIdle(
+                opt.pairTravel,
+                opt.pairIdle,
+                beforePairTravel,
+                beforePairIdle
+              ))
+                return;
+            }
+            const better = !bestOption || opt.pairIneff < bestOption.pairIneff || opt.pairIneff === bestOption.pairIneff && fewerTravelOrIdle(
+              opt.pairTravel,
+              opt.pairIdle,
+              bestOption.pairTravel,
+              bestOption.pairIdle
+            );
+            if (better) bestOption = opt;
+          });
+          if (bestOption) {
+            bestOption.chainA.forEach((node) => commit(dayA, node));
+            bestOption.chainB.forEach((node) => commit(dayB, node));
+            dayChains.set(dayA, bestOption.chainA);
+            dayChains.set(dayB, bestOption.chainB);
+          } else {
+            existingA.forEach((node) => commit(dayA, node));
+            existingB.forEach((node) => commit(dayB, node));
+            dayChains.set(dayA, existingA);
+            dayChains.set(dayB, existingB);
+          }
+        }
+      }
+      const baselineUnassigned = stillUnassignedIds().length;
+      const baselineSessions = Array.from(dayChains.values()).reduce(
+        (sum, c) => sum + c.length,
+        0
+      );
+      const baselineTravel = Array.from(dayChains.values()).reduce(
+        (sum, c) => sum + totalTravelCount(c),
+        0
+      );
+      const baselineIneff = Array.from(dayChains.values()).reduce(
+        (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),
+        0
+      );
+      const baselineIdle = Array.from(dayChains.values()).reduce(
+        (sum, c) => sum + dayIdleMinutes(c),
+        0
+      );
+      let bestSnapshot = {
+        unassigned: baselineUnassigned,
+        sessions: baselineSessions,
+        travel: baselineTravel,
+        idle: baselineIdle,
+        ineff: baselineIneff,
+        chains: new Map(dayChains)
+      };
+      const polishRandomFn = mulberry32(778899 + seedOffset);
+      for (let attempt = 0; attempt < 200 && now() < STAGE65_DEADLINE; attempt++) {
+        await maybeYield();
+        dayChains.forEach(
+          (chain, day) => chain.forEach((node) => uncommit(day, node))
+        );
+        shuffled(daysWithReqs, polishRandomFn).forEach((day) => {
+          const dominantLoc = dominantLocationFor(day);
+          const nodes = dayNodes(
+            reqsByDay.get(day),
+            (mId, startSlot, locationId) => {
+              if (!isEligibleForDay(mId, day)) return 0;
+              return locationId === dominantLoc ? 1.02 : 1;
+            },
+            () => polishRandomFn()
+          );
+          const chain = runChainDP(nodes, void 0, ineffInfo);
+          chain.forEach((node) => commit(day, node));
+          dayChains.set(day, chain);
+        });
+        const attemptUnassigned = stillUnassignedIds().length;
+        const attemptSessions = Array.from(dayChains.values()).reduce(
+          (sum, c) => sum + c.length,
+          0
+        );
+        const attemptTravel = Array.from(dayChains.values()).reduce(
+          (sum, c) => sum + totalTravelCount(c),
+          0
+        );
+        const attemptIneff = Array.from(dayChains.values()).reduce(
+          (sum, c) => sum + dailyInefficientMoveCount(c, ineffInfo),
+          0
+        );
+        const attemptIdle = Array.from(dayChains.values()).reduce(
+          (sum, c) => sum + dayIdleMinutes(c),
+          0
+        );
+        const accept = daysWithReqs.every((d) => keepsPins(d, dayChains.get(d) || [])) && attemptUnassigned <= bestSnapshot.unassigned && (attemptIneff < bestSnapshot.ineff || attemptIneff === bestSnapshot.ineff && attemptSessions >= bestSnapshot.sessions && fewerTravelOrIdle(
+          attemptTravel,
+          attemptIdle,
+          bestSnapshot.travel,
+          bestSnapshot.idle
+        ));
+        if (accept) {
+          bestSnapshot = {
+            unassigned: attemptUnassigned,
+            sessions: attemptSessions,
+            travel: attemptTravel,
+            idle: attemptIdle,
+            ineff: attemptIneff,
+            chains: new Map(dayChains)
+          };
+        }
+      }
+      dayChains.forEach(
+        (chain, day) => chain.forEach((node) => uncommit(day, node))
+      );
+      bestSnapshot.chains.forEach((chain, day) => {
+        chain.forEach((node) => commit(day, node));
+        dayChains.set(day, chain);
+      });
+      const reqKeySet = new Set(
+        eligibleReqs.map((r) => r.memberId + "|" + r.day + "|" + r.startSlot)
+      );
+      const MAX_RELOCATE_EJECT_DEPTH = 3;
+      {
+        let saTotalTravel = function() {
+          let sum = 0;
+          dayChains.forEach((chain) => {
+            sum += totalTravelCount(chain);
+          });
+          return sum;
+        }, saTotalIdle = function() {
+          let sum = 0;
+          dayChains.forEach((chain) => {
+            sum += dayIdleMinutes(chain);
+          });
+          return sum;
+        }, saTotalIneff = function() {
+          let sum = 0;
+          dayChains.forEach((chain) => {
+            sum += dailyInefficientMoveCount(chain, ineffInfo);
+          });
+          return sum;
+        }, pickRandomNode = function(randomFn) {
+          const all = Array.from(dayChains.values()).flat().filter((n) => !isPinned(n));
+          if (all.length === 0) return null;
+          return all[Math.floor(randomFn() * all.length)];
+        }, saProposeRelocate = function(randomFn) {
+          const node = pickRandomNode(randomFn);
+          if (!node) return null;
+          const memberId = node.memberId, currentDay = node.day;
+          const currentChainWithout = (dayChains.get(currentDay) || []).filter(
+            (n) => n !== node
+          );
+          const options = [];
+          daysWithReqs.forEach((day) => {
+            if (day !== currentDay && dayBlocked(memberId, day, currentDay))
+              return;
+            reqsFor(memberId, day).forEach(
+              (r) => options.push({ day, startSlot: r.startSlot, req: r })
+            );
+          });
+          if (options.length === 0) return null;
+          const picked = options[Math.floor(randomFn() * options.length)];
+          if (picked.day !== currentDay && !dayChainAllowed(currentChainWithout, currentDay))
+            return null;
+          const locOptions = locationsForReq(picked.req);
+          if (locOptions.length === 0) return null;
+          const locationId = locOptions[Math.floor(randomFn() * locOptions.length)];
+          if (picked.day === currentDay && picked.startSlot === node.startSlot && locationId === node.locationId)
+            return null;
+          const duration = sessionDurationFor2(memberById(memberId));
+          const cand = {
+            id: picked.req.id,
+            memberId,
+            day: picked.day,
+            startSlot: picked.startSlot,
+            duration,
+            locationId,
+            end: picked.startSlot + durationToSlots(duration)
+          };
+          const baseChain = picked.day === currentDay ? currentChainWithout : dayChains.get(picked.day) || [];
+          const newChain = insertFeasible(baseChain, cand);
+          if (!newChain) return null;
+          let deltaTravel, deltaIdle, deltaIneff;
+          if (picked.day === currentDay) {
+            deltaTravel = totalTravelCount(newChain) - totalTravelCount(dayChains.get(currentDay) || []);
+            deltaIdle = dayIdleMinutes(newChain) - dayIdleMinutes(dayChains.get(currentDay) || []);
+            deltaIneff = dailyInefficientMoveCount(newChain, ineffInfo) - dailyInefficientMoveCount(
+              dayChains.get(currentDay) || [],
+              ineffInfo
+            );
+          } else {
+            const beforeCur = dayChains.get(currentDay) || [];
+            const beforeTgt = dayChains.get(picked.day) || [];
+            deltaTravel = totalTravelCount(currentChainWithout) + totalTravelCount(newChain) - (totalTravelCount(beforeCur) + totalTravelCount(beforeTgt));
+            deltaIdle = dayIdleMinutes(currentChainWithout) + dayIdleMinutes(newChain) - (dayIdleMinutes(beforeCur) + dayIdleMinutes(beforeTgt));
+            deltaIneff = dailyInefficientMoveCount(currentChainWithout, ineffInfo) + dailyInefficientMoveCount(newChain, ineffInfo) - (dailyInefficientMoveCount(beforeCur, ineffInfo) + dailyInefficientMoveCount(beforeTgt, ineffInfo));
+          }
+          const cost = deltaTravel * SA_TRAVEL_WEIGHT + deltaIdle;
+          return {
+            cost,
+            deltaIneff,
+            apply: () => {
+              uncommit(currentDay, node);
+              if (picked.day === currentDay) {
+                dayChains.set(currentDay, newChain);
+              } else {
+                dayChains.set(currentDay, currentChainWithout);
+                dayChains.set(picked.day, newChain);
+              }
+              const addedNode = newChain.find(
+                (n) => n.memberId === memberId && n.startSlot === picked.startSlot && n.locationId === locationId
+              );
+              commit(picked.day, addedNode);
+            }
+          };
+        }, saProposeSwap = function(randomFn) {
+          const n1 = pickRandomNode(randomFn);
+          const n2 = pickRandomNode(randomFn);
+          if (!n1 || !n2 || n1 === n2 || n1.day === n2.day || n1.memberId === n2.memberId)
+            return null;
+          const day1 = n1.day, day2 = n2.day, member1 = n1.memberId, member2 = n2.memberId;
+          if (!reqKeySet.has(member1 + "|" + day2 + "|" + n2.startSlot))
+            return null;
+          if (!reqKeySet.has(member2 + "|" + day1 + "|" + n1.startSlot))
+            return null;
+          const req1InDay2 = reqAt(member1, day2, n2.startSlot);
+          const req2InDay1 = reqAt(member2, day1, n1.startSlot);
+          if (!locationsForReq(req1InDay2).includes(n2.locationId))
+            return null;
+          if (!locationsForReq(req2InDay1).includes(n1.locationId))
+            return null;
+          if (dayBlocked(member1, day2, day1)) return null;
+          if (dayBlocked(member2, day1, day2)) return null;
+          const dur1 = sessionDurationFor2(memberById(member1));
+          const dur2 = sessionDurationFor2(memberById(member2));
+          const newInDay2 = {
+            id: req1InDay2.id,
+            memberId: member1,
+            day: day2,
+            startSlot: n2.startSlot,
+            duration: dur1,
+            locationId: n2.locationId,
+            end: n2.startSlot + durationToSlots(dur1)
+          };
+          const newInDay1 = {
+            id: req2InDay1.id,
+            memberId: member2,
+            day: day1,
+            startSlot: n1.startSlot,
+            duration: dur2,
+            locationId: n1.locationId,
+            end: n1.startSlot + durationToSlots(dur2)
+          };
+          const chain1 = insertFeasible(
+            (dayChains.get(day1) || []).filter((n) => n !== n1),
+            newInDay1
+          );
+          if (!chain1) return null;
+          const chain2 = insertFeasible(
+            (dayChains.get(day2) || []).filter((n) => n !== n2),
+            newInDay2
+          );
+          if (!chain2) return null;
+          const beforeTravel = totalTravelCount(dayChains.get(day1) || []) + totalTravelCount(dayChains.get(day2) || []);
+          const afterTravel = totalTravelCount(chain1) + totalTravelCount(chain2);
+          const beforeIdle = dayIdleMinutes(dayChains.get(day1) || []) + dayIdleMinutes(dayChains.get(day2) || []);
+          const afterIdle = dayIdleMinutes(chain1) + dayIdleMinutes(chain2);
+          const beforeIneff = dailyInefficientMoveCount(dayChains.get(day1) || [], ineffInfo) + dailyInefficientMoveCount(dayChains.get(day2) || [], ineffInfo);
+          const afterIneff = dailyInefficientMoveCount(chain1, ineffInfo) + dailyInefficientMoveCount(chain2, ineffInfo);
+          const cost = (afterTravel - beforeTravel) * SA_TRAVEL_WEIGHT + (afterIdle - beforeIdle);
+          return {
+            cost,
+            deltaIneff: afterIneff - beforeIneff,
+            apply: () => {
+              uncommit(day1, n1);
+              uncommit(day2, n2);
+              commit(day1, newInDay1);
+              commit(day2, newInDay2);
+              dayChains.set(day1, chain1);
+              dayChains.set(day2, chain2);
+            }
+          };
+        }, saAccepts = function(cost, deltaIneff) {
+          if (deltaIneff > 0) return false;
+          if (deltaIneff < 0) return true;
+          return cost <= 0 || saRandomFn() < Math.exp(-cost / temperature);
+        };
+        const SA_TRAVEL_WEIGHT = isIdleFirst() ? 0.01 : TRAVEL_VALUE_MINUTES;
+        const saRandomFn = mulberry32(552233 + seedOffset);
+        const SA_START_TEMP = 200, SA_END_TEMP = 1;
+        const saStart = now();
+        const saDuration = Math.max(1, SA_DEADLINE - saStart);
+        let temperature = SA_START_TEMP;
+        let bestSnapshotSA = new Map(dayChains);
+        let bestTravelSA = saTotalTravel();
+        let bestIdleSA = saTotalIdle();
+        let bestIneffSA = saTotalIneff();
+        while (now() < SA_DEADLINE) {
+          await maybeYield();
+          const elapsedFrac = Math.min(1, (now() - saStart) / saDuration);
+          temperature = SA_START_TEMP * Math.pow(SA_END_TEMP / SA_START_TEMP, elapsedFrac);
+          let applied = false;
+          const moveRoll = saRandomFn();
+          if (moveRoll < 0.15) {
+            applied = trySessionCountSwap(saRandomFn, (dt, di, dineff) => {
+              const cost = dt * SA_TRAVEL_WEIGHT + di;
+              return saAccepts(cost, dineff);
+            });
+          } else if (moveRoll < 0.35) {
+            const node = pickRandomNode(saRandomFn);
+            if (node) {
+              applied = tryEjectChainMove(node, (dt, di, dineff) => {
+                const cost = dt * SA_TRAVEL_WEIGHT + di;
+                return saAccepts(cost, dineff);
+              });
+            }
+          } else {
+            const proposal = saRandomFn() < 0.35 ? saProposeSwap(saRandomFn) : saProposeRelocate(saRandomFn);
+            if (proposal) {
+              const accept = saAccepts(proposal.cost, proposal.deltaIneff);
+              if (accept) {
+                proposal.apply();
+                applied = true;
+              }
+            }
+          }
+          if (applied) {
+            const curTravel = saTotalTravel();
+            const curIdle = saTotalIdle();
+            const curIneff = saTotalIneff();
+            const curScore = curTravel * SA_TRAVEL_WEIGHT + curIdle;
+            const bestScore = bestTravelSA * SA_TRAVEL_WEIGHT + bestIdleSA;
+            if (curIneff < bestIneffSA || curIneff === bestIneffSA && (curScore < bestScore || curScore === bestScore && curTravel < bestTravelSA)) {
+              bestTravelSA = curTravel;
+              bestIdleSA = curIdle;
+              bestIneffSA = curIneff;
+              bestSnapshotSA = new Map(dayChains);
+            }
+          }
+        }
+        dayChains.forEach(
+          (chain, day) => chain.forEach((node) => uncommit(day, node))
+        );
+        bestSnapshotSA.forEach((chain, day) => {
+          chain.forEach((node) => commit(day, node));
+          dayChains.set(day, chain);
+        });
+      }
+      const relocateRandomFn = mulberry32(334455 + seedOffset);
+      let improvedInPass = true;
+      let passCount = 0;
+      while (improvedInPass && passCount < 30 && now() < POLISH_DEADLINE) {
+        await maybeYield();
+        improvedInPass = false;
+        passCount++;
+        const flatNodes = shuffled(
+          Array.from(dayChains.values()).flat(),
+          relocateRandomFn
+        );
+        for (const node of flatNodes) {
+          await maybeYield();
+          if (now() >= POLISH_DEADLINE) break;
+          const stillThere = (dayChains.get(node.day) || []).includes(node);
+          if (!stillThere) continue;
+          if (tryRelocateSession(node)) {
+            improvedInPass = true;
+            continue;
+          }
+          if (tryEjectChainMove(node, travelIdleImproves)) improvedInPass = true;
+        }
+        if (now() >= POLISH_DEADLINE) break;
+        const flatNodes2 = shuffled(
+          Array.from(dayChains.values()).flat(),
+          relocateRandomFn
+        );
+        outer: for (let i = 0; i < flatNodes2.length; i++) {
+          for (let k = i + 1; k < flatNodes2.length; k++) {
+            await maybeYield();
+            if (now() >= POLISH_DEADLINE) break outer;
+            const n1 = flatNodes2[i], n2 = flatNodes2[k];
+            const n1There = (dayChains.get(n1.day) || []).includes(n1);
+            const n2There = (dayChains.get(n2.day) || []).includes(n2);
+            if (!n1There || !n2There) continue;
+            if (tryCrossDaySwap(n1, n2)) improvedInPass = true;
+          }
+        }
+        for (let attempt = 0; attempt < 60 && now() < POLISH_DEADLINE; attempt++) {
+          await maybeYield();
+          if (trySessionCountSwap(relocateRandomFn, travelIdleImproves))
+            improvedInPass = true;
+        }
+      }
+      daysWithReqs.forEach((day) => {
+        const chain = (dayChains.get(day) || []).slice().sort((a, b) => a.startSlot - b.startSlot);
+        for (let idx = 1; idx < chain.length; idx++) {
+          const prev = chain[idx - 1];
+          const node = chain[idx];
+          if (isPinned(node)) continue;
+          const minStart = prev.startSlot + durationToSlots(prev.duration) + durationToSlots(requiredGapMin2(prev.locationId, node.locationId));
+          if (node.startSlot <= minStart) continue;
+          const earlierReq = findEarlierRequestForLocation(
+            reqsFor(node.memberId, day),
+            minStart,
+            node.startSlot,
+            node.locationId
+          );
+          if (!earlierReq) continue;
+          moveNodeToRequest(node, earlierReq);
+        }
+        dayChains.set(day, chain);
+      });
+    }
+    const assigned = [];
+    dayChains.forEach((chain) => assigned.push(...chain));
+    const unassignedMembers = unassignedMembersFor(assigned, targetMemberIds);
+    return { assigned, unassignedMembers };
+  }
+
+  // src/engine/engineWorker.js
+  var ctx = null;
+  var greedyCursor = null;
+  function greedyInput(strategyIndex, attempt) {
+    if (!greedyCursor || greedyCursor.strategyIndex !== strategyIndex || greedyCursor.attempt > attempt) {
+      greedyCursor = {
+        strategyIndex,
+        attempt: -1,
+        input: null,
+        gen: greedyAttemptInputs(strategyIndex, ctx.eligible, ctx.attempts)
+      };
+    }
+    while (greedyCursor.attempt < attempt) {
+      greedyCursor.input = greedyCursor.gen.next().value;
+      greedyCursor.attempt++;
+    }
+    return greedyCursor.input;
+  }
+  var handlers = {
+    async polish(msg) {
+      const result = await runSchedule2Pipeline(
+        ctx.eligibleReqs,
+        ctx.reqsByDay,
+        ctx.daysWithReqs,
+        msg.order,
+        true,
+        true,
+        msg.budgetMs,
+        msg.seedOffset,
+        ctx.pins || []
+      );
+      return {
+        assigned: result.assigned,
+        unassignedMemberIds: result.unassignedMembers.map((m) => m.id)
+      };
+    },
+    async greedy(msg) {
+      const input = greedyInput(msg.strategyIndex, msg.attempt);
+      const cand = buildCandidateFromStrategy(
+        msg.strategyIndex,
+        ctx.eligible,
+        ctx.eligibleIdSet,
+        ctx.allMemberIdSet,
+        input.jitter,
+        ctx.pins || [],
+        input.dayOrder
+      );
+      cand.unassignedMembers = cand.unassignedMembers.map((m) => m.id);
+      return cand;
+    }
+  };
+  self.onmessage = async (event) => {
+    const msg = event.data;
+    if (msg.type === "init") {
+      Object.assign(state, msg.state);
+      runtime.availableCells = new Set(msg.availableCells);
+      setIdleFirst(!!msg.idleFirst);
+      ctx = msg;
+      if (msg.kind === "greedy") {
+        ctx.eligibleIdSet = new Set(msg.eligibleIds);
+        ctx.allMemberIdSet = new Set(msg.allMemberIds);
+      }
+      greedyCursor = null;
+      return;
+    }
+    if (msg.type !== "run") return;
+    try {
+      const result = await withSelectionOverride(
+        ctx.excludedIds,
+        ctx.onceLimitIds,
+        () => handlers[ctx.kind](msg)
+      );
+      self.postMessage({ index: msg.index, result });
+    } catch (err) {
+      self.postMessage({
+        index: msg.index,
+        error: String(err && err.stack || err)
+      });
+    }
+  };
+})();
+`], { type: "text/javascript" })
     );
     return {
       create: () => new Worker(url),
@@ -2725,19 +5580,21 @@
   function candidateSignature(cand) {
     return cand.assigned.map((r) => r.id).slice().sort().join(",");
   }
-  async function buildGreedySearchPool(eligible, eligibleIds, allMemberIds, onProgress, workerOptions = {}, pins = []) {
+  async function buildGreedySearchPool(eligible, eligibleIds, allMemberIds, onProgress, workerOptions = {}, pins = [], runSync = (fn) => fn()) {
     const searchAttempts = workerOptions.attempts !== void 0 ? workerOptions.attempts : INITIAL_SEARCH_ATTEMPTS;
     const perStrategy = searchAttempts + 1;
     const totalBuilds = STRATEGIES.length * perStrategy;
     let completed = 0;
     const pool = await runTasksInWorkers({
-      init: engineWorkerInit("greedy", {
-        eligible,
-        eligibleIds: [...eligibleIds],
-        allMemberIds: [...allMemberIds],
-        attempts: searchAttempts,
-        pins
-      }),
+      init: runSync(
+        () => engineWorkerInit("greedy", {
+          eligible,
+          eligibleIds: [...eligibleIds],
+          allMemberIds: [...allMemberIds],
+          attempts: searchAttempts,
+          pins
+        })
+      ),
       taskCount: totalBuilds,
       taskMessage: (i) => ({
         strategyIndex: Math.floor(i / perStrategy),
@@ -2766,14 +5623,16 @@
           searchAttempts
         )) {
           if (!pool[i]) {
-            pool[i] = buildCandidateFromStrategy(
-              idx,
-              eligible,
-              eligibleIds,
-              allMemberIds,
-              input.jitter,
-              pins,
-              input.dayOrder
+            pool[i] = runSync(
+              () => buildCandidateFromStrategy(
+                idx,
+                eligible,
+                eligibleIds,
+                allMemberIds,
+                input.jitter,
+                pins,
+                input.dayOrder
+              )
             );
             completed++;
             if (completed % PROGRESS_YIELD_EVERY === 0) {
@@ -2789,10 +5648,16 @@
     onProgress(1);
     return pool;
   }
-  async function generateCandidatesAsync(onProgress, workerOptions = {}, pins = []) {
-    const allMemberIds = new Set(scheduleTargetMemberIds());
+  function greedySearchInputs() {
     const eligible = state.requests.filter(isEligibleRequest);
-    const eligibleIds = new Set(eligible.map((r) => r.id));
+    return {
+      eligible,
+      eligibleIds: new Set(eligible.map((r) => r.id)),
+      allMemberIds: new Set(scheduleTargetMemberIds())
+    };
+  }
+  async function generateCandidatesAsync(onProgress, workerOptions = {}, pins = []) {
+    const { eligible, eligibleIds, allMemberIds } = greedySearchInputs();
     const pool = await buildGreedySearchPool(
       eligible,
       eligibleIds,
@@ -5419,10 +8284,36 @@
     2,
     Math.round(200 * TEST_BUDGET_SCALE)
   );
-  var ROLES = ["unassignedSessions", "unassignedTravel"];
+  var EXCLUSION_ROLES = ["unassignedSessions", "unassignedTravel"];
   function memberExclusionTargets(rec) {
     const unassigned = new Set(rec.unassignedMembers.map((m) => m.id));
     return [...new Set(rec.assigned.map((r) => r.memberId))].filter((id) => !unassigned.has(id) && memberById(id)).sort();
+  }
+  function exclusionRepresentatives(rec, member, pool) {
+    const seen = /* @__PURE__ */ new Set();
+    const entries = [];
+    pool.forEach((r) => {
+      if (!r) return;
+      const result = {
+        assigned: r.assigned,
+        unassignedMembers: r.unassignedMembers.filter((m) => m.id !== member.id).concat(member),
+        excludedMemberId: member.id
+      };
+      const sig = layoutSignature(result);
+      if (seen.has(sig)) return;
+      seen.add(sig);
+      const metrics = scheduleMetrics(result);
+      const q = unassignedTradeoff(rec.metrics, metrics);
+      if ((q.sessionsUp || q.travelDown) && !scheduleViolations(result).length)
+        entries.push({ result, metrics });
+    });
+    return [
+      ...new Set(
+        EXCLUSION_ROLES.map((role) => pickRepresentative(role, rec, entries)).filter(
+          Boolean
+        )
+      )
+    ].map((e) => e.result);
   }
   async function searchMemberExclusions(rec, {
     attempts = MEMBER_EXCLUSION_ATTEMPTS,
@@ -5439,30 +8330,22 @@
     for (let i = 0; i < ids.length; i++) {
       const member = memberById(ids[i]);
       onMember(i, ids.length, member);
-      const built = await withSelectionOverride(
+      const inSelection = (fn) => withSelectionOverrideSync(
         state.excludedMemberIds3.concat(member.id),
         state.onceLimitedMemberIds3,
-        () => generateCandidatesAsync((p) => onProgress(i, ids.length, p), {
-          ...workerOptions,
-          attempts
-        })
+        fn
       );
-      const seen = /* @__PURE__ */ new Set();
-      const entries = built.built.concat(...Object.values(built.pools)).filter(Boolean).map((r) => ({
-        assigned: r.assigned,
-        unassignedMembers: r.unassignedMembers.filter((m) => m.id !== member.id).concat(member),
-        excludedMemberId: member.id
-      })).filter((r) => {
-        const sig = layoutSignature(r);
-        return !seen.has(sig) && seen.add(sig) && !scheduleViolations(r).length;
-      }).map((result) => ({ result, metrics: scheduleMetrics(result) }));
-      const picked = [
-        ...new Set(
-          ROLES.map((role) => pickRepresentative(role, rec, entries)).filter(
-            Boolean
-          )
-        )
-      ].map((e) => e.result);
+      const { eligible, eligibleIds, allMemberIds } = inSelection(greedySearchInputs);
+      const pool = await buildGreedySearchPool(
+        eligible,
+        eligibleIds,
+        allMemberIds,
+        (p) => onProgress(i, ids.length, p),
+        { ...workerOptions, attempts },
+        [],
+        inSelection
+      );
+      const picked = exclusionRepresentatives(rec, member, pool);
       found += picked.length;
       onFound(picked);
     }
@@ -8187,6 +11070,8 @@
     "generateProgressText3"
   );
   var GENERATE3_IDLE_LABEL = "수업 스케줄 후보 생성";
+  var extraSearchBtn3El = document.getElementById("extraSearchBtn3");
+  var EXTRA_SEARCH3_LABEL = "미배정 1명 추가안 더 찾기";
   function isUserEdited(result) {
     return !!result && Array.isArray(result.confirmedIds) && result.confirmedIds.length > 0;
   }
@@ -8329,6 +11214,7 @@
     reoptimize3El.innerHTML = "";
     const gridRange = businessHoursGridRange();
     const { cards, rows } = selectCandidates(candidatePoolEntries());
+    extraSearchBtn3El.hidden = !rows[0].card;
     if (cards.length === 0) {
       reoptSession = null;
       const card = document.createElement("div");
@@ -8419,7 +11305,9 @@
           return cell;
         };
         if (!r.card) {
-          const cell = td("탐색에서 조건을 충족하는 후보를 찾지 못함");
+          const cell = td(
+            EXCLUSION_ROLES.includes(r.role) && !runtime.schedule3Result.extraSearchDone ? "아직 찾지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다" : "탐색에서 조건을 충족하는 후보를 찾지 못함"
+          );
           cell.colSpan = 5;
           cell.className = "candidate-summary-missing";
         } else {
@@ -8437,7 +11325,7 @@
       wrap.appendChild(table);
       const note = document.createElement("p");
       note.className = "pool-pager-hint";
-      note.textContent = "공강 시간은 필수 이동시간을 뺀 수업 사이 빈 시간입니다. 같은 배치를 고른 조건은 아래에서 카드 하나로 보여줍니다.";
+      note.textContent = "공강 시간은 필수 이동시간을 뺀 수업 사이 빈 시간입니다. 같은 배치를 고른 조건은 아래에서 카드 하나로 보여줍니다. 미배정 1명 추가 조건은 '" + EXTRA_SEARCH3_LABEL + "'로 회원을 한 명씩 빼고 다시 탐색해 찾습니다(회원 수에 따라 수 분~수십 분).";
       candidateSummary3El.append(title, wrap, note);
     }
     function buildCard(c, cardKey, result, variantIdx, onSelectVariant) {
@@ -8691,6 +11579,7 @@
   function startGenerationProgress(label, cancelLabel) {
     setCardReoptButtonsDisabled(true);
     generateBtn3El.disabled = true;
+    extraSearchBtn3El.disabled = true;
     generateBtn3El.classList.add("loading");
     generateBtn3LabelEl.textContent = label;
     generateProgressWrap3El.hidden = false;
@@ -8709,6 +11598,7 @@
   }
   function endGenerationProgress() {
     generateBtn3El.disabled = false;
+    extraSearchBtn3El.disabled = false;
     generateBtn3El.classList.remove("loading");
     generateBtn3LabelEl.textContent = GENERATE3_IDLE_LABEL;
     generateProgressWrap3El.hidden = true;
@@ -9031,7 +11921,6 @@
     const prevCandidateAList = runtime.schedule3Result.candidateAList;
     const prevCandidates = runtime.candidates;
     const prevExtras = extraCandidates();
-    let extraPhase = false;
     startGenerationProgress("후보 생성 중...", "생성 취소");
     await acquireWakeLock();
     try {
@@ -9098,16 +11987,10 @@
       if (dropStaleCandidates()) return;
       renderSchedule3Result();
       saveState();
-      extraPhase = true;
-      await runMemberExclusionSearch();
-      if (dropStaleCandidates()) return;
       showToast("후보가 생성되었습니다", "success");
     } catch (err) {
       if (err instanceof GenerationCancelledError) {
-        showToast(
-          extraPhase ? "회원별 추가 탐색을 취소했습니다. 지금까지 찾은 후보는 유지됩니다" : "후보 생성을 취소했습니다",
-          "info"
-        );
+        showToast("후보 생성을 취소했습니다", "info");
       } else {
         console.error(err);
         generateHint3El.textContent = "후보 생성 중 오류가 발생했습니다. 다시 시도해주세요.";
@@ -9117,30 +12000,74 @@
       endGenerationProgress();
     }
   }
-  async function runMemberExclusionSearch() {
+  async function runExtraSearch3() {
+    if (runtime.generationInProgress) {
+      showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
+      return;
+    }
+    if (dropStaleCandidates()) return;
     const recCard = selectCandidates(candidatePoolEntries()).rows[0].card;
     if (!recCard) return;
+    generateHint3El.textContent = "";
+    runtime.generationInProgress = true;
+    runtime.generationCancelRequested = false;
+    const inputKey = candidateInputKey();
     const startedAt = performance.now();
     let label = "";
-    const stats = await searchMemberExclusions(recCard.variants[0], {
-      onMember: (i, n, member) => {
-        label = "회원별 추가 탐색 " + (i + 1) + "/" + n + "명 (" + member.name + ")";
-        showGenerationProgress(i / n, label);
-      },
-      onProgress: (i, n, p) => showGenerationProgress((i + p) / n, label),
-      onFound: (results) => {
-        if (!results.length) return;
-        runtime.schedule3Result.extraCandidates = extraCandidates().concat(results);
-        renderSchedule3Result();
-        saveState();
+    let added = 0;
+    startGenerationProgress("추가 탐색 중...", "추가 탐색 취소");
+    await acquireWakeLock();
+    try {
+      const stats = await searchMemberExclusions(recCard.variants[0], {
+        onMember: (i, n, member) => {
+          label = "회원별 추가 탐색 " + (i + 1) + "/" + n + "명 (" + member.name + ")";
+          showGenerationProgress(i / n, label);
+        },
+        onProgress: (i, n, p) => showGenerationProgress((i + p) / n, label),
+        onFound: (results) => {
+          if (candidateInputKey() !== inputKey) return;
+          const have = new Set(extraCandidates().map(layoutSignature));
+          const fresh = results.filter((r) => !have.has(layoutSignature(r)));
+          if (!fresh.length) return;
+          added += fresh.length;
+          runtime.schedule3Result.extraCandidates = extraCandidates().concat(fresh);
+          renderSchedule3Result();
+          saveState();
+        }
+      });
+      console.info(
+        "[회원별 추가 탐색]",
+        JSON.stringify({
+          ...stats,
+          added,
+          ms: Math.round(performance.now() - startedAt)
+        })
+      );
+      if (dropStaleCandidates()) return;
+      runtime.schedule3Result.extraSearchDone = true;
+      renderSchedule3Result();
+      saveState();
+      showToast(
+        added ? "미배정 1명 추가안 " + added + "개를 찾았습니다" : "조건을 충족하는 미배정 1명 추가안을 찾지 못했습니다",
+        added ? "success" : "info"
+      );
+    } catch (err) {
+      if (err instanceof GenerationCancelledError) {
+        showToast(
+          "추가 탐색을 취소했습니다. 기존 후보와 지금까지 찾은 후보는 유지됩니다",
+          "info"
+        );
+      } else {
+        console.error(err);
+        generateHint3El.textContent = "추가 탐색 중 오류가 발생했습니다. 기존 후보와 지금까지 찾은 후보는 그대로 두었습니다.";
+        showToast("추가 탐색에 실패했습니다", "danger");
       }
-    });
-    console.info(
-      "[회원별 추가 탐색]",
-      JSON.stringify({ ...stats, ms: Math.round(performance.now() - startedAt) })
-    );
+    } finally {
+      endGenerationProgress();
+    }
   }
   generateBtn3El.addEventListener("click", () => runGenerate3());
+  extraSearchBtn3El.addEventListener("click", () => runExtraSearch3());
   generateBtn3CancelEl.addEventListener("click", () => {
     runtime.generationCancelRequested = true;
     generateBtn3CancelEl.disabled = true;

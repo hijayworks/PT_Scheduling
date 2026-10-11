@@ -35,6 +35,7 @@ export {
 export {
   searchMemberExclusions,
   memberExclusionTargets,
+  exclusionRepresentatives,
 } from "../../src/engine/memberExclusion.js";
 export {
   mulberry32,
@@ -100,7 +101,11 @@ export {
   runSchedule2Pipeline,
 } from "../../src/engine/chainDpPolish.js";
 export { runPolishAttemptsInWorkers } from "../../src/engine/polishWorkerPool.js";
-export { withSelectionOverride } from "../../src/selectionOverride.js";
+export {
+  withSelectionOverride,
+  withSelectionOverrideSync,
+  currentExcludedIds,
+} from "../../src/selectionOverride.js";
 export {
   migrateStartMinShift,
   clearRuntimeScheduleCandidates,

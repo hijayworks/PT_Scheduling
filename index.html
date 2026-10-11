@@ -130,7 +130,7 @@
                   <li>비효율 이동은 같은 날 다른 지점에 갔다가 원래 지점으로 되돌아오는 왕복입니다. (마포점↔여의도점 왕복은 제외)</li>
                   <li>조건별 대표 후보를 함께 보여줍니다: '추천·균형' · '수업 수 우선·공강 허용' · '수업 수 우선·공강 없음' · '이동 절충·수업 수 우선' · '미배정 1명 추가·수업 증가' · '미배정 1명 추가·이동 감소'. '가장 많은·적은'은 이번 탐색에서 찾은 후보 중에서입니다.</li>
                   <li>공강 없음은 필수 이동시간을 뺀 수업 사이 빈 시간이 0분이라는 뜻입니다. 이동 절충은 '수업 수 우선·공강 허용' 후보보다 이동이 적은 후보 중 수업이 가장 많은 후보입니다.</li>
-                  <li>미배정 1명 추가 후보는 추천보다 미배정이 정확히 1명 많고, 수업이 2건 이상 많거나 이동이 2회 이상 적을 때만 보여줍니다. 후보 생성 뒤 회원을 한 명씩 빼 보는 회원별 추가 탐색으로 찾으며, 저장된 '미배정 회원' 설정은 바꾸지 않습니다.</li>
+                  <li>미배정 1명 추가 후보는 추천보다 미배정이 정확히 1명 많고, 수업이 2건 이상 많거나 이동이 2회 이상 적을 때만 보여줍니다. 후보 생성 뒤 '미배정 1명 추가안 더 찾기'를 누르면 회원을 한 명씩 빼 보는 회원별 추가 탐색으로 찾으며(회원 수에 따라 수 분~수십 분, 도중에 취소 가능), 저장된 '미배정 회원' 설정은 바꾸지 않습니다.</li>
                   <li>같은 배치는 카드 하나에 조건을 함께 표시하고, 조건을 충족하는 후보가 없으면 비교표에 '찾지 못함'으로 표시합니다.</li>
                   <li>장단점이 같지만 배정이 다른 배치는 카드 안에서 넘겨 볼 수 있습니다.</li>
                 </ul>
@@ -187,6 +187,7 @@
                   <span id="generateBtn3Label">수업 스케줄 후보 생성</span>
                 </button>
                 <button type="button" class="btn btn-ghost" id="generateBtn3Cancel" hidden>생성 취소</button>
+                <button type="button" class="btn btn-ghost" id="extraSearchBtn3" hidden>미배정 1명 추가안 더 찾기</button>
               </div>
               <div class="generate-progress" id="generateProgressWrap3" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="generateBtn3Label">
                 <div class="generate-progress-track">
@@ -496,6 +497,6 @@
 <script src="vendor/html2canvas.min.js"></script>
 <!-- script.js / style.css의 ?v= 값은 scripts/bump-cache-version.js가 파일 해시로 자동 갱신합니다
      (git pre-commit 훅에서 자동 실행됨). 손으로 바꾸지 마세요. -->
-<script src="script.js?v=e3a29d0f"></script>
+<script src="script.js?v=9eff4860"></script>
 </body>
 </html>

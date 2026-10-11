@@ -1646,6 +1646,89 @@ testAsync("회원별 추가 탐색: 취소하면 GenerationCancelledError로 멈
   assertEqual(found.map((r) => r.excludedMemberId), ["P"], "첫 회원(P)의 결과는 넘긴 뒤 취소");
   assertEqual(lib.state.excludedMemberIds3, [], "취소해도 설정은 그대로");
 }));
+testAsync("회원별 추가 탐색: 탐색 중에도 화면이 읽는 미배정 회원 설정은 저장된 설정 그대로라, 임시 제외 회원이 배정된 정상 후보를 위반으로 보지 않는다", () => withRaf(async () => {
+  exclusionFixture();
+  const rec = await exclusionRec();
+  // 탐색이 화면에 양보하는 사이(메뉴 재진입의 dropStaleCandidates 등) 실행되는 코드를 흉내 낸다.
+  const samples = [];
+  const timer = setInterval(() => samples.push({ excluded: lib.currentExcludedIds().slice(), violations: lib.scheduleViolations(rec.result).length }), 0);
+  try {
+    await lib.searchMemberExclusions(rec, { workerOptions: { workerCount: 0 }, attempts: 30 });
+  } finally {
+    clearInterval(timer);
+  }
+  assert(samples.length > 0, "탐색 도중 다른 코드가 실행될 틈이 있어야 함");
+  assertEqual(samples.filter((x) => x.excluded.length || x.violations), [], "탐색 도중 임시 제외가 보임");
+}));
+// 미배정 1명 추가 반례(사용자 지정 2026-10-11): 추천 수업 10·이동 4. P(여의도)를 뺀 대안 A 수업 11·이동 3(수업 +1·이동 -1 → 자격 없음),
+// 대안 B 수업 9·이동 2(이동 -2 → 이동 감소형). 그리디 전략 기준은 A를 고르지만 B가 남아야 한다.
+function tradeoffCounterexample() {
+  lib.state.locations = [{ id: "L1", name: "마포점" }, { id: "L2", name: "여의도점" }];
+  lib.state.travelTimes = { [lib.pairKey("L1", "L2")]: 30 };
+  lib.state.members = ["Q1", "Q2", "Q3"].map((id) => ({ id, name: id, locationIds: ["L1"], category: "등록" }))
+    .concat(["Q4", "Q5", "Q6", "P"].map((id) => ({ id, name: id, locationIds: ["L2"], category: "등록" })));
+  lib.state.excludedMemberIds3 = [];
+  lib.state.onceLimitedMemberIds3 = [];
+  lib.state.noConsecutiveDayMemberIds = [];
+  lib.runtime.availableCells = new Set();
+  lib.state.requests = [];
+  for (let day = 0; day < 5; day++) {
+    for (let s = 0; s <= 30; s++) lib.runtime.availableCells.add(day + "-" + s);
+    lib.state.members.forEach((m) => {
+      for (let s = 0; s <= 24; s++) lib.state.requests.push({ id: m.id + day + "_" + s, memberId: m.id, day, startSlot: s, duration: 60 });
+    });
+  }
+  const loc = (id) => lib.state.members.find((m) => m.id === id).locationIds[0];
+  // [회원, 요일, 시작 슬롯(10분)] — 엔진 형식(미배정은 id, 탐색에서 뺀 P는 미배정에 없음)
+  const layout = (sessions) => ({ assigned: sessions.map(([m, d, s]) => ({ ...at(m, d, s, loc(m)) })), unassignedMembers: [] });
+  return {
+    rec: layout([["Q1", 0, 0], ["P", 0, 9], ["Q2", 0, 18], ["Q3", 1, 0], ["Q4", 1, 9], ["Q1", 1, 18], ["Q2", 2, 0], ["Q3", 2, 6], ["Q5", 3, 0], ["Q6", 3, 6]]),
+    A: layout([["Q1", 0, 0], ["Q2", 0, 6], ["Q4", 0, 15], ["Q3", 1, 0], ["Q5", 1, 9], ["Q2", 2, 0], ["Q3", 2, 6], ["Q6", 3, 0], ["Q4", 3, 6], ["Q6", 4, 0], ["Q1", 4, 9]]),
+    B: layout([["Q1", 0, 0], ["Q4", 0, 9], ["Q3", 1, 0], ["Q5", 1, 9], ["Q2", 2, 0], ["Q3", 2, 6], ["Q6", 3, 0], ["Q4", 3, 6], ["Q1", 4, 0]]),
+  };
+}
+// 그리디 탐색 풀을 직접 정하는 가짜 워커: P를 뺀 탐색이면 시도마다 A·B를 번갈아, 다른 회원을 뺀 탐색이면 빈 배치를 돌려준다.
+function counterexampleWorker(A, B) {
+  return () => {
+    const w = {
+      init: null,
+      terminated: false,
+      onmessage: null,
+      onerror: null,
+      postMessage(msg) {
+        if (msg.type === "init") return (w.init = msg);
+        const result = !w.init.excludedIds.includes("P") ? { assigned: [], unassignedMembers: [] } : msg.index % 2 ? B : A;
+        setTimeout(() => !w.terminated && w.onmessage({ data: { index: msg.index, result: JSON.parse(JSON.stringify(result)) } }), 0);
+      },
+      terminate() {
+        w.terminated = true;
+      },
+    };
+    return w;
+  };
+}
+testAsync("회원별 추가 탐색: 그리디 전략 기준(최선·동점)에서 밀린 절충 후보도 탐색 결과 전체에서 골라 남긴다(추천 10건·이동 4 → A 11건·이동 3은 제외, B 9건·이동 2는 이동 감소형)", () => withRaf(async () => {
+  const { rec: recRaw, A, B } = tradeoffCounterexample();
+  const P = lib.state.members.find((m) => m.id === "P");
+  const rec = { result: recRaw, metrics: lib.scheduleMetrics(recRaw) };
+  const withP = (r) => ({ ...r, unassignedMembers: [P] });
+  const m = (r) => { const x = lib.scheduleMetrics(r); return [x.unassigned, x.sessions, x.travelCount]; };
+  assertEqual([m(recRaw), m(withP(A)), m(withP(B))], [[0, 10, 4], [1, 11, 3], [1, 9, 2]], "픽스처 확인");
+  assertEqual([recRaw, withP(A), withP(B)].map((r) => lib.scheduleViolations(r)), [[], [], []], "모두 필수 제약 충족");
+  const createWorker = counterexampleWorker(A, B);
+  const sig = (r) => r.assigned.map((x) => x.id).sort().join();
+  // 기존 B·C 선별: P를 뺀 탐색의 전략별 최선·동점 풀에는 A만 남는다.
+  const gen = await lib.withSelectionOverride(["P"], [], () => lib.generateCandidatesAsync(() => {}, { createWorker, workerCount: 1, attempts: 3 }));
+  const kept = new Set(gen.built.concat(...gen.pools).map(sig));
+  assert(kept.has(sig(A)) && !kept.has(sig(B)), "반례 전제: 그리디 전략 기준이 A를 고르고 B를 버림");
+  // 결과 전체에서 고르면 B만 이동 감소형으로 남는다.
+  assertEqual(lib.exclusionRepresentatives(rec, P, [A, B, A]).map(sig), [sig(B)], "A는 자격 없음, B는 이동 -2");
+  const found = [];
+  await lib.searchMemberExclusions(rec, { workerOptions: { createWorker, workerCount: 1 }, attempts: 3, onFound: (r) => found.push(...r) });
+  assertEqual(found.map((r) => [r.excludedMemberId, sig(r)]), [["P", sig(B)]]);
+  const sel = lib.selectCandidates([{ key: "R", ...rec }, { key: "X1", result: found[0], metrics: lib.scheduleMetrics(found[0]) }]);
+  assertEqual(sel.rows.slice(4).map((r) => r.card && r.card.variants[0].key), [null, "X1"], "비교표: 수업 증가형 없음, 이동 감소형 = B");
+}));
 test("후보 풀: 사용자가 손댄 슬롯은 수정 후보로 넣고, 그 슬롯의 동점 풀은 넣지 않는다", () => {
   qualityFixture();
   const edited = { ...selEntry("e", SEL_BASE).result, confirmedIds: ["A0_0"] };

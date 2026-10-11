@@ -1778,6 +1778,8 @@ export function candidateSignature(cand) {
 // 순서와 무관하게 pool은 순차 실행과 같은 순서가 되어, 호출하는 쪽의 최선 선택·동점 풀 구성도
 // 같다. 워커를 못 쓰거나 워커가 실패한 시도만 메인 스레드가 예전처럼 순서대로 계산한다.
 // pins: 모든 시도에 그대로 둘 고정 세션(재최적화, engine/pins.js). 앱의 일반 생성은 [].
+// runSync(fn): 선택(제외·1회 제한 회원)을 읽는 동기 계산(워커 초기값, 메인 스레드 대체 계산)을 감싼다 —
+// 회원별 추가 탐색이 임시 선택을 await 밖으로 새지 않게 넘긴다(withSelectionOverrideSync).
 export async function buildGreedySearchPool(
   eligible,
   eligibleIds,
@@ -1785,6 +1787,7 @@ export async function buildGreedySearchPool(
   onProgress,
   workerOptions = {},
   pins = [],
+  runSync = (fn) => fn(),
 ) {
   const searchAttempts =
     workerOptions.attempts !== undefined
@@ -1794,13 +1797,15 @@ export async function buildGreedySearchPool(
   const totalBuilds = STRATEGIES.length * perStrategy;
   let completed = 0;
   const pool = await runTasksInWorkers({
-    init: engineWorkerInit("greedy", {
-      eligible,
-      eligibleIds: [...eligibleIds],
-      allMemberIds: [...allMemberIds],
-      attempts: searchAttempts,
-      pins,
-    }),
+    init: runSync(() =>
+      engineWorkerInit("greedy", {
+        eligible,
+        eligibleIds: [...eligibleIds],
+        allMemberIds: [...allMemberIds],
+        attempts: searchAttempts,
+        pins,
+      }),
+    ),
     taskCount: totalBuilds,
     taskMessage: (i) => ({
       strategyIndex: Math.floor(i / perStrategy),
@@ -1834,14 +1839,16 @@ export async function buildGreedySearchPool(
         searchAttempts,
       )) {
         if (!pool[i]) {
-          pool[i] = buildCandidateFromStrategy(
-            idx,
-            eligible,
-            eligibleIds,
-            allMemberIds,
-            input.jitter,
-            pins,
-            input.dayOrder,
+          pool[i] = runSync(() =>
+            buildCandidateFromStrategy(
+              idx,
+              eligible,
+              eligibleIds,
+              allMemberIds,
+              input.jitter,
+              pins,
+              input.dayOrder,
+            ),
           );
           completed++;
           if (completed % PROGRESS_YIELD_EVERY === 0) {
@@ -1858,6 +1865,18 @@ export async function buildGreedySearchPool(
   return pool;
 }
 
+// 그리디 탐색의 입력. 현재 선택(제외·1회 제한 회원)을 읽는다.
+// "미배정 회원"으로 지정된 회원은 애초에 없었던 것처럼 취급한다 — 배정 대상에서도,
+// (배정 실패가 아니라 의도적 제외이므로) 미배정 통계에서도 뺀다(scheduleTargetMemberIds).
+export function greedySearchInputs() {
+  const eligible = state.requests.filter(isEligibleRequest);
+  return {
+    eligible,
+    eligibleIds: new Set(eligible.map((r) => r.id)),
+    allMemberIds: new Set(scheduleTargetMemberIds()),
+  };
+}
+
 // workerOptions(createWorker/workerCount/attempts)는 테스트·벤치에서 워커 구성과 시도 횟수를 바꾸기
 // 위한 것이다 — 앱은 넘기지 않는다(buildGreedySearchPool 참고). pins는 재최적화의 고정 세션.
 export async function generateCandidatesAsync(
@@ -1865,11 +1884,7 @@ export async function generateCandidatesAsync(
   workerOptions = {},
   pins = [],
 ) {
-  // "미배정 회원"으로 지정된 회원은 애초에 없었던 것처럼 취급한다 — 배정 대상에서도,
-  // (배정 실패가 아니라 의도적 제외이므로) 미배정 통계에서도 뺀다(scheduleTargetMemberIds).
-  const allMemberIds = new Set(scheduleTargetMemberIds());
-  const eligible = state.requests.filter(isEligibleRequest);
-  const eligibleIds = new Set(eligible.map((r) => r.id));
+  const { eligible, eligibleIds, allMemberIds } = greedySearchInputs();
 
   // 그리디 배정은 동점 신청들을 처리하는 순서(jitter)뿐 아니라, 전략마다 회원을 채워나가는
   // 구조 자체(예: 후보B의 sessionCountFirst)가 달라서, 같은 횟수를 시도해도 어떤 전략은

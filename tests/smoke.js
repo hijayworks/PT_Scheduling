@@ -622,7 +622,32 @@ async function timeLabelProblems(page) {
   );
 }
 
-// 대표 후보 비교표·미배정 1명 추가 후보(회원별 추가 탐색)·지점 색·시간 한 줄·모바일 가로 스크롤·이미지 저장.
+// 저장된 후보 슬롯마다 배치·확정 id(추가 탐색 후보 제외) — 추가 탐색 전후로 그대로인지 본다.
+async function candidateSlotSnapshot(page) {
+  const saved = await readState(page);
+  const slot = (r) => r && { assigned: r.assigned.map((a) => a.id).sort(), confirmedIds: (r.confirmedIds || []).slice().sort() };
+  return JSON.stringify({ A: saved.schedule3Result.candidateAList.map(slot), BC: saved.candidates.map(slot) });
+}
+
+// 카드 안 수업 블록 메뉴에서 pattern에 맞는 항목을 처음 찾은 블록에서 누른다(블록은 드래그와 엉키지 않게 DOM click).
+async function clickBlockMenuItem(page, card, pattern) {
+  const blocks = card.locator(".cal-block.clickable");
+  for (let i = 0; i < (await blocks.count()); i++) {
+    await blocks.nth(i).evaluate((el) => el.click());
+    const items = await page.locator(".block-context-menu-item").evaluateAll((bs) => bs.map((b) => !b.disabled && b.textContent));
+    const idx = items.findIndex((t) => t && pattern.test(t));
+    if (idx >= 0) {
+      await page.locator(".block-context-menu-item").nth(idx).evaluate((el) => el.click());
+      return true;
+    }
+    await page.keyboard.press("Escape");
+  }
+  return false;
+}
+
+// 대표 후보 비교표·미배정 1명 추가 후보('미배정 1명 추가안 더 찾기')·지점 색·시간 한 줄·모바일 가로 스크롤·이미지 저장.
+// 추가 탐색 중(첫 회원 P를 탐색에서 뺀 동안) 기본 설정으로 갔다가 돌아와도 정상·수정·확정 후보가 그대로인지도 본다
+// — 탐색용 임시 제외가 화면의 후보 검증(dropStaleCandidates)에 새면 P가 배정된 후보가 '제외 회원 배정 위반'으로 지워진다.
 async function checkCandidateDisplay(browser, site, failures) {
   const assert = (cond, msg) => { if (!cond) failures.push("[대표 후보 화면] " + msg); };
   const json = (v) => JSON.stringify(v);
@@ -641,9 +666,45 @@ async function checkCandidateDisplay(browser, site, failures) {
   try {
     await openWithSeed(page, buildExclusionSeedState(), site);
     await clickGenerateAndWait(page, "#generateBtn3", FULL_BUDGET_A ? 45 * 60 * 1000 : 2 * 60 * 1000);
-    const progress = await page.evaluate(() => [...window.__progressTexts__]);
-    assert(progress.some((t) => /^회원별 추가 탐색 \d+\/5명 \(회원/.test(t)), "회원별 추가 탐색 진행 문구가 보이지 않음: " + json(progress));
-    const rows = await page.locator("#candidateSummary3 tbody tr").evaluateAll((trs) => trs.map((tr) => [...tr.children].map((c) => c.textContent)));
+    const summaryRows = () => page.locator("#candidateSummary3 tbody tr").evaluateAll((trs) => trs.map((tr) => [...tr.children].map((c) => c.textContent)));
+    // 본 생성은 추가 탐색 없이 끝나고, 미배정 1명 추가 행은 '아직 찾지 않음'으로 버튼을 안내한다.
+    let progress = await page.evaluate(() => [...window.__progressTexts__]);
+    assert(!progress.some((t) => t.startsWith("회원별 추가 탐색")), "본 생성이 회원별 추가 탐색까지 돌았음: " + json(progress));
+    const notYet = (await summaryRows()).filter((r) => r[0].startsWith("미배정 1명 추가")).map((r) => r[1]);
+    // 본 생성 풀에서 이미 찾은 조건은 값이 보이고(이 시드는 이동 감소형), 못 찾은 조건만 '아직 찾지 않음'이다.
+    assert(notYet.length === 2 && notYet.some((t) => t.startsWith("아직 찾지 않음")) && notYet.every((t) => t.startsWith("아직 찾지 않음") || t === "1명"), "추가 탐색 전 미배정 1명 추가 행: " + json(notYet));
+    assert(await page.locator("#extraSearchBtn3").isVisible(), "'미배정 1명 추가안 더 찾기' 버튼이 보이지 않음");
+
+    // 확정 후보(블록 확정)와 수정 후보(인원 교체)를 만든다. 추천(정상) 후보는 남은 자동 배치에서 다시 고른다.
+    const cardByTitle = (re) => page.locator("#candidates3 .candidate-card").filter({ has: page.locator(".candidate-title", { hasText: re }) });
+    assert(await clickBlockMenuItem(page, cardByTitle(/^추천·균형/).first(), /으로 확정$/), "확정할 블록을 찾지 못함");
+    assert(await clickBlockMenuItem(page, cardByTitle(/^추천·균형/).first(), /\(으\)로 교체$/), "교체할 블록을 찾지 못함");
+    const editedBefore = await cardByTitle("내가 수정한 후보").count();
+    assert(editedBefore === 2 && (await cardByTitle(/^추천·균형/).count()) === 1, "정상·수정·확정 후보 준비: " + json(await page.locator("#candidates3 .candidate-title").allTextContents()));
+    const before = await candidateSlotSnapshot(page);
+    assert(before.includes('"P0_9"'), "픽스처 확인: 회원P가 배정된 후보가 있어야 함");
+    // 첫 회원(P)을 탐색에서 뺀 동안 기본 설정 → 수업 스케줄 생성으로 이동한다(진행 문구 변경 직후 동기적으로).
+    await page.evaluate(() => {
+      const el = document.getElementById("generateProgressText3");
+      const obs = new window.MutationObserver(() => {
+        if (!el.textContent.startsWith("회원별 추가 탐색 1/")) return;
+        obs.disconnect();
+        document.querySelector('.nav-item[data-page="settings"]').click();
+        document.querySelector('.nav-item[data-page="schedule3"]').click();
+        window.__navDuringExtra__ = document.getElementById("pageSchedule3").classList.contains("active");
+      });
+      obs.observe(el, { childList: true, characterData: true, subtree: true });
+    });
+    await clickGenerateAndWait(page, "#extraSearchBtn3", FULL_BUDGET_A ? 45 * 60 * 1000 : 2 * 60 * 1000);
+    assert(await page.evaluate(() => window.__navDuringExtra__ === true), "추가 탐색 중 메뉴 이동이 일어나지 않음");
+    const hint = await page.locator("#generateHint3").innerText();
+    assert(!hint.includes("필수 조건"), "추가 탐색 중 메뉴 이동 뒤 후보가 위반으로 초기화됨: " + hint);
+    assert((await candidateSlotSnapshot(page)) === before, "추가 탐색 중 메뉴 이동 뒤 저장된 정상·수정·확정 후보가 달라짐");
+    assert((await cardByTitle("내가 수정한 후보").count()) === editedBefore && (await cardByTitle(/^추천·균형/).count()) === 1, "추가 탐색 뒤 카드: " + json(await page.locator("#candidates3 .candidate-title").allTextContents()));
+
+    progress = await page.evaluate(() => [...window.__progressTexts__]);
+    assert(progress.some((t) => /^회원별 추가 탐색 \d+\/\d+명 \(회원/.test(t)), "회원별 추가 탐색 진행 문구가 보이지 않음: " + json(progress));
+    const rows = await summaryRows();
     assert(rows.length === 6, "비교표 행 수: " + rows.length);
     const travelRow = rows.find((r) => r[0] === "미배정 1명 추가·이동 감소");
     assert(travelRow && json(travelRow.slice(1, 5)) === json(["1명", "8건", "0번", "없음"]), "미배정 1명 추가·이동 감소 행: " + json(travelRow));

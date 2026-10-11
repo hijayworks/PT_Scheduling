@@ -25,6 +25,26 @@ export async function withSelectionOverride(
   }
 }
 
+// 저장된 선택과 다른 임시 선택(회원별 추가 탐색의 '회원 1명 더 제외')은 이것으로 동기 계산만 감싼다.
+// withSelectionOverride는 await 동안에도 켜져 있어, 그 사이 실행되는 화면 코드(메뉴 재진입 시
+// dropStaleCandidates의 위반 검사, 편집, 저장)가 임시 선택을 현재 설정으로 읽는다 — 동기 호출 중에는
+// 다른 코드가 끼어들 수 없으므로 임시 선택이 화면으로 새지 않는다.
+export function withSelectionOverrideSync(excludedIds, onceLimitIds, fn) {
+  const prev = selectionOverride;
+  selectionOverride = {
+    excludedIds: excludedIds.slice(),
+    onceLimitIds: onceLimitIds.slice(),
+  };
+  try {
+    const out = fn();
+    if (out && typeof out.then === "function")
+      throw new Error("withSelectionOverrideSync는 동기 함수만 감쌀 수 있습니다");
+    return out;
+  } finally {
+    selectionOverride = prev;
+  }
+}
+
 // 엔진 함수들은 생성 계산 자체는 항상 withSelectionOverride로 감싼 호출 안에서 실행되지만,
 // renderSchedule3Result()의 후보 지표 계산(scheduleMetrics 등)은 계산이 끝나 override가 풀린
 // 뒤에도 호출된다 — 그 시점엔 생성3 페이지의 현재 선택값

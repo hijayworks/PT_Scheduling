@@ -58,6 +58,7 @@ export const runtime = {
   candidates: [],
   // candidateAList: 체인 DP 탐색 그룹 3개의 결과. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.
   // extraCandidates(선택): 회원별 추가 탐색이 찾은 미배정 1명 추가·절충 후보(schedule3.js extraCandidates).
+  // extraSearchDone(선택): 그 탐색('미배정 1명 추가안 더 찾기')을 이번 생성 결과에 대해 끝까지 마쳤으면 true.
   schedule3Result: { candidateAList: [null, null, null] },
   // 세 생성 버튼 중 하나라도 계산 중이면 true — 동시에 두 계산이 겹치면 selectionOverride가
   // 서로 다른 페이지의 회원 선택 목록을 잘못 참조할 수 있어(withSelectionOverride 참고), 이 플래그로 막는다.
@@ -381,6 +382,9 @@ export function loadState() {
               Array.isArray(r.assigned) &&
               Array.isArray(r.unassignedMembers),
           );
+        // '미배정 1명 추가안 더 찾기'를 끝까지 마쳤는지(없거나 true가 아니면 아직 찾지 않은 것으로 본다).
+        if (parsed.schedule3Result.extraSearchDone === true)
+          runtime.schedule3Result.extraSearchDone = true;
       } else {
         const legacyCandidateA =
           (parsed.schedule3Result && parsed.schedule3Result.candidateA) || null;

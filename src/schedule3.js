@@ -71,7 +71,10 @@ import {
   formatTradeoff,
   selectReoptimization,
 } from "./engine/candidateSelection.js";
-import { searchMemberExclusions } from "./engine/memberExclusion.js";
+import {
+  searchMemberExclusions,
+  EXCLUSION_ROLES,
+} from "./engine/memberExclusion.js";
 import { pinKey, pinsFromResult } from "./engine/pins.js";
 import { assignmentDiff } from "./engine/candidateDiff.js";
 import {
@@ -1055,6 +1058,8 @@ export const generateProgressText3El = document.getElementById(
   "generateProgressText3",
 );
 export const GENERATE3_IDLE_LABEL = "수업 스케줄 후보 생성";
+export const extraSearchBtn3El = document.getElementById("extraSearchBtn3");
+export const EXTRA_SEARCH3_LABEL = "미배정 1명 추가안 더 찾기";
 
 // 사용자가 옮기거나 맞바꾸거나 교체·확정한 결과인지(사람의 의도가 담겼는지). 수동 편집은 모두
 // 손댄 자리를 confirmedIds에 넣으므로 이것 하나로 판단한다.
@@ -1260,6 +1265,8 @@ export function renderSchedule3Result() {
   reoptimize3El.innerHTML = "";
   const gridRange = businessHoursGridRange();
   const { cards, rows } = selectCandidates(candidatePoolEntries());
+  // 추가 탐색은 추천 후보를 기준으로 하므로 추천 카드가 있을 때만 보인다.
+  extraSearchBtn3El.hidden = !rows[0].card;
 
   if (cards.length === 0) {
     reoptSession = null;
@@ -1366,7 +1373,12 @@ export function renderSchedule3Result() {
         return cell;
       };
       if (!r.card) {
-        const cell = td("탐색에서 조건을 충족하는 후보를 찾지 못함");
+        const cell = td(
+          EXCLUSION_ROLES.includes(r.role) &&
+            !runtime.schedule3Result.extraSearchDone
+            ? "아직 찾지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다"
+            : "탐색에서 조건을 충족하는 후보를 찾지 못함",
+        );
         cell.colSpan = 5;
         cell.className = "candidate-summary-missing";
       } else {
@@ -1385,7 +1397,10 @@ export function renderSchedule3Result() {
     const note = document.createElement("p");
     note.className = "pool-pager-hint";
     note.textContent =
-      "공강 시간은 필수 이동시간을 뺀 수업 사이 빈 시간입니다. 같은 배치를 고른 조건은 아래에서 카드 하나로 보여줍니다.";
+      "공강 시간은 필수 이동시간을 뺀 수업 사이 빈 시간입니다. 같은 배치를 고른 조건은 아래에서 카드 하나로 보여줍니다. " +
+      "미배정 1명 추가 조건은 '" +
+      EXTRA_SEARCH3_LABEL +
+      "'로 회원을 한 명씩 빼고 다시 탐색해 찾습니다(회원 수에 따라 수 분~수십 분).";
     candidateSummary3El.append(title, wrap, note);
   }
 
@@ -1690,6 +1705,7 @@ function setCardReoptButtonsDisabled(disabled) {
 function startGenerationProgress(label, cancelLabel) {
   setCardReoptButtonsDisabled(true);
   generateBtn3El.disabled = true;
+  extraSearchBtn3El.disabled = true;
   generateBtn3El.classList.add("loading");
   generateBtn3LabelEl.textContent = label;
   generateProgressWrap3El.hidden = false;
@@ -1709,6 +1725,7 @@ function showGenerationProgress(progress, phase) {
 }
 function endGenerationProgress() {
   generateBtn3El.disabled = false;
+  extraSearchBtn3El.disabled = false;
   generateBtn3El.classList.remove("loading");
   generateBtn3LabelEl.textContent = GENERATE3_IDLE_LABEL;
   generateProgressWrap3El.hidden = true;
@@ -2115,7 +2132,6 @@ export async function runGenerate3() {
   const prevCandidateAList = runtime.schedule3Result.candidateAList;
   const prevCandidates = runtime.candidates;
   const prevExtras = extraCandidates();
-  let extraPhase = false;
 
   startGenerationProgress("후보 생성 중...", "생성 취소");
 
@@ -2183,7 +2199,8 @@ export async function runGenerate3() {
       if (s.pool) candidatePools[idx] = s.pool;
     });
     runtime.candidates = keptBC.map((s) => s.candidate);
-    // 회원별 추가 탐색 후보는 새로 찾는다 — 사용자가 손댄 것만 지킨다.
+    // 회원별 추가 탐색 후보는 새 추천 기준으로 다시 찾아야 한다('미배정 1명 추가안 더 찾기') — 사용자가 손댄
+    // 것만 지킨다. extraSearchDone(추가 탐색을 끝까지 했는지)도 새 결과에는 없다.
     runtime.schedule3Result = {
       candidateAList,
       inputKey,
@@ -2193,19 +2210,10 @@ export async function runGenerate3() {
     if (dropStaleCandidates()) return;
     renderSchedule3Result();
     saveState();
-    // 2단계: 본 후보를 먼저 저장·표시한 뒤 회원별 추가 탐색을 한다. 취소해도 지금까지의 후보는 그대로 남는다.
-    extraPhase = true;
-    await runMemberExclusionSearch();
-    if (dropStaleCandidates()) return;
     showToast("후보가 생성되었습니다", "success");
   } catch (err) {
     if (err instanceof GenerationCancelledError) {
-      showToast(
-        extraPhase
-          ? "회원별 추가 탐색을 취소했습니다. 지금까지 찾은 후보는 유지됩니다"
-          : "후보 생성을 취소했습니다",
-        "info",
-      );
+      showToast("후보 생성을 취소했습니다", "info");
     } else {
       console.error(err);
       generateHint3El.textContent =
@@ -2217,33 +2225,84 @@ export async function runGenerate3() {
   }
 }
 
-// 미배정 1명 추가·절충 후보를 찾는 회원별 추가 탐색(engine/memberExclusion.js). 회원 하나가 끝날 때마다 찾은
-// 후보를 저장·표시하므로 도중에 취소해도 그때까지 찾은 후보는 남는다. 계측은 콘솔 [회원별 추가 탐색]에만 남긴다.
-async function runMemberExclusionSearch() {
+// '미배정 1명 추가안 더 찾기'(사용자 결정 2026-10-11: 본 후보 생성과 분리해 선택 실행, 넓은 탐색·품질 우선).
+// 추천 후보 기준으로 회원별 추가 탐색(engine/memberExclusion.js)을 돌린다. 회원 하나가 끝날 때마다 찾은 후보를
+// 저장·표시하므로, 취소하거나 오류가 나도 기존 후보와 그때까지 찾은 후보는 남는다. 끝까지 마치면
+// schedule3Result.extraSearchDone을 켠다(비교표가 '아직 찾지 않음'과 '찾지 못함'을 구분). 계측은 콘솔 [회원별 추가 탐색].
+async function runExtraSearch3() {
+  if (runtime.generationInProgress) {
+    showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
+    return;
+  }
+  if (dropStaleCandidates()) return;
   const recCard = selectCandidates(candidatePoolEntries()).rows[0].card;
   if (!recCard) return;
+  generateHint3El.textContent = "";
+  runtime.generationInProgress = true;
+  runtime.generationCancelRequested = false;
+  const inputKey = candidateInputKey();
   const startedAt = performance.now();
   let label = "";
-  const stats = await searchMemberExclusions(recCard.variants[0], {
-    onMember: (i, n, member) => {
-      label = "회원별 추가 탐색 " + (i + 1) + "/" + n + "명 (" + member.name + ")";
-      showGenerationProgress(i / n, label);
-    },
-    onProgress: (i, n, p) => showGenerationProgress((i + p) / n, label),
-    onFound: (results) => {
-      if (!results.length) return;
-      runtime.schedule3Result.extraCandidates = extraCandidates().concat(results);
-      renderSchedule3Result();
-      saveState();
-    },
-  });
-  console.info(
-    "[회원별 추가 탐색]",
-    JSON.stringify({ ...stats, ms: Math.round(performance.now() - startedAt) }),
-  );
+  let added = 0;
+  startGenerationProgress("추가 탐색 중...", "추가 탐색 취소");
+  await acquireWakeLock();
+  try {
+    const stats = await searchMemberExclusions(recCard.variants[0], {
+      onMember: (i, n, member) => {
+        label =
+          "회원별 추가 탐색 " + (i + 1) + "/" + n + "명 (" + member.name + ")";
+        showGenerationProgress(i / n, label);
+      },
+      onProgress: (i, n, p) => showGenerationProgress((i + p) / n, label),
+      onFound: (results) => {
+        // 탐색 도중 입력이 바뀌었으면 맞지 않는 결과다(끝나면 dropStaleCandidates가 후보를 정리한다).
+        if (candidateInputKey() !== inputKey) return;
+        const have = new Set(extraCandidates().map(layoutSignature));
+        const fresh = results.filter((r) => !have.has(layoutSignature(r)));
+        if (!fresh.length) return;
+        added += fresh.length;
+        runtime.schedule3Result.extraCandidates = extraCandidates().concat(fresh);
+        renderSchedule3Result();
+        saveState();
+      },
+    });
+    console.info(
+      "[회원별 추가 탐색]",
+      JSON.stringify({
+        ...stats,
+        added,
+        ms: Math.round(performance.now() - startedAt),
+      }),
+    );
+    if (dropStaleCandidates()) return;
+    runtime.schedule3Result.extraSearchDone = true;
+    renderSchedule3Result();
+    saveState();
+    showToast(
+      added
+        ? "미배정 1명 추가안 " + added + "개를 찾았습니다"
+        : "조건을 충족하는 미배정 1명 추가안을 찾지 못했습니다",
+      added ? "success" : "info",
+    );
+  } catch (err) {
+    if (err instanceof GenerationCancelledError) {
+      showToast(
+        "추가 탐색을 취소했습니다. 기존 후보와 지금까지 찾은 후보는 유지됩니다",
+        "info",
+      );
+    } else {
+      console.error(err);
+      generateHint3El.textContent =
+        "추가 탐색 중 오류가 발생했습니다. 기존 후보와 지금까지 찾은 후보는 그대로 두었습니다.";
+      showToast("추가 탐색에 실패했습니다", "danger");
+    }
+  } finally {
+    endGenerationProgress();
+  }
 }
 
 generateBtn3El.addEventListener("click", () => runGenerate3());
+extraSearchBtn3El.addEventListener("click", () => runExtraSearch3());
 generateBtn3CancelEl.addEventListener("click", () => {
   runtime.generationCancelRequested = true;
   generateBtn3CancelEl.disabled = true;
