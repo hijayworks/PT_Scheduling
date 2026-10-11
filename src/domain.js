@@ -9,6 +9,7 @@ import {
   MEMBER_COLORS,
   MEMBER_COLOR_SHADE_STEPS,
   shadeColor,
+  LOCATION_PALETTE,
 } from "./constants.js";
 import {
   currentExcludedIds,
@@ -198,9 +199,17 @@ export function memberColor(id) {
   return shadeColor(hue, MEMBER_COLOR_SHADE_STEPS[tier]);
 }
 
-export function locationColor(locId) {
-  const idx = state.locations.findIndex((l) => l.id === locId);
-  return idx === -1 ? null : MEMBER_COLORS[idx % MEMBER_COLORS.length];
+// 지점 색상의 팔레트 위치(LOCATION_PALETTE, CSS .location-color-N). 지점이 없거나 팔레트 밖 색이면 -1.
+// 표시 전용 — 배정·후보 판정은 지점 id만 쓴다.
+export function locationColorIndex(locId) {
+  const loc = locationById(locId);
+  return loc ? LOCATION_PALETTE.findIndex((p) => p.color === loc.color) : -1;
+}
+
+// 지점 색상 CSS 클래스(지점 등록 목록·회원 표·수업 블록 공용). 팔레트 밖이면 기본색 클래스.
+export function locationColorClass(locId) {
+  const idx = locationColorIndex(locId);
+  return idx === -1 ? "location-color-fallback" : "location-color-" + idx;
 }
 
 // 체인DP 안쪽 루프에서 travelMinutes를 통해 아주 많이 불리므로 배열 생성·정렬 없이 만든다

@@ -11,10 +11,15 @@ export async function saveCandidateCardAsImage(cardEl, title) {
   // 걸리는데, html2canvas는 스크롤로 가려진 부분을 그리지 못해 화·수 등 뒤쪽 요일이 잘려
   // 저장된다. 캡처 전 실제로 필요한 전체 폭을 원본 DOM에서 측정해 두고, 캡처용 복제
   // 문서에서만 카드 폭을 그만큼 넓혀 스크롤 없이 월~토 전체가 한 번에 담기게 한다.
+  // 복제 문서의 창 폭도 같은 만큼 넓혀야 카드가 실제로 그 폭으로 다시 배치된다(창 폭에는 페이지 여백이
+  // 들어 있어, 창 폭을 카드 폭으로 두면 카드가 시간표보다 좁게 잘려 저장된다).
   const gridWrap = cardEl.querySelector(".grid-scroll");
-  const neededWidth = gridWrap
-    ? cardEl.offsetWidth +
-      Math.max(0, gridWrap.scrollWidth - gridWrap.clientWidth)
+  const overflow = gridWrap
+    ? Math.max(0, gridWrap.scrollWidth - gridWrap.clientWidth)
+    : 0;
+  const neededWidth = overflow ? cardEl.offsetWidth + overflow : null;
+  const neededWindowWidth = overflow
+    ? document.documentElement.clientWidth + overflow
     : null;
   const CAPTURE_ATTR = "data-capture-card";
   cardEl.setAttribute(CAPTURE_ATTR, "");
@@ -23,7 +28,7 @@ export async function saveCandidateCardAsImage(cardEl, title) {
       backgroundColor: "#ffffff",
       scale: 2,
       width: neededWidth || undefined,
-      windowWidth: neededWidth || undefined,
+      windowWidth: neededWindowWidth || undefined,
       ignoreElements: (el) =>
         el.classList &&
         (el.classList.contains("candidate-card-actions") ||

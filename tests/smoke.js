@@ -24,10 +24,14 @@ const { pathToFileURL } = require("url");
 const { chromium } = require("playwright");
 
 const ROOT = path.resolve(__dirname, "..");
-const STORAGE_KEY = "pt_schedule_state_v4";
+const STORAGE_KEY = "pt_schedule_state_v5";
+const SCHEMA_VERSION = 3;
 // 구버전 앱(schemaVersion 1)의 저장 키와, 그 마지막 배포 빌드. 구버전 탭과의 저장 호환성 검사에 쓴다(CI는 fetch-depth 0으로 받아야 한다).
 const LEGACY_STORAGE_KEY = "pt_schedule_state_v3";
 const LEGACY_APP_COMMIT = "fa0d4babb3ffa9da6e0e4978a65fa42c2235980b";
+// 직전 앱(schemaVersion 2, 지점 색상 이전)의 저장 키와 마지막 배포 빌드(#35 병합).
+const PREVIOUS_STORAGE_KEY = "pt_schedule_state_v4";
+const PREVIOUS_APP_COMMIT = "583649682e6c22a59255c6e007098e18338c720b";
 const BACKUP_PASSWORD = "smoke-backup-password";
 // 앱이 읽지 않는 별도 키 — 시드를 넣을 때 한 번 기록한다. 새로고침된 문서가 시작될 때 이 키가 없으면 저장소가 통째로 사라진 것이다.
 const SEED_LOG_KEY = "__smoke_seed_log__";
@@ -163,8 +167,9 @@ async function readState(page) {
 
 // 기본 검사는 로컬 HTTP 서버에서 연다(실제 배포와 같은 http origin). 앱이 쓰는 정적 파일과 시드용 빈 페이지만 낸다.
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon" };
-// /legacy/ 아래는 구버전 앱(LEGACY_APP_COMMIT 빌드)을 같은 origin에서 낸다 — localStorage를 공유하는 구버전 탭을 재현한다.
-function startServer(legacyRoot) {
+// /legacy/ 아래는 구버전 앱(LEGACY_APP_COMMIT), /previous/ 아래는 직전 앱(PREVIOUS_APP_COMMIT) 빌드를 같은 origin에서
+// 낸다 — localStorage를 공유하는 옛 버전 탭을 재현한다.
+function startServer(legacyRoot, previousRoot) {
   const server = http.createServer((req, res) => {
     let pathname = decodeURIComponent(new URL(req.url, "http://x").pathname);
     if (pathname === "/__smoke_blank") {
@@ -175,6 +180,9 @@ function startServer(legacyRoot) {
     if (pathname.startsWith("/legacy/")) {
       root = legacyRoot;
       pathname = pathname.slice("/legacy".length);
+    } else if (pathname.startsWith("/previous/")) {
+      root = previousRoot;
+      pathname = pathname.slice("/previous".length);
     }
     const file = path.join(root, pathname);
     if (!file.startsWith(root + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
@@ -318,20 +326,20 @@ async function checkSwapReload(page, { pageConsole, injection }, tag, failures) 
   }
 }
 
-// 구버전 앱(LEGACY_APP_COMMIT)의 정적 파일을 임시 폴더로 꺼낸다. 커밋이 없으면(얕은 clone) 검사를 건너뛰지 않고 실패한다.
-function extractLegacyApp() {
+// 옛 앱 커밋의 정적 파일을 임시 폴더로 꺼낸다. 커밋이 없으면(얕은 clone) 검사를 건너뛰지 않고 실패한다.
+function extractLegacyApp(commit = LEGACY_APP_COMMIT) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-legacy-"));
   let tar;
   try {
-    tar = execFileSync("git", ["-C", ROOT, "archive", "--format=tar", LEGACY_APP_COMMIT, "index.html", "script.js", "style.css", "vendor"], { maxBuffer: 64 * 1024 * 1024 });
+    tar = execFileSync("git", ["-C", ROOT, "archive", "--format=tar", commit, "index.html", "script.js", "style.css", "vendor"], { maxBuffer: 64 * 1024 * 1024 });
   } catch (err) {
-    throw new Error("구버전 앱 커밋 " + LEGACY_APP_COMMIT + "을 찾지 못함 — 전체 git 이력이 필요하다(CI checkout fetch-depth: 0)\n" + err.message);
+    throw new Error("옛 앱 커밋 " + commit + "을 찾지 못함 — 전체 git 이력이 필요하다(CI checkout fetch-depth: 0)\n" + err.message);
   }
   execFileSync("tar", ["-x", "-C", dir], { input: tar });
   return dir;
 }
 
-// 구버전 탭과의 저장 호환성: 같은 origin에서 구버전(키 v3, schemaVersion 1)과 신버전(키 v4, schemaVersion 2)이 함께 열려도
+// 구버전 탭과의 저장 호환성: 같은 origin에서 구버전(키 v3, schemaVersion 1)과 신버전(키 v5, schemaVersion 3)이 함께 열려도
 // (1) 구버전 저장분의 회원·신청·설정·수정 확정 후보가 신버전으로 그대로 이관되고 구버전 저장분은 건드리지 않는다
 // (2) 구버전 탭의 자동 저장·새로고침이 신버전 저장분(연속 요일 배정 제외 포함)을 바꾸지 못한다
 // (3) 신버전 백업을 구버전에서 복원하면 기존 데이터를 그대로 둔 채 거부된다 (4) 신버전에서 복원하면 새 설정이 유지된다.
@@ -363,10 +371,12 @@ async function checkLegacyCompat(browser, site, failures) {
     await app.goto(site.index);
     await app.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
     const migrated = JSON.parse((await read(app, STORAGE_KEY)) || "null");
-    assert(migrated && migrated.schemaVersion === 2, "이관 후 신버전 키에 schemaVersion 2로 저장돼야 함: " + json(migrated && migrated.schemaVersion));
+    assert(migrated && migrated.schemaVersion === SCHEMA_VERSION, "이관 후 신버전 키에 현재 schemaVersion으로 저장돼야 함: " + json(migrated && migrated.schemaVersion));
     if (migrated) {
-      ["locations", "travelTimes", "members", "requests", "availableCells", "onceLimitedMemberIds3", "excludedMemberIds3"].forEach((k) =>
+      ["travelTimes", "members", "requests", "availableCells", "onceLimitedMemberIds3", "excludedMemberIds3"].forEach((k) =>
         assert(json(migrated[k]) === json(old[k]), "이관 후 " + k + "가 달라짐: " + json(migrated[k]) + " ≠ " + json(old[k])));
+      // 지점은 id·이름 그대로, 색상(schemaVersion 3)만 채워진다.
+      assert(json(migrated.locations) === json(old.locations.map((l, i) => ({ ...l, color: ["#50d2c2", "#8c88ff"][i] }))), "이관 후 지점: " + json(migrated.locations));
       const card = migrated.schedule3Result.candidateAList[0];
       assert(card && json(card.assigned.map((a) => a.id)) === json(["A0_0", "A2_0"]) && json(card.confirmedIds) === json(["A0_0"]), "이관 후 수정 확정 후보가 유지되지 않음: " + json(card));
       assert(json(migrated.noConsecutiveDayMemberIds) === "[]", "이관 후 연속 요일 배정 제외 기본값이 빈 목록이 아님");
@@ -432,13 +442,238 @@ async function checkLegacyCompat(browser, site, failures) {
     await app.click("#backupImportApplyBtn");
     await app.waitForSelector(".restore-recovery-banner", { timeout: 15000 });
     const restored = JSON.parse((await read(app, STORAGE_KEY)) || "{}");
-    assert(json(restored.noConsecutiveDayMemberIds) === json(["A"]) && restored.schemaVersion === 2, "신버전 백업 복원 후 연속 요일 배정 제외가 유지되지 않음: " + json(restored.noConsecutiveDayMemberIds));
+    assert(json(restored.noConsecutiveDayMemberIds) === json(["A"]) && restored.schemaVersion === SCHEMA_VERSION, "신버전 백업 복원 후 연속 요일 배정 제외가 유지되지 않음: " + json(restored.noConsecutiveDayMemberIds));
     assert(json(restored.members) === json(old.members) && json(restored.requests) === json(old.requests), "신버전 백업 복원 후 회원·신청이 달라짐");
     await app.click('.nav-item[data-page="schedule3"]');
     assert((await app.locator("#noConsecutiveChipRow .chip", { hasText: "회원A" }).count()) === 1, "신버전 백업 복원 후 연속 요일 배정 제외 칩이 보이지 않음");
     return backupCode;
   } finally {
     await ctx.close();
+  }
+}
+
+// 직전 앱(키 v4, schemaVersion 2 — 지점 색상 이전) 탭과의 저장 호환성 + 지점 색상:
+// (1) 직전 저장분의 회원·신청·설정·수정 확정 후보가 그대로 이관되고 지점 색상이 채워지며 직전 저장분은 그대로다
+// (2) 등록 지점 색을 바꿔도 후보가 그대로이고 새로고침 뒤에도 유지된다(수업 블록 색은 배정 지점 id 기준), 이름을 바꿔도 색은 유지된다
+// (3) 지점을 추가할 때 고른 색이 저장된다 (4) 직전 탭의 자동 저장이 신버전 저장분을 바꾸지 못한다
+// (5) 신버전 백업을 직전 앱에서 복원하면 거부되고 (6) 신버전에서 복원하면 색이 돌아온다.
+async function checkPreviousCompat(browser, site, failures) {
+  const assert = (cond, msg) => { if (!cond) failures.push("[직전 버전 호환·지점 색상] " + msg); };
+  const ctx = await browser.newContext();
+  const read = (p, key) => p.evaluate((k) => localStorage.getItem(k), key);
+  const json = (v) => JSON.stringify(v);
+  try {
+    const prev = await ctx.newPage();
+    prev.on("pageerror", (err) => assert(false, "직전 앱 런타임 에러: " + err.message));
+    const seed = buildManualEditSeedState();
+    seed.schemaVersion = 2;
+    seed.locations = [{ id: "loc1", name: "마포점" }, { id: "loc2", name: "여의도점" }];
+    seed.noConsecutiveDayMemberIds = ["A"];
+    seed.candidates[0].assigned = [seed.candidates[0].assigned[0]].concat({ ...seed.candidates[0].assigned[1], id: "A2_6", startSlot: 6 });
+    seed.candidates[0].confirmedIds = ["A2_6"];
+    await prev.goto(site.blank);
+    await prev.evaluate(({ key, data }) => localStorage.setItem(key, data), { key: PREVIOUS_STORAGE_KEY, data: json(seed) });
+    await prev.goto(site.previousIndex);
+    await prev.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    const prevRaw = await read(prev, PREVIOUS_STORAGE_KEY);
+    const old = JSON.parse(prevRaw);
+    assert(old.candidates[0] && json(old.candidates[0].confirmedIds) === json(["A2_6"]), "픽스처 확인: 직전 앱이 수정 확정 후보를 유지해야 함");
+
+    // (1) 이관
+    const app = await ctx.newPage();
+    app.on("pageerror", (err) => assert(false, "신버전 런타임 에러: " + err.message));
+    await app.goto(site.index);
+    await app.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    const migrated = JSON.parse((await read(app, STORAGE_KEY)) || "null");
+    assert(migrated && migrated.schemaVersion === SCHEMA_VERSION, "이관 후 schemaVersion: " + json(migrated && migrated.schemaVersion));
+    if (migrated) {
+      ["travelTimes", "members", "requests", "availableCells", "onceLimitedMemberIds3", "excludedMemberIds3", "noConsecutiveDayMemberIds"].forEach((k) =>
+        assert(json(migrated[k]) === json(old[k]), "이관 후 " + k + "가 달라짐"));
+      assert(json(migrated.locations) === json([{ id: "loc1", name: "마포점", color: "#5da7ff" }, { id: "loc2", name: "여의도점", color: "#50d2c2" }]), "이관 후 지점 색상: " + json(migrated.locations));
+      assert(json(migrated.candidates) === json(old.candidates), "이관 후 수정 확정 후보가 달라짐");
+    }
+    assert((await read(app, PREVIOUS_STORAGE_KEY)) === prevRaw, "신버전이 직전 저장분을 바꿈");
+    const cardTitles = () => app.locator("#candidates3 .candidate-title").allTextContents();
+    assert(json(await cardTitles()) === json(["내가 수정한 후보"]), "이관 후 수정 후보 카드: " + json(await cardTitles()));
+    const blockClasses = () => app.locator("#candidates3 .cal-block").evaluateAll((bs) => bs.map((b) => [...b.classList].find((c) => c.startsWith("location-color-"))));
+    assert(json(await blockClasses()) === json(["location-color-2", "location-color-2"]), "수업 블록이 배정 지점(마포점=파랑) 색이 아님: " + json(await blockClasses()));
+
+    // (2) 등록 지점 색 변경 — 후보를 비우지 않는다
+    await app.click('.nav-item[data-page="settings"]');
+    const chip = (name) => app.locator("#locationList .location-chip", { hasText: name });
+    assert((await chip("마포점").getAttribute("class")).includes("location-color-2"), "등록 목록 칩이 지점 색이 아님");
+    await chip("마포점").locator(".location-color-btn").click();
+    await chip("마포점").locator('input[aria-label="세이지 그린"]').click(); // 고르면 목록이 다시 그려져 팔레트가 닫힌다
+    const afterColor = JSON.parse(await read(app, STORAGE_KEY));
+    assert(afterColor.locations[0].color === "#8db58a", "지점 색 변경이 저장되지 않음: " + json(afterColor.locations[0]));
+    assert(json(afterColor.candidates) === json(migrated && migrated.candidates) && json(afterColor.schedule3Result) === json(migrated && migrated.schedule3Result), "지점 색만 바꿨는데 후보가 바뀜");
+    await app.reload();
+    await app.waitForSelector(".page.active", { timeout: 5000 });
+    await app.click('.nav-item[data-page="schedule3"]');
+    assert(json(await cardTitles()) === json(["내가 수정한 후보"]), "색 변경·새로고침 뒤 수정 후보가 사라짐");
+    assert(json(await blockClasses()) === json(["location-color-5", "location-color-5"]), "새로고침 뒤 수업 블록 색이 바뀐 지점 색이 아님: " + json(await blockClasses()));
+    assert((await app.locator("#generateHint3").innerText()).trim() === "", "색 변경만으로 후보 초기화 안내가 뜸");
+
+    // (3) 지점 추가 시 색 선택
+    await app.click('.nav-item[data-page="settings"]');
+    await app.fill("#locationName", "강남점");
+    await app.locator('#locationColorPicker input[aria-label="코랄"]').check();
+    await app.click('#locationForm button[type="submit"]');
+    const added = JSON.parse(await read(app, STORAGE_KEY)).locations.find((l) => l.name === "강남점");
+    assert(added && added.color === "#e69a8d", "추가한 지점의 색이 고른 색이 아님: " + json(added));
+    assert((await chip("강남점").getAttribute("class")).includes("location-color-3"), "추가한 지점 칩 색");
+
+    // 백업(색 포함, schemaVersion 3)
+    const onPrompt = (d) => d.accept(d.type() === "prompt" ? BACKUP_PASSWORD : undefined);
+    app.on("dialog", onPrompt);
+    await app.click("#backupExportBtn");
+    await app.waitForSelector("#backupExportResult:not([hidden])", { timeout: 15000 });
+    app.off("dialog", onPrompt);
+    const backupCode = await app.inputValue("#backupExportTextarea");
+
+    // 이름 변경 — 색은 지점 id에 붙어 유지
+    await chip("마포점").locator(".location-chip-name").click();
+    await app.fill("#locationList .location-name-input", "마포2호점");
+    await app.press("#locationList .location-name-input", "Enter");
+    const renamed = JSON.parse(await read(app, STORAGE_KEY)).locations.find((l) => l.id === "loc1");
+    assert(renamed && renamed.name === "마포2호점" && renamed.color === "#8db58a", "이름을 바꾸자 색이 바뀜: " + json(renamed));
+    const appBefore = await read(app, STORAGE_KEY);
+
+    // (4) 직전 탭의 자동 저장
+    await prev.click('.nav-item[data-page="members"]');
+    await prev.evaluate(() => window.dispatchEvent(new window.Event("beforeunload")));
+    await prev.reload();
+    await prev.waitForSelector(".page.active", { timeout: 5000 });
+    assert((await read(app, STORAGE_KEY)) === appBefore, "직전 탭의 저장이 신버전 저장분을 바꿈");
+
+    // (5) 직전 앱에서 신버전 백업 복원 → 거부
+    const prevDialogs = [];
+    prev.on("dialog", (d) => { prevDialogs.push(d.message()); d.dismiss(); });
+    await prev.click('.nav-item[data-page="settings"]');
+    const prevBefore = await read(prev, PREVIOUS_STORAGE_KEY);
+    await prev.click("#backupImportOpenBtn");
+    await prev.fill("#backupImportTextarea", backupCode);
+    await prev.fill("#backupImportPinInput", BACKUP_PASSWORD);
+    await prev.click("#backupImportApplyBtn");
+    await prev.waitForFunction(() => document.getElementById("backupImportHint").textContent !== "", null, { timeout: 15000 }).catch(() => {});
+    const prevHint = await prev.locator("#backupImportHint").innerText();
+    assert(prevHint.includes("복원에 실패") && prevDialogs.length === 0, "직전 앱이 신버전 백업을 거부하지 않음: " + json({ prevHint, prevDialogs }));
+    assert((await read(prev, PREVIOUS_STORAGE_KEY)) === prevBefore && (await read(app, STORAGE_KEY)) === appBefore, "복원 거부 뒤 저장분이 바뀜");
+
+    // (6) 신버전에서 복원 → 백업 당시 이름·색
+    await app.click("#backupImportOpenBtn");
+    await app.fill("#backupImportTextarea", backupCode);
+    await app.fill("#backupImportPinInput", BACKUP_PASSWORD);
+    app.once("dialog", (d) => d.accept());
+    await app.click("#backupImportApplyBtn");
+    await app.waitForSelector(".restore-recovery-banner", { timeout: 15000 });
+    const restored = JSON.parse((await read(app, STORAGE_KEY)) || "{}");
+    assert(json((restored.locations || []).map((l) => [l.name, l.color])) === json([["마포점", "#8db58a"], ["여의도점", "#50d2c2"], ["강남점", "#e69a8d"]]), "백업 복원 후 지점 색: " + json(restored.locations));
+    assert(json(restored.noConsecutiveDayMemberIds) === json(["A"]) && json(restored.members) === json(old.members), "백업 복원 후 설정·회원이 달라짐");
+  } finally {
+    await ctx.close();
+  }
+}
+
+// 월·화 12:00~16:00, Q1~Q4(마포점)는 매시 정각 신청, P(상암점)는 월 13:30 하나만 → P가 월요일 가운데에 끼어 이동 2.
+// 회원별 추가 탐색이 P를 뺀 '미배정 1명 추가·이동 감소'(수업 +1·이동 -2)를 찾는다.
+function buildExclusionSeedState() {
+  const cells = [];
+  const requests = [];
+  [0, 1].forEach((day) => {
+    for (let slot = 0; slot < 24; slot++) cells.push(day + "-" + slot);
+    ["Q1", "Q2", "Q3", "Q4"].forEach((q) => {
+      for (let slot = 0; slot <= 18; slot += 6) requests.push({ id: q + day + "_" + slot, memberId: q, day, startSlot: slot, duration: 60 });
+    });
+  });
+  requests.push({ id: "P0_9", memberId: "P", day: 0, startSlot: 9, duration: 60 });
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    locations: [{ id: "L1", name: "마포점", color: "#5da7ff" }, { id: "L3", name: "상암점", color: "#e69a8d" }],
+    travelTimes: { "L1|L3": 30 },
+    members: ["Q1", "Q2", "Q3", "Q4"].map((id) => ({ id, name: "회원" + id, locationIds: ["L1"], category: "등록" }))
+      .concat({ id: "P", name: "회원P", locationIds: ["L3"], category: "등록" }),
+    requests,
+    onceLimitedMemberIds3: [],
+    excludedMemberIds3: [],
+    noConsecutiveDayMemberIds: [],
+    availableCells: cells,
+    currentPage: "schedule3",
+    startMinBase: 720,
+  };
+}
+
+// 수업 블록 시간("17:00~18:00")이 한 줄로 끝까지 보이는지(줄바꿈·잘림·말줄임 없음).
+async function timeLabelProblems(page) {
+  return page.evaluate(() =>
+    [...document.querySelectorAll("#candidates3 .cal-block")].flatMap((b) => {
+      const t = b.querySelector(".time");
+      const br = b.getBoundingClientRect(), tr = t.getBoundingClientRect();
+      const lh = parseFloat(window.getComputedStyle(t).lineHeight);
+      const bad = [];
+      if (!/^\d\d:\d\d~\d\d:\d\d$/.test(t.textContent)) bad.push("형식 " + t.textContent);
+      if (t.scrollWidth > t.clientWidth + 0.5 || tr.right > br.right + 0.5 || tr.bottom > br.bottom + 0.5) bad.push("잘림 " + t.textContent);
+      if (tr.height > lh * 1.5) bad.push("줄바꿈 " + t.textContent);
+      return bad;
+    }),
+  );
+}
+
+// 대표 후보 비교표·미배정 1명 추가 후보(회원별 추가 탐색)·지점 색·시간 한 줄·모바일 가로 스크롤·이미지 저장.
+async function checkCandidateDisplay(browser, site, failures) {
+  const assert = (cond, msg) => { if (!cond) failures.push("[대표 후보 화면] " + msg); };
+  const json = (v) => JSON.stringify(v);
+  const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  page.on("pageerror", (err) => assert(false, "런타임 에러: " + err.message));
+  if (!FULL_BUDGET_A) await page.addInitScript((scale) => { window.__PT_TEST_BUDGET_SCALE__ = scale; }, A_BUDGET_SCALE);
+  // 진행 문구를 모두 기록해 회원별 추가 탐색 단계가 보였는지 본다.
+  await page.addInitScript(() => {
+    window.__progressTexts__ = new Set();
+    document.addEventListener("DOMContentLoaded", () => {
+      const el = document.getElementById("generateProgressText3");
+      if (!el) return; // 시드용 빈 페이지
+      new window.MutationObserver(() => window.__progressTexts__.add(el.textContent.replace(/\s\d+%$/, ""))).observe(el, { childList: true, characterData: true, subtree: true });
+    });
+  });
+  try {
+    await openWithSeed(page, buildExclusionSeedState(), site);
+    await clickGenerateAndWait(page, "#generateBtn3", FULL_BUDGET_A ? 45 * 60 * 1000 : 2 * 60 * 1000);
+    const progress = await page.evaluate(() => [...window.__progressTexts__]);
+    assert(progress.some((t) => /^회원별 추가 탐색 \d+\/5명 \(회원/.test(t)), "회원별 추가 탐색 진행 문구가 보이지 않음: " + json(progress));
+    const rows = await page.locator("#candidateSummary3 tbody tr").evaluateAll((trs) => trs.map((tr) => [...tr.children].map((c) => c.textContent)));
+    assert(rows.length === 6, "비교표 행 수: " + rows.length);
+    const travelRow = rows.find((r) => r[0] === "미배정 1명 추가·이동 감소");
+    assert(travelRow && json(travelRow.slice(1, 5)) === json(["1명", "8건", "0번", "없음"]), "미배정 1명 추가·이동 감소 행: " + json(travelRow));
+    const sessionsRow = rows.find((r) => r[0] === "미배정 1명 추가·수업 증가");
+    assert(sessionsRow && sessionsRow[1] === "탐색에서 조건을 충족하는 후보를 찾지 못함", "수업 +1뿐이라 수업 증가형은 없어야 함: " + json(sessionsRow));
+    const card = page.locator("#candidates3 .candidate-card", { has: page.locator(".candidate-title", { hasText: "미배정 1명 추가·이동 감소" }) });
+    const desc = (await card.count()) ? await card.locator(".candidate-desc").innerText() : "";
+    assert(desc.includes("추천 대비 새로 미배정: 회원P") && desc.includes("이동 -2"), "새로 미배정된 회원·추천 대비 변화 표시: " + desc);
+    const saved = await readState(page);
+    assert(json(saved.excludedMemberIds3) === "[]", "회원별 추가 탐색이 미배정 회원 설정을 바꿈");
+    assert(saved.schedule3Result.extraCandidates.length >= 1 && saved.schedule3Result.extraCandidates.every((r) => r.unassignedMembers.some((m) => m.id === r.excludedMemberId)), "추가 탐색 후보가 저장되지 않았거나 제외 회원이 미배정에 없음");
+    // 지점 색: 블록 제목의 지점과 색 클래스가 맞는다(마포점=파랑 2, 상암점=코랄 3).
+    const colorMismatch = await page.locator("#candidates3 .cal-block").evaluateAll((bs) =>
+      bs.filter((b) => !b.classList.contains(b.title.includes("(상암점)") ? "location-color-3" : "location-color-2")).map((b) => b.title));
+    assert(colorMismatch.length === 0, "수업 블록 색이 배정 지점과 다름: " + json(colorMismatch));
+    // 글자 대비: 지점 색 블록의 글자는 진한 색(흰 글자 아님)
+    const ink = await page.locator("#candidates3 .cal-block .time").first().evaluate((el) => window.getComputedStyle(el).color);
+    assert(ink !== "rgb(255, 255, 255)", "밝은 지점 색 위 글자가 흰색");
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      const problems = await timeLabelProblems(page);
+      assert(problems.length === 0, width + "px 수업 시간 한 줄 표시 문제: " + json(problems.slice(0, 5)));
+      const pageScroll = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      assert(pageScroll <= 0, width + "px 페이지 가로 스크롤 " + pageScroll + "px");
+    }
+    const inner = await page.locator("#candidates3 .grid-scroll").first().evaluate((el) => el.scrollWidth - el.clientWidth);
+    assert(inner > 0, "390px에서 시간표가 카드 안에서 가로 스크롤되지 않음(요일 칸을 줄인 것으로 의심)");
+    const downloadPromise = page.waitForEvent("download", { timeout: 15000 });
+    await page.locator('#candidates3 button[aria-label="이미지로 저장"]').first().click();
+    const download = await downloadPromise;
+    if (process.env.SMOKE_SAVE_IMAGE) await download.saveAs(process.env.SMOKE_SAVE_IMAGE);
+  } finally {
+    await page.close();
   }
 }
 
@@ -480,7 +715,7 @@ async function checkBlockedStorage(browser, site, backupCode, failures) {
       assert(!(await p.locator("#storageErrorBanner").isVisible()), "정상 백업 복원 뒤에도 저장 오류 배너가 보임");
       await p.click('.nav-item[data-page="memberSchedule"]');
       const saved = JSON.parse((await read(p, STORAGE_KEY)) || "null");
-      assert(saved && saved.schemaVersion === 2 && saved.currentPage === "memberSchedule" && JSON.stringify(saved.noConsecutiveDayMemberIds) === JSON.stringify(["A"]), "정상 백업 복원 뒤 저장이 다시 되지 않음: " + JSON.stringify(saved && { schemaVersion: saved.schemaVersion, currentPage: saved.currentPage, nc: saved.noConsecutiveDayMemberIds }));
+      assert(saved && saved.schemaVersion === SCHEMA_VERSION && saved.currentPage === "memberSchedule" && JSON.stringify(saved.noConsecutiveDayMemberIds) === JSON.stringify(["A"]), "정상 백업 복원 뒤 저장이 다시 되지 않음: " + JSON.stringify(saved && { schemaVersion: saved.schemaVersion, currentPage: saved.currentPage, nc: saved.noConsecutiveDayMemberIds }));
     } finally {
       await ctx.close();
     }
@@ -588,9 +823,10 @@ async function main() {
   const assert = (cond, msg) => { if (!cond) failures.push(msg); };
 
   const legacyRoot = extractLegacyApp();
-  const server = await startServer(legacyRoot);
+  const previousRoot = extractLegacyApp(PREVIOUS_APP_COMMIT);
+  const server = await startServer(legacyRoot, previousRoot);
   const origin = "http://127.0.0.1:" + server.address().port;
-  const site = { blank: origin + "/__smoke_blank", index: origin + "/index.html", legacyIndex: origin + "/legacy/index.html" };
+  const site = { blank: origin + "/__smoke_blank", index: origin + "/index.html", legacyIndex: origin + "/legacy/index.html", previousIndex: origin + "/previous/index.html" };
   const browser = await chromium.launch();
   try {
     const page = await browser.newPage();
@@ -669,8 +905,12 @@ async function main() {
     const cardTitles = () => page.locator("#candidates3 .candidate-title").allTextContents();
     let titles = await cardTitles();
     assert(
-      titles.length === 1 && titles[0] === "추천",
-      "후보 카드가 '추천' 한 장이 아님 (실제: " + JSON.stringify(titles) + ")"
+      titles.length >= 1 && titles[0].startsWith("추천·균형"),
+      "첫 후보 카드가 '추천·균형'이 아님 (실제: " + JSON.stringify(titles) + ")"
+    );
+    assert(
+      (await page.locator("#candidateSummary3 tbody tr").count()) === 6,
+      "대표 후보 비교표가 6행이 아님"
     );
     const pageText = await page.locator("#pageSchedule3").innerText();
     assert(!/후보\s?[ABC]/.test(pageText), "화면에 엔진 이름(후보A/B/C)이 노출됨");
@@ -685,7 +925,7 @@ async function main() {
       .evaluate((el) => el.click());
     titles = await cardTitles();
     assert(
-      titles.includes("내가 수정한 후보") && !titles.includes("추천"),
+      titles.includes("내가 수정한 후보"),
       "확정한 후보가 '내가 수정한 후보'로 바뀌지 않음 (실제: " + JSON.stringify(titles) + ")"
     );
     await clickGenerateAndWait(page, "#generateBtn3", generateTimeout);
@@ -780,11 +1020,14 @@ async function main() {
     // 후보 비교: 골든 CASE-09 생성 결과(추천 + 공강 최소)를 넣고 '추천안과 비교'를 연다. 이 저장
     // 상태에는 inputKey가 없어 기존 저장분 경로(하드 제약 재검사 후 인정)도 함께 지난다.
     const cmp = await browser.newPage();
-    const fixture = fs.readFileSync(path.join(__dirname, "fixtures", "compare-CASE-09.state.json"), "utf8");
-    await openWithSeed(cmp, fixture, site);
+    // 둘째 배치(수업 -1·빈 시간 -60분)는 공강이 0분이 아니라 어느 대표 조건에도 들지 않으므로, 확정 표시를 붙여
+    // '내가 수정한 후보'로 비교한다(대표 조건 판정은 unit 테스트가 본다).
+    const fixtureState = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "compare-CASE-09.state.json"), "utf8"));
+    fixtureState.candidates[0].confirmedIds = [fixtureState.candidates[0].assigned[1].id];
+    await openWithSeed(cmp, JSON.stringify(fixtureState), site);
     const cmpTitles = await cmp.locator("#candidates3 .candidate-title").allTextContents();
     assert(
-      JSON.stringify(cmpTitles) === JSON.stringify(["추천", "공강 최소"]),
+      JSON.stringify(cmpTitles) === JSON.stringify(["추천·균형 · 수업 수 우선·공강 허용", "내가 수정한 후보"]),
       "비교용 저장 상태의 카드가 다름 (실제: " + JSON.stringify(cmpTitles) + ")"
     );
     await cmp.locator(".compare-candidate-btn").first().click();
@@ -798,7 +1041,7 @@ async function main() {
 
     // 모바일 폭에서는 긴 회원·지점명이나 넓은 표가 있어도 페이지 전체가 가로로 스크롤되지 않는다
     // (넓은 시간표·비교 표는 각자의 래퍼 안에서만 스크롤).
-    const longState = JSON.parse(fixture);
+    const longState = JSON.parse(JSON.stringify(fixtureState));
     longState.members.forEach((m) => (m.name = "아주긴회원이름".repeat(6) + m.name));
     longState.locations.forEach((l) => (l.name = "아주긴지점이름ABCDEFGHIJKLMNOP".repeat(2) + l.name));
     for (const width of [320, 360, 390]) {
@@ -1017,6 +1260,8 @@ async function main() {
     if (backupCode) await checkBlockedStorage(browser, site, backupCode, failures);
     else failures.push("[저장 보호] 구버전 호환 검사에서 백업 코드를 받지 못해 검사하지 못함");
     await checkNoConsecutiveSetting(browser, site, failures);
+    await checkPreviousCompat(browser, site, failures);
+    await checkCandidateDisplay(browser, site, failures);
 
     // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-file-"));
@@ -1045,6 +1290,7 @@ async function main() {
     await browser.close();
     server.close();
     fs.rmSync(legacyRoot, { recursive: true, force: true });
+    fs.rmSync(previousRoot, { recursive: true, force: true });
   }
 
   if (failures.length > 0) {

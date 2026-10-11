@@ -68,7 +68,7 @@ export const IDLE_FIRST_CARD_INDEX = 0;
 // 지정했을 때만
 // window.__PT_TEST_BUDGET_SCALE__(0보다 크고 1 이하)로 아래 모든 시간 예산을 비례
 // 축소한다. 지정하지 않으면 항상 1이라 실제 사용 중인 운영 동작은 전혀 바뀌지 않는다.
-const TEST_BUDGET_SCALE =
+export const TEST_BUDGET_SCALE =
   (typeof window !== "undefined" &&
     window.__PT_TEST_BUDGET_SCALE__ > 0 &&
     window.__PT_TEST_BUDGET_SCALE__ <= 1 &&

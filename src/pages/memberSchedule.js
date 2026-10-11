@@ -21,6 +21,7 @@ import { state, runtime, saveState } from "../state.js";
 import {
   memberById,
   locationById,
+  locationColorClass,
   memberColor,
   sessionDurationFor,
 } from "../domain.js";
@@ -1345,9 +1346,7 @@ export function renderMemberTable() {
       const locBadge = document.createElement("span");
       locBadge.className = "chip location-chip";
       locBadge.textContent = loc.name;
-      const colorIndex = state.locations.findIndex((l) => l.id === locId);
-      if (colorIndex >= 0)
-        locBadge.classList.add("location-color-" + (colorIndex % 8));
+      locBadge.classList.add(locationColorClass(locId));
       locBadgeWrap.appendChild(locBadge);
     });
     locCell.appendChild(locBadgeWrap);

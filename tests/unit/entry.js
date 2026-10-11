@@ -17,6 +17,7 @@ export {
   unassignedMembersFor,
   parseTravelMinutesInput,
   memberDayViolation,
+  locationColorClass,
 } from "../../src/domain.js";
 export { engineWorkerInit } from "../../src/engine/workerPool.js";
 export { state } from "../../src/state.js";
@@ -27,8 +28,14 @@ export {
   CONSULT_DURATION_MIN,
   DAYS,
   STORAGE_KEY,
+  PREVIOUS_STORAGE_KEY,
   LEGACY_STORAGE_KEY,
+  LOCATION_PALETTE,
 } from "../../src/constants.js";
+export {
+  searchMemberExclusions,
+  memberExclusionTargets,
+} from "../../src/engine/memberExclusion.js";
 export {
   mulberry32,
   shuffled,
@@ -59,8 +66,11 @@ export {
   revertUnneededChanges,
   byTravelThenSignature,
   MAX_CARD_VARIANTS,
-  MAX_CANDIDATE_CARDS,
-  CANDIDATE_ROLES,
+  REPRESENTATIVE_ROLES,
+  UNASSIGNED_TRADEOFF_MIN_SESSIONS,
+  UNASSIGNED_TRADEOFF_MIN_TRAVEL,
+  unassignedTradeoff,
+  pickRepresentative,
   pickVariants,
 } from "../../src/engine/candidateSelection.js";
 export { setIdleFirst } from "../../src/engine/chainDpCore.js";
@@ -96,6 +106,7 @@ export {
   clearRuntimeScheduleCandidates,
   candidateInputKey,
   loadState,
+  fillLocationColors,
   runtime,
   GenerationCancelledError,
 } from "../../src/state.js";
@@ -103,6 +114,7 @@ export {
   isUserEdited,
   keepsUserEditedSlot,
   candidatePoolEntries,
+  extraCandidates,
   dropStaleCandidates,
   validateMove,
   prepareSwap,

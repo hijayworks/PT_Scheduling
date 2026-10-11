@@ -23,14 +23,40 @@ export const QUALITY_AXES = [
   ["travelCount", -1],
   ["idleMinutes", -1],
 ];
-// 업무 정책값: 추천 외 카드의 역할. 추천안보다 그 축이 나을 때만 붙고, 앞 역할부터 자리를 채운다.
-export const CANDIDATE_ROLES = [
-  { role: "sessions", label: "수업 우선", axis: "sessions" },
-  { role: "travel", label: "이동 최소", axis: "travelCount" },
-  { role: "idle", label: "공강 최소", axis: "idleMinutes" },
+// 업무 정책값(사용자 결정 2026-10-11): 한 번 생성한 후보 풀에서 조건마다 대표 결과를 하나씩 고른다(대표 후보
+// 비교표의 행 순서). 조건을 충족하는 결과가 없으면 그 행은 "찾지 못함"이고, 여러 역할이 같은 품질 그룹을 고르면
+// 카드 하나에 역할을 함께 붙인다. "최대·최소"는 모두 이번 탐색에서 찾은 후보 중에서다.
+//   recommended       추천 기준(isSchedule2ResultBetter)으로 가장 나은 후보 = 미배정이 가장 적다
+//   sessions          추천과 같은 미배정 수 중 수업 최대(공강 허용) → 추천 기준
+//   sessionsNoIdle    추천과 같은 미배정 수·공강 0분(필수 이동시간 제외 빈 시간 0) 중 수업 최대 → 추천 기준
+//   travelTradeoff    추천과 같은 미배정 수·'sessions' 후보보다 이동이 적은 것 중 수업 최대 → 이동 적은 순 → 추천 기준
+//   unassignedSessions 미배정이 추천보다 정확히 1명 많고 수업이 UNASSIGNED_TRADEOFF_MIN_SESSIONS건 이상 많은 것 중
+//                     수업 최대 → 이동 적은 순 → 추천 기준
+//   unassignedTravel  미배정이 추천보다 정확히 1명 많고 이동이 UNASSIGNED_TRADEOFF_MIN_TRAVEL회 이상 적은 것 중
+//                     이동 최소 → 수업 많은 순 → 추천 기준
+export const REPRESENTATIVE_ROLES = [
+  { role: "recommended", label: "추천·균형" },
+  { role: "sessions", label: "수업 수 우선·공강 허용" },
+  { role: "sessionsNoIdle", label: "수업 수 우선·공강 없음" },
+  { role: "travelTradeoff", label: "이동 절충·수업 수 우선" },
+  { role: "unassignedSessions", label: "미배정 1명 추가·수업 증가" },
+  { role: "unassignedTravel", label: "미배정 1명 추가·이동 감소" },
 ];
-// UI 표현값: 추천안 포함 최대 카드 수, 카드 하나의 최대 배치(variant) 수.
-export const MAX_CANDIDATE_CARDS = 3;
+// 업무 정책값: 미배정 1명 추가·절충 후보의 자격(둘 중 하나 이상). 수업 +1건·이동 -1회만으로는 자격이 없다.
+export const UNASSIGNED_TRADEOFF_MIN_SESSIONS = 2;
+export const UNASSIGNED_TRADEOFF_MIN_TRAVEL = 2;
+// rec(추천 지표) 대비 미배정 1명 추가·절충 후보의 자격: { sessionsUp, travelDown } — 둘 다 false면 자격 없음.
+export function unassignedTradeoff(rec, m) {
+  const plusOne = m.unassigned === rec.unassigned + 1;
+  return {
+    sessionsUp:
+      plusOne && m.sessions - rec.sessions >= UNASSIGNED_TRADEOFF_MIN_SESSIONS,
+    travelDown:
+      plusOne &&
+      rec.travelCount - m.travelCount >= UNASSIGNED_TRADEOFF_MIN_TRAVEL,
+  };
+}
+// UI 표현값: 카드 하나의 최대 배치(variant) 수.
 export const MAX_CARD_VARIANTS = 3;
 // 알고리즘 튜닝값: 같은 품질의 두 배치가 별도 variant로 남으려면 회원·요일·지점 배정이 이만큼은
 // 달라야 한다. 시작 시각만 다른 배치는 0이라 제거된다.
@@ -108,12 +134,80 @@ export function pickVariants(group) {
   return { kept, similar, overLimit: rest.length };
 }
 
-// 반환: { cards, hidden, stats }
-//   cards: [{ role, label, metrics, variants: entry[], deltas }] — 자동 카드(첫 장이 추천, role
-//     "recommended")와 그 뒤의 사용자 수정 카드(role "edited").
-//   hidden: 카드가 되지 못한 그룹 [{ reason, ... }]
-//     "unassigned-gate"(미배정이 추천안보다 많아 대안에서 뺀, gate가 없었다면 Pareto였던 그룹)
-//     "unlabeled" | "role-taken" | "card-limit"(Pareto지만 카드가 되지 못함)
+// 목록에서 key가 가장 큰(dir -1이면 가장 작은) entry들만 남긴다.
+function extreme(list, key, dir) {
+  if (!list.length) return list;
+  const top = Math.max(...list.map((e) => e.metrics[key] * dir));
+  return list.filter((e) => e.metrics[key] * dir === top);
+}
+// 역할 하나의 대표 entry({result, metrics}) 또는 null(조건을 충족하는 후보 없음). rec: 추천 entry, list: 후보
+// entry들(rec 포함). 정책은 REPRESENTATIVE_ROLES 주석 — selectCandidates와 회원별 추가 탐색(memberExclusion.js)이
+// 같은 규칙을 쓴다. 마지막 동점은 추천 기준(isSchedule2ResultBetter)으로 고른다.
+export function pickRepresentative(role, rec, list) {
+  const r = rec.metrics;
+  const pick = (l) => (l.length ? bestOf(l) : null);
+  const same = list.filter((e) => e.metrics.unassigned === r.unassigned);
+  switch (role) {
+    case "recommended":
+      return rec;
+    case "sessions":
+      return pick(extreme(same, "sessions", 1));
+    case "sessionsNoIdle":
+      return pick(
+        extreme(
+          same.filter((e) => e.metrics.idleMinutes === 0),
+          "sessions",
+          1,
+        ),
+      );
+    case "travelTradeoff": {
+      const top = pickRepresentative("sessions", rec, list).metrics;
+      return pick(
+        extreme(
+          extreme(
+            same.filter((e) => e.metrics.travelCount < top.travelCount),
+            "sessions",
+            1,
+          ),
+          "travelCount",
+          -1,
+        ),
+      );
+    }
+    case "unassignedSessions":
+      return pick(
+        extreme(
+          extreme(
+            list.filter((e) => unassignedTradeoff(r, e.metrics).sessionsUp),
+            "sessions",
+            1,
+          ),
+          "travelCount",
+          -1,
+        ),
+      );
+    case "unassignedTravel":
+      return pick(
+        extreme(
+          extreme(
+            list.filter((e) => unassignedTradeoff(r, e.metrics).travelDown),
+            "travelCount",
+            -1,
+          ),
+          "sessions",
+          1,
+        ),
+      );
+    default:
+      throw new Error("unknown role " + role);
+  }
+}
+
+// 반환: { cards, rows, stats }
+//   cards: [{ role, roles, label, metrics, variants: entry[], deltas }] — 대표 카드(역할 순서, 첫 장이 추천)와 그
+//     뒤의 사용자 수정 카드(role "edited"). roles: 이 카드가 맡은 대표 역할 [{role, label}](같은 품질 그룹을 고른
+//     역할은 한 카드로 합친다), role: 그중 첫 역할, label: 역할 이름을 " · "로 이은 것.
+//   rows: REPRESENTATIVE_ROLES 순서의 비교표 행 [{ role, label, card | null }] — null이면 조건을 충족하는 후보 없음.
 export function selectCandidates(entries) {
   // 1) 사용자 수정 카드는 그대로 둔다(서로 완전히 같으면 하나만). 자동 배치가 수정 카드와 완전히
   //    같으면 자동 쪽을 지운다 — 같은 배치를 두 장 보여주지 않고, 사람이 손댄 카드가 대표한다.
@@ -149,95 +243,59 @@ export function selectCandidates(entries) {
     .map((g) => g.sort(byTravelThenSignature))
     .sort((g, h) => byTravelThenSignature(g[0], h[0]));
   const head = (g) => g[0];
-  // 3) 추천: 기존 생성 비교 기준(isSchedule2ResultBetter)으로 가장 나은 그룹. 그 기준은 미배정을
-  //    가장 먼저 보고 Pareto 축에 단조라, 추천은 항상 미배정이 가장 적은 Pareto 그룹이다.
-  const rec = groups.length ? bestOf(groups.map(head)) : null;
-  // 4) 미배정 gate: 추천안보다 미배정이 많은 그룹은 대안이 될 수 없다(Pareto 판정 전에 뺀다).
-  const eligible = groups.filter(
-    (g) => head(g).metrics.unassigned <= rec.metrics.unassigned,
-  );
-  const gated = groups.filter((g) => !eligible.includes(g));
-  const isParetoIn = (g, pool) =>
-    !pool.some((h) => dominates(h[0].metrics, g[0].metrics));
-  // 5) 남은 그룹 중 다른 그룹에 지배당하는 그룹을 지운다.
-  const pareto = eligible.filter((g) => isParetoIn(g, eligible));
-  const count = (list) => list.reduce((n, g) => n + g.length, 0);
-  // 6) 그룹 안 variant(다양성 우선, 최대 MAX_CARD_VARIANTS개).
+  const m = (g) => head(g).metrics;
+  // 3) 역할별 대표(REPRESENTATIVE_ROLES 주석의 정책) — 각 품질 그룹의 대표 배치로 고른다.
+  const heads = groups.map(head);
+  const rec = heads.length ? bestOf(heads) : null;
+  const picks = new Map();
+  if (rec)
+    REPRESENTATIVE_ROLES.forEach(({ role }) => {
+      const e = pickRepresentative(role, rec, heads);
+      picks.set(role, e ? groups.find((g) => head(g) === e) : null);
+    });
+  const deltasOf = (metrics) => (rec ? tradeoffDeltas(rec.metrics, metrics) : []);
+  // 4) 같은 그룹을 고른 역할은 카드 하나로 합친다(역할 순서대로). 그룹 안 variant는 다양성 우선.
   let similarRemoved = 0,
     variantLimitRemoved = 0;
-  const variantsOf = new Map();
-  pareto.forEach((g) => {
-    const { kept, similar, overLimit } = pickVariants(g);
-    similarRemoved += similar;
-    variantLimitRemoved += overLimit;
-    variantsOf.set(g, kept);
+  const cardOfGroup = new Map();
+  const cards = [];
+  const rows = REPRESENTATIVE_ROLES.map(({ role, label }) => {
+    const g = picks.get(role) || null;
+    if (!g) return { role, label, card: null };
+    if (!cardOfGroup.has(g)) {
+      const { kept, similar, overLimit } = pickVariants(g);
+      similarRemoved += similar;
+      variantLimitRemoved += overLimit;
+      const card = {
+        role,
+        roles: [],
+        label: "",
+        metrics: m(g),
+        variants: kept,
+        deltas: deltasOf(m(g)),
+      };
+      cardOfGroup.set(g, card);
+      cards.push(card);
+    }
+    const card = cardOfGroup.get(g);
+    card.roles.push({ role, label });
+    card.label = card.roles.map((r) => r.label).join(" · ");
+    return { role, label, card };
   });
-  const recGroup = pareto.find((g) => head(g) === rec);
-  const deltasOf = (m) => (rec ? tradeoffDeltas(rec.metrics, m) : []);
-  const cardOf = (g, role, label) => ({
-    role,
-    label,
-    metrics: head(g).metrics,
-    variants: variantsOf.get(g) || g,
-    deltas: deltasOf(head(g).metrics),
-  });
-  const cards = recGroup ? [cardOf(recGroup, "recommended", "추천")] : [];
-  // 7) 역할: 추천안보다 그 축이 나은 그룹 중 그 축이 가장 좋은 그룹(같으면 추천 기준). 한 그룹은
-  //    한 역할만 맡고, 해당하는 그룹이 없는 역할은 만들지 않는다.
-  const used = new Set([recGroup]);
-  const qualifies = (g, axis) => {
-    const dir = QUALITY_AXES.find(([k]) => k === axis)[1];
-    return (head(g).metrics[axis] - rec.metrics[axis]) * dir > 0;
-  };
-  CANDIDATE_ROLES.forEach(({ role, label, axis }) => {
-    if (cards.length >= MAX_CANDIDATE_CARDS) return;
-    const pool = pareto.filter((g) => !used.has(g) && qualifies(g, axis));
-    if (!pool.length) return;
-    const dir = QUALITY_AXES.find(([k]) => k === axis)[1];
-    const bestVal = Math.max(...pool.map((g) => head(g).metrics[axis] * dir));
-    const pick = bestOf(
-      pool.filter((g) => head(g).metrics[axis] * dir === bestVal).map(head),
-    );
-    const g = pool.find((x) => head(x) === pick);
-    used.add(g);
-    cards.push(cardOf(g, role, label));
-  });
-  const hiddenOf = (g, reason) => ({
-    ...cardOf(g, null, null),
-    reason,
-    qualifiesFor: CANDIDATE_ROLES.filter(({ axis }) => qualifies(g, axis)).map(
-      (r) => r.label,
-    ),
-  });
-  const hidden = gated
-    .filter((g) => isParetoIn(g, groups))
-    .map((g) => hiddenOf(g, "unassigned-gate"))
-    .concat(
-      pareto
-        .filter((g) => !used.has(g))
-        .map((g) =>
-          hiddenOf(
-            g,
-            !CANDIDATE_ROLES.some(({ axis }) => qualifies(g, axis))
-              ? "unlabeled"
-              : cards.length >= MAX_CANDIDATE_CARDS
-                ? "card-limit"
-                : "role-taken",
-          ),
-        ),
-    );
   fixed.forEach((e) =>
     cards.push({
       role: "edited",
+      roles: [],
       label: "내가 수정한 후보",
       metrics: e.metrics,
       variants: [e],
       deltas: deltasOf(e.metrics),
     }),
   );
+  const count = (list) => list.reduce((n, g) => n + g.length, 0);
   return {
     cards,
-    hidden,
+    rows,
     stats: {
       generated: entries.length,
       fixedCards: fixedCount,
@@ -245,11 +303,9 @@ export function selectCandidates(entries) {
       exactUnique: unique.length,
       exactDuplicates: autoEntries.length - unique.length - mergedIntoFixed,
       qualityGroups: groups.length,
-      gatedGroups: gated.length,
-      gatedLayouts: count(gated),
-      paretoGroups: pareto.length,
-      dominatedGroups: eligible.length - pareto.length,
-      dominatedLayouts: count(eligible.filter((g) => !pareto.includes(g))),
+      shownGroups: cardOfGroup.size,
+      notShownLayouts: count(groups.filter((g) => !cardOfGroup.has(g))),
+      rolesFound: rows.filter((r) => r.card).length,
       similarRemoved,
       variantLimitRemoved,
       cardsShown: cards.length,

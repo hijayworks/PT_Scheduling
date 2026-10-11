@@ -332,8 +332,9 @@ test("저장 이관: 구버전 키(schemaVersion 1)의 회원·신청·설정·�
     assertEqual(lib.runtime.schedule3Result.candidateAList[0].confirmedIds, ["R1"], "수정 확정 후보 유지");
     assert(lib.saveState(), "이관 뒤 저장 가능");
     const saved = JSON.parse(data.get(lib.STORAGE_KEY));
-    assertEqual(saved.schemaVersion, 2);
+    assertEqual(saved.schemaVersion, lib.CURRENT_SCHEMA_VERSION);
     assertEqual(saved.members.map((m) => m.id), ["M1"]);
+    assertEqual(saved.locations.map((l) => l.color), ["#5da7ff", "#50d2c2"], "마포점·여의도점 색 채움");
     assertEqual(data.get(lib.LEGACY_STORAGE_KEY), legacyRaw, "구버전 저장분은 그대로");
   });
 });
@@ -394,14 +395,14 @@ test("저장 보호: 차단된 상태에서도 정상 백업을 복원하면(새
     assertEqual(lib.runtime.loadError, null, "차단 해제");
     assertEqual(lib.state.noConsecutiveDayMemberIds, ["M1"]);
     assert(lib.saveState(), "복원 뒤 저장 가능");
-    assertEqual(JSON.parse(data.get(lib.STORAGE_KEY)).schemaVersion, 2);
+    assertEqual(JSON.parse(data.get(lib.STORAGE_KEY)).schemaVersion, lib.CURRENT_SCHEMA_VERSION);
   });
 });
 
-test("백업: 신버전 백업은 schemaVersion 2로 새 설정을 담고, 구버전 백업(1)은 복원 후 새 설정을 빈 목록으로 이관한다", () => {
-  const current = { ...legacySavedState(), schemaVersion: 2, noConsecutiveDayMemberIds: ["M1"] };
+test("백업: 신버전 백업은 현재 schemaVersion으로 새 설정을 담고, 구버전 백업(1)은 복원 후 새 설정을 빈 목록으로 이관한다", () => {
+  const current = { ...legacySavedState(), schemaVersion: lib.CURRENT_SCHEMA_VERSION, noConsecutiveDayMemberIds: ["M1"] };
   const portable = lib.createPortableBackupState(current);
-  assertEqual([portable.schemaVersion, portable.noConsecutiveDayMemberIds], [2, ["M1"]]);
+  assertEqual([portable.schemaVersion, portable.noConsecutiveDayMemberIds], [lib.CURRENT_SCHEMA_VERSION, ["M1"]]);
   const legacyBackup = { ...portable, schemaVersion: 1 }; // 구버전이 만든 백업: 새 설정 필드 없음
   delete legacyBackup.noConsecutiveDayMemberIds;
   for (const [backup, expected] of [[portable, ["M1"]], [legacyBackup, []]]) {
@@ -410,6 +411,94 @@ test("백업: 신버전 백업은 schemaVersion 2로 새 설정을 담고, 구�
       lib.loadState();
       assertEqual(lib.state.members.map((m) => m.id), ["M1"]);
       assertEqual(lib.state.noConsecutiveDayMemberIds, expected);
+    });
+  }
+});
+
+/* ---------------- 지점 색상 (schemaVersion 3) ---------------- */
+// 직전 버전(키 v4, schemaVersion 2) 저장분: 기본 세 지점 + 사용자 지점, 연속 배정 제외·수정 확정 후보 포함.
+function v4SavedState() {
+  const data = legacySavedState();
+  data.schemaVersion = 2;
+  data.locations = [
+    { id: "L1", name: "마포점" },
+    { id: "L2", name: "여의도점" },
+    { id: "L3", name: "강남점" },
+    { id: "L4", name: "상암점" },
+  ];
+  data.noConsecutiveDayMemberIds = ["M1"];
+  data.excludedMemberIds3 = [];
+  return data;
+}
+test("저장 이관: 직전 키(schemaVersion 2)의 회원·신청·설정·수정 확정 후보를 보존하고 지점 색상을 채우며 직전 저장분은 건드리지 않는다", () => {
+  const prevRaw = JSON.stringify(v4SavedState());
+  const legacy = { ...legacySavedState(), members: [] }; // 더 오래된 키는 직전 키가 있으면 읽지 않는다
+  withFakeStorage({ [lib.PREVIOUS_STORAGE_KEY]: prevRaw, [lib.LEGACY_STORAGE_KEY]: JSON.stringify(legacy) }, (data) => {
+    lib.loadState();
+    assertEqual(lib.state.members.map((m) => m.id), ["M1"]);
+    assertEqual(lib.state.requests.map((r) => r.id), ["R1"]);
+    assertEqual([lib.state.onceLimitedMemberIds3, lib.state.noConsecutiveDayMemberIds], [["M1"], ["M1"]]);
+    assertEqual(lib.runtime.schedule3Result.candidateAList[0].confirmedIds, ["R1"], "수정 확정 후보 유지");
+    assertEqual(
+      lib.state.locations.map((l) => [l.name, l.color]),
+      [["마포점", "#5da7ff"], ["여의도점", "#50d2c2"], ["강남점", "#e69a8d"], ["상암점", "#8c88ff"]],
+      "기본 지점은 정해진 색, 나머지는 쓰이지 않은 첫 팔레트 색",
+    );
+    assert(lib.saveState(), "이관 뒤 저장 가능");
+    assertEqual(JSON.parse(data.get(lib.STORAGE_KEY)).schemaVersion, 3);
+    assertEqual(data.get(lib.PREVIOUS_STORAGE_KEY), prevRaw, "직전 저장분은 그대로");
+  });
+});
+test("지점 색상: 이미 고른 색은 바꾸지 않고, 팔레트 밖·없는 색만 채우며 기본 지점 색을 다른 지점이 먼저 가져가지 않는다", () => {
+  const locs = [
+    { id: "a", name: "강남점" },
+    { id: "b", name: "여의도점", color: "#d8b36a" },
+    { id: "c", name: "마포점", color: "red" },
+    { id: "d", name: "상암점" },
+  ];
+  lib.fillLocationColors(locs);
+  assertEqual(locs.map((l) => l.color), ["#50d2c2", "#d8b36a", "#5da7ff", "#8c88ff"]);
+  const many = Array.from({ length: 8 }, (_, i) => ({ id: "x" + i, name: "지점" + i }));
+  lib.fillLocationColors(many);
+  assert(many.every((l) => lib.LOCATION_PALETTE.some((p) => p.color === l.color)), "6개를 넘어도 팔레트 색");
+  assertEqual(new Set(many.slice(0, 6).map((l) => l.color)).size, 6, "앞 6개는 서로 다른 색");
+});
+test("지점 색상: 색은 지점 id에 붙어 이름을 바꿔도 유지되고, 수업 블록 클래스도 배정 지점 id로 정한다", () => {
+  lib.state.locations = [
+    { id: "L1", name: "마포점", color: "#8db58a" },
+    { id: "L2", name: "여의도점", color: "#50d2c2" },
+  ];
+  assertEqual([lib.locationColorClass("L1"), lib.locationColorClass("L2"), lib.locationColorClass("none")], ["location-color-5", "location-color-0", "location-color-fallback"]);
+  lib.state.locations[0].name = "마포2호점";
+  assertEqual(lib.locationColorClass("L1"), "location-color-5");
+});
+test("지점 색상은 표시 전용이라 후보 입력 지문에 넣지 않는다 — 색만 바꾸거나 색을 채워도 기존 후보 키가 같다", () => {
+  qualityFixture();
+  lib.state.locations.forEach((l) => delete l.color);
+  const before = lib.candidateInputKey();
+  lib.fillLocationColors(lib.state.locations);
+  assertEqual(lib.candidateInputKey(), before, "색 채움");
+  lib.state.locations[0].color = "#d8b36a";
+  assertEqual(lib.candidateInputKey(), before, "색 변경");
+  lib.state.locations[0].name += "X";
+  assert(lib.candidateInputKey() !== before, "이름 변경은 여전히 입력 변경(세 지점 규칙이 이름을 읽음)");
+});
+test("백업: 지점 색상은 백업·복원 후에도 유지되고, 색 없는 구버전 백업은 복원할 때 채운다", () => {
+  const current = { ...v4SavedState(), schemaVersion: lib.CURRENT_SCHEMA_VERSION };
+  current.locations = current.locations.map((l, i) => ({ ...l, color: lib.LOCATION_PALETTE[5 - i].color }));
+  const portable = lib.createPortableBackupState(current);
+  const oldBackup = lib.createPortableBackupState(v4SavedState());
+  oldBackup.schemaVersion = 2;
+  oldBackup.locations.forEach((l) => delete l.color);
+  for (const [backup, expected] of [
+    [portable, ["#8db58a", "#d8b36a", "#e69a8d", "#5da7ff"]],
+    [oldBackup, ["#5da7ff", "#50d2c2", "#e69a8d", "#8c88ff"]],
+  ]) {
+    const restored = lib.prepareBackupStateForRestore(JSON.parse(JSON.stringify(backup)));
+    withFakeStorage({ [lib.STORAGE_KEY]: JSON.stringify(restored) }, () => {
+      lib.loadState();
+      assertEqual(lib.state.locations.map((l) => l.color), expected);
+      assertEqual(lib.state.noConsecutiveDayMemberIds, ["M1"]);
     });
   }
 });
@@ -1021,10 +1110,9 @@ test("후보 조건 안내의 숫자·역할 이름은 정책값과 같다", () 
     `등록 회원 ${lib.SESSION_DURATION_MIN}분, 상담 회원 ${lib.CONSULT_DURATION_MIN}분`,
     `하루 최대 1회, 주 최대 ${lib.MAX_SESSIONS_PER_MEMBER}회`,
     `하루 지점 간 이동은 최대 ${lib.MAX_TRAVELS_PER_DAY}회`,
-    `추천 포함 최대 ${lib.MAX_CANDIDATE_CARDS}개`,
-    "'추천'만 나올 수도",
-    // 역할 카드는 정책 순서(CANDIDATE_ROLES)대로 채워지므로 안내도 그 순서로 적는다.
-    lib.CANDIDATE_ROLES.map((r) => `'${r.label}'`).join(""),
+    `수업이 ${lib.UNASSIGNED_TRADEOFF_MIN_SESSIONS}건 이상 많거나 이동이 ${lib.UNASSIGNED_TRADEOFF_MIN_TRAVEL}회 이상 적을 때만`,
+    // 대표 역할은 비교표 행 순서(REPRESENTATIVE_ROLES)대로 안내한다.
+    lib.REPRESENTATIVE_ROLES.map((r) => `'${r.label}'`).join(" · "),
   ].forEach((phrase) =>
     assert(rules.replace(/\([^)]*\)·?/g, "").includes(phrase), "후보 조건에 없음: " + phrase),
   );
@@ -1324,7 +1412,7 @@ test("후보 선정: 같은 배치는 하나로 합치고, 시작 시각만 다�
   const shifted = selEntry("shifted", [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 1, 1, "L1"], ["C", 1, 10, "L3"]]);
   const daysSwapped = selEntry("swapped", [["A", 1, 0, "L1"], ["B", 1, 6, "L1"], ["S", 0, 0, "L1"], ["C", 0, 9, "L3"]]);
   const sel = lib.selectCandidates([base, dup, shifted, daysSwapped]);
-  assertEqual(sel.cards.map((c) => c.label), ["추천"]);
+  assertEqual(sel.cards.length, 1);
   const keys = sel.cards[0].variants.map((v) => v.key);
   assertEqual([keys.length, keys.includes("swapped"), keys.includes("base") !== keys.includes("shifted")], [2, true, true], "시작 시각만 다른 둘 중 하나만");
   const st = sel.stats;
@@ -1362,7 +1450,74 @@ test("후보 선정: 같은 품질 배치는 회원·요일 배정이 달라도 
   assertEqual(sel.cards[0].variants.length, lib.MAX_CARD_VARIANTS);
   assertEqual(sel.stats.variantLimitRemoved, 1);
 });
-test("후보 선정: 모든 축에서 같거나 못한 후보는 지우고, 추천안보다 나은 축이 있을 때만 역할을 붙인다", () => {
+
+/* 대표 역할(사용자 결정 2026-10-11). 지표만 다른 합성 후보로 규칙을 본다 — 동점 판정(추천 기준)을 쓰지 않도록 값이 겹치지 않게 둔다. */
+const repEntry = (key, unassigned, sessions, travelCount, idleMinutes = 0) => ({
+  key,
+  result: { assigned: [], unassignedMembers: [] },
+  metrics: { unassigned, sessions, travelCount, idleMinutes, inefficientMoves: 0, travelMinutes: 0 },
+});
+test("미배정 1명 추가·절충: 미배정이 정확히 1명 많고 수업 +2건 이상 또는 이동 -2회 이상이어야 한다 — +1건·-1회만으로는 아니다", () => {
+  const rec = { unassigned: 1, sessions: 10, travelCount: 4 };
+  const q = (du, ds, dt) => lib.unassignedTradeoff(rec, { unassigned: 1 + du, sessions: 10 + ds, travelCount: 4 + dt });
+  assertEqual(q(1, 1, 0), { sessionsUp: false, travelDown: false }, "수업 +1");
+  assertEqual(q(1, 0, -1), { sessionsUp: false, travelDown: false }, "이동 -1");
+  assertEqual(q(1, 1, -1), { sessionsUp: false, travelDown: false }, "수업 +1·이동 -1");
+  assertEqual(q(1, 2, 0), { sessionsUp: true, travelDown: false }, "수업 +2부터");
+  assertEqual(q(1, -1, -2), { sessionsUp: false, travelDown: true }, "이동 -2부터(수업이 줄어도)");
+  assertEqual(q(1, 2, 3), { sessionsUp: true, travelDown: false }, "하나만 충족해도 됨");
+  assertEqual(q(1, 3, -2), { sessionsUp: true, travelDown: true });
+  assertEqual(q(2, 5, -4), { sessionsUp: false, travelDown: false }, "미배정 +2명");
+  assertEqual(q(0, 3, -3), { sessionsUp: false, travelDown: false }, "미배정이 같으면 이 역할 아님");
+});
+test("대표 역할: 조건마다 탐색한 후보 중 대표를 고른다(수업 최대·공강 없음·이동 절충·미배정 1명 추가 수업 증가형·이동 감소형)", () => {
+  const R = repEntry("R", 0, 10, 4, 60);
+  const list = [
+    R,
+    repEntry("moreSessions", 0, 12, 6, 90),
+    repEntry("noIdle11", 0, 11, 3, 0),
+    repEntry("noIdle9", 0, 9, 1, 0),
+    repEntry("u1s12", 1, 12, 4),
+    repEntry("u1travel", 1, 11, 1),
+    repEntry("u1s13", 1, 13, 5),
+    repEntry("u1weak", 1, 11, 3),
+    repEntry("u2", 2, 20, 0),
+  ];
+  const pick = (role) => (lib.pickRepresentative(role, R, list) || { key: null }).key;
+  assertEqual(
+    lib.REPRESENTATIVE_ROLES.map((r) => [r.role, pick(r.role)]),
+    [
+      ["recommended", "R"],
+      ["sessions", "moreSessions"],
+      ["sessionsNoIdle", "noIdle11"],
+      ["travelTradeoff", "noIdle11"], // 이동 < 6(수업 최대 후보) 중 수업 최대
+      ["unassignedSessions", "u1s13"], // 수업 +3 > +2
+      ["unassignedTravel", "u1travel"], // 이동 -3, u1weak(+1건·-1회)는 자격 없음
+    ],
+  );
+  // 이동 절충은 수업이 같으면 이동이 적은 쪽
+  assertEqual(lib.pickRepresentative("travelTradeoff", R, list.concat(repEntry("sameSessionsLessTravel", 0, 11, 2, 30))).key, "sameSessionsLessTravel");
+  // 공강 0분 후보가 없거나 수업 최대 후보보다 이동이 적은 후보가 없으면 null
+  const plain = [R, repEntry("more", 0, 11, 3, 30)];
+  assertEqual([lib.pickRepresentative("sessionsNoIdle", R, plain), lib.pickRepresentative("travelTradeoff", R, [R])], [null, null]);
+});
+test("후보 선정: 같은 품질 그룹을 고른 역할은 카드 하나로 합치고, 비교표 행에는 찾지 못한 역할을 null로 남긴다", () => {
+  qualityFixture();
+  const sel = lib.selectCandidates([selEntry("base", SEL_BASE)]);
+  assertEqual(sel.cards.map((c) => [c.role, c.roles.map((r) => r.role), c.label]), [
+    ["recommended", ["recommended", "sessions", "sessionsNoIdle"], "추천·균형 · 수업 수 우선·공강 허용 · 수업 수 우선·공강 없음"],
+  ]);
+  assertEqual(sel.rows.map((r) => [r.role, r.card ? r.card.variants[0].key : null]), [
+    ["recommended", "base"],
+    ["sessions", "base"],
+    ["sessionsNoIdle", "base"],
+    ["travelTradeoff", null],
+    ["unassignedSessions", null],
+    ["unassignedTravel", null],
+  ]);
+  assertEqual(sel.stats.rolesFound, 3);
+});
+test("후보 선정: 추천보다 나은 지표가 없어도 조건별 대표를 보여주고, 모든 조건에서 밀리는 후보는 고르지 않는다", () => {
   qualityFixture();
   const base = selEntry("base", SEL_BASE);
   const worse = selEntry("worse", [["A", 0, 0, "L1"], ["B", 0, 9, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]]);
@@ -1371,40 +1526,34 @@ test("후보 선정: 모든 축에서 같거나 못한 후보는 지우고, 추�
   assertEqual(
     sel.cards.map((c) => [c.label, c.variants[0].key, lib.formatTradeoff(c.deltas)]),
     [
-      ["추천", "base", ""],
-      ["수업 우선", "more", "수업 +1 / 비효율 이동 +1 / 이동 +1 / 이동 시간 +30분"],
+      ["추천·균형 · 이동 절충·수업 수 우선", "base", ""],
+      ["수업 수 우선·공강 허용 · 수업 수 우선·공강 없음", "more", "수업 +1 / 비효율 이동 +1 / 이동 +1 / 이동 시간 +30분"],
     ],
-    "이동 최소·공강 최소는 추천안보다 나은 후보가 없어 만들지 않는다",
   );
-  assertEqual([sel.stats.dominatedGroups, sel.stats.dominatedLayouts, sel.hidden.length], [1, 1, 0]);
+  assertEqual(sel.stats.notShownLayouts, 1, "빈 시간만 많은 worse");
 });
-test("후보 선정: 추천보다 나은 지표가 있는 후보가 없으면 추천 카드 하나만 보인다", () => {
+test("후보 선정: 미배정 1명 추가 후보는 이동 -1회만으로는 보이지 않고, 이동 -2회부터 이동 감소형으로 보인다", () => {
   qualityFixture();
   const base = selEntry("base", SEL_BASE);
-  const worse = selEntry("worse", [["A", 0, 0, "L1"], ["B", 0, 9, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]]);
-  assertEqual(lib.selectCandidates([worse, base]).cards.map((c) => c.label), ["추천"]);
+  const minusOne = selEntry("less", [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 0, 12, "L1"]], [{ id: "C" }]);
+  assertEqual(lib.selectCandidates([base, minusOne]).rows.slice(4).map((r) => r.card), [null, null], "미배정 +1·수업 -1·이동 -1");
+  // 월: A(마포) → C(상암) → B(마포) = 이동 2. C를 빼면 이동 0.
+  const twoMoves = selEntry("two", [["A", 0, 0, "L1"], ["C", 0, 9, "L3"], ["B", 0, 15, "L1"], ["S", 1, 0, "L1"]]);
+  const withoutC = selEntry("noC", [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 1, 0, "L1"]], [{ id: "C" }]);
+  const sel = lib.selectCandidates([twoMoves, withoutC]);
+  assertEqual(sel.rows.map((r) => [r.role, r.card && r.card.variants[0].key]).slice(4), [["unassignedSessions", null], ["unassignedTravel", "noC"]]);
+  assertEqual(lib.formatTradeoff(sel.rows[5].card.deltas), "미배정 +1명 / 수업 -1 / 비효율 이동 -1 / 이동 -2 / 이동 시간 -60분");
 });
-test("후보 선정: 미배정이 추천안보다 많은 대안은 Pareto여도 카드로 보이지 않고 gate 사유로 보고한다", () => {
-  qualityFixture();
-  const base = selEntry("base", SEL_BASE);
-  const lessTravel = selEntry("less", [["A", 0, 0, "L1"], ["B", 0, 6, "L1"], ["S", 0, 12, "L1"]], [{ id: "C" }]);
-  const sel = lib.selectCandidates([base, lessTravel]);
-  assertEqual(sel.cards.map((c) => c.label), ["추천"]);
-  assertEqual(sel.hidden.map((h) => [h.reason, h.variants[0].key, lib.formatTradeoff(h.deltas)]), [
-    ["unassigned-gate", "less", "미배정 +1명 / 수업 -1 / 이동 -1 / 이동 시간 -30분"],
-  ]);
-  assertEqual([sel.stats.gatedGroups, sel.stats.gatedLayouts], [1, 1]);
-});
-test("후보 선정: 사용자가 수정한 후보는 지배당해도 지우지 않고, 추천 역할 없이 따로 보여준다", () => {
+test("후보 선정: 사용자가 수정한 후보는 대표 역할 없이 따로 보여준다", () => {
   qualityFixture();
   const base = selEntry("base", SEL_BASE);
   const edited = { ...selEntry("edited", [["A", 0, 0, "L1"], ["B", 0, 9, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]]), fixed: true };
   const sel = lib.selectCandidates([edited, base]);
   assertEqual(
-    sel.cards.map((c) => [c.role, c.label, c.variants[0].key, lib.formatTradeoff(c.deltas)]),
+    sel.cards.map((c) => [c.role, c.variants[0].key, lib.formatTradeoff(c.deltas)]),
     [
-      ["recommended", "추천", "base", ""],
-      ["edited", "내가 수정한 후보", "edited", "빈 시간 +30분"],
+      ["recommended", "base", ""],
+      ["edited", "edited", "빈 시간 +30분"],
     ],
   );
 });
@@ -1414,10 +1563,89 @@ test("후보 선정: 자동 배치가 사용자 수정 후보와 완전히 같�
   const sameAuto = selEntry("auto", SEL_BASE);
   const other = selEntry("other", [["A", 0, 0, "L1"], ["B", 0, 9, "L1"], ["S", 1, 0, "L1"], ["C", 1, 9, "L3"]]);
   const sel = lib.selectCandidates([edited, sameAuto, other]);
-  assertEqual(sel.cards.map((c) => [c.label, c.variants[0].key]), [["추천", "other"], ["내가 수정한 후보", "edited"]]);
+  assertEqual(sel.cards.map((c) => [c.role, c.variants[0].key]), [["recommended", "other"], ["edited", "edited"]]);
   assertEqual([sel.stats.mergedIntoFixed, sel.stats.exactDuplicates], [1, 0]);
 });
 
+// 월·화 12:00~16:00, Q1~Q4(마포)는 매시 정각 신청, P(상암)는 월 13:30 하나만 → P가 월요일 가운데에 끼어 이동 2.
+function exclusionFixture() {
+  lib.state.locations = [{ id: "L1", name: "마포점" }, { id: "L3", name: "상암점" }];
+  lib.state.travelTimes = { [lib.pairKey("L1", "L3")]: 30 };
+  lib.state.members = ["Q1", "Q2", "Q3", "Q4"]
+    .map((id) => ({ id, name: id, locationIds: ["L1"], category: "등록" }))
+    .concat({ id: "P", name: "P", locationIds: ["L3"], category: "등록" });
+  lib.state.excludedMemberIds3 = [];
+  lib.state.onceLimitedMemberIds3 = [];
+  lib.state.noConsecutiveDayMemberIds = [];
+  lib.runtime.availableCells = new Set();
+  lib.state.requests = [];
+  for (const day of [0, 1]) {
+    for (let s = 0; s < 24; s++) lib.runtime.availableCells.add(day + "-" + s);
+    for (const q of ["Q1", "Q2", "Q3", "Q4"])
+      for (let s = 0; s <= 18; s += 6) lib.state.requests.push({ id: q + day + "_" + s, memberId: q, day, startSlot: s, duration: 60 });
+  }
+  lib.state.requests.push({ id: "P0_9", memberId: "P", day: 0, startSlot: 9, duration: 60 });
+}
+// 그리디 엔진은 화면 양보에 requestAnimationFrame을 쓴다 — 이 테스트들 동안만 setTimeout으로 흉내 낸다.
+async function withRaf(fn) {
+  const realRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  try {
+    return await fn();
+  } finally {
+    globalThis.requestAnimationFrame = realRaf;
+  }
+}
+async function exclusionRec() {
+  const gen = await lib.generateCandidatesAsync(() => {}, { workerCount: 0, attempts: 30 });
+  const entries = gen.built.map((result) => ({ result, metrics: lib.scheduleMetrics(result) }));
+  return lib.selectCandidates(entries).rows[0].card.variants[0];
+}
+testAsync("회원별 추가 탐색: 회원을 탐색 안에서만 제외하고, 제외한 회원을 미배정으로 세며, 필수 제약을 지킨 절충 후보만 넘긴다", () => withRaf(async () => {
+  exclusionFixture();
+  const rec = await exclusionRec();
+  assertEqual([rec.metrics.unassigned, rec.metrics.sessions, rec.metrics.travelCount], [0, 7, 2], "픽스처 확인");
+  assertEqual(lib.memberExclusionTargets(rec.result), ["P", "Q1", "Q2", "Q3", "Q4"]);
+  const found = [];
+  const stats = await lib.searchMemberExclusions(rec, { workerOptions: { workerCount: 0 }, attempts: 30, onFound: (r) => found.push(...r) });
+  assertEqual(lib.state.excludedMemberIds3, [], "저장된 미배정 회원 설정은 그대로");
+  assertEqual([stats.members, stats.found], [5, found.length]);
+  assert(found.length >= 1, "P를 뺀 이동 감소형을 찾아야 함");
+  found.forEach((r) => {
+    assertEqual(lib.scheduleViolations(r), [], "필수 제약");
+    const m = lib.scheduleMetrics(r);
+    assert(r.unassignedMembers.some((x) => x.id === r.excludedMemberId), "제외한 회원이 미배정에 있음");
+    assertEqual(m.unassigned, rec.metrics.unassigned + 1, "원래 배정 대상 기준 미배정 +1");
+    const q = lib.unassignedTradeoff(rec.metrics, m);
+    assert(q.sessionsUp || q.travelDown, "자격 충족");
+  });
+  const p = found.find((r) => r.excludedMemberId === "P");
+  const pm = lib.scheduleMetrics(p);
+  assertEqual([pm.sessions, pm.travelCount], [8, 0], "P를 빼면 수업 +1·이동 -2");
+  const sel = lib.selectCandidates([rec, { key: "X1", result: p, metrics: pm }]);
+  assertEqual(sel.rows.slice(4).map((r) => r.card && r.card.variants[0].key), [null, "X1"], "수업 +1은 수업 증가형 아님, 이동 -2는 이동 감소형");
+}));
+testAsync("회원별 추가 탐색: 취소하면 GenerationCancelledError로 멈추고 그때까지 넘긴 후보는 남는다", () => withRaf(async () => {
+  exclusionFixture();
+  const rec = await exclusionRec();
+  const found = [];
+  let error = null;
+  try {
+    await lib.searchMemberExclusions(rec, {
+      workerOptions: { workerCount: 0 },
+      attempts: 30,
+      onMember: (i) => { if (i === 1) lib.runtime.generationCancelRequested = true; },
+      onFound: (r) => found.push(...r),
+    });
+  } catch (e) {
+    error = e;
+  } finally {
+    lib.runtime.generationCancelRequested = false;
+  }
+  assert(error instanceof lib.GenerationCancelledError, "취소 에러");
+  assertEqual(found.map((r) => r.excludedMemberId), ["P"], "첫 회원(P)의 결과는 넘긴 뒤 취소");
+  assertEqual(lib.state.excludedMemberIds3, [], "취소해도 설정은 그대로");
+}));
 test("후보 풀: 사용자가 손댄 슬롯은 수정 후보로 넣고, 그 슬롯의 동점 풀은 넣지 않는다", () => {
   qualityFixture();
   const edited = { ...selEntry("e", SEL_BASE).result, confirmedIds: ["A0_0"] };
@@ -1523,11 +1751,14 @@ test("배정 차이: 세션 순서만 다르고 배정이 같으면 변화가 �
 function staleFixture(inputKey) {
   qualityFixture();
   const edited = { ...validQualityResult(), confirmedIds: [at("A", 0, 0, "L1").id] };
-  lib.runtime.schedule3Result = { candidateAList: [edited, validQualityResult(), null] };
+  // 회원별 추가 탐색 후보(C 미배정)도 같은 정책으로 비운다.
+  const extra = { assigned: validQualityResult().assigned.slice(0, 3), unassignedMembers: [lib.memberById("C")], excludedMemberId: "C" };
+  lib.runtime.schedule3Result = { candidateAList: [edited, validQualityResult(), null], extraCandidates: [extra] };
   if (inputKey !== undefined) lib.runtime.schedule3Result.inputKey = inputKey;
   lib.runtime.candidates = [validQualityResult()];
 }
-const hasAnyCandidate = () => lib.runtime.schedule3Result.candidateAList.some(Boolean) || lib.runtime.candidates.length > 0;
+const hasAnyCandidate = () =>
+  lib.runtime.schedule3Result.candidateAList.some(Boolean) || lib.runtime.candidates.length > 0 || lib.extraCandidates().length > 0;
 const CANDIDATE_INPUT_CHANGES = {
   "회원 신청": () => lib.state.requests.pop(),
   "회원 지점": () => lib.state.members[0].locationIds.push("L2"),
@@ -1549,6 +1780,24 @@ Object.entries(CANDIDATE_INPUT_CHANGES).forEach(([what, change]) => {
     assert(lib.dropStaleCandidates(), "비웠다고 알려야 한다");
     assert(!hasAnyCandidate(), "수정 후보까지 모두 비운다");
   });
+});
+toastTest("회원별 추가 탐색 후보: 후보 풀에 X 슬롯으로 들어가고, 필수 제약을 어기면 그것만 비운다", () => {
+  staleFixture(undefined);
+  lib.runtime.schedule3Result.inputKey = lib.candidateInputKey();
+  assertEqual(lib.candidatePoolEntries().map((e) => e.key), ["A1", "A2", "B", "X1"]);
+  assert(!lib.dropStaleCandidates() && lib.extraCandidates().length === 1, "정상 후보는 유지");
+  lib.extraCandidates()[0].assigned.push(at("A", 1, 20, "L1")); // 같은 회원 하루 1회는 지키지만 신청 외 배정 등 위반을 만든다
+  lib.extraCandidates()[0].assigned[3].startSlot = 99;
+  assert(lib.dropStaleCandidates(), "위반 후보를 비웠다고 알려야 함");
+  assertEqual([lib.extraCandidates().length, lib.runtime.candidates.length], [0, 1], "추가 탐색 후보만 비움");
+});
+test("후보 무효화: 회원별 추가 탐색 후보만 남아 있어도 입력이 바뀌면 비운다", () => {
+  staleFixture(undefined);
+  lib.runtime.schedule3Result.candidateAList = [null, null, null];
+  lib.runtime.candidates = [];
+  lib.runtime.schedule3Result.inputKey = lib.candidateInputKey();
+  lib.state.requests.pop();
+  assert(lib.dropStaleCandidates() && lib.extraCandidates().length === 0, "추가 탐색 후보도 비워야 함");
 });
 test("후보 무효화: 회원 이름·메모나 배열 순서만 바뀌면 입력이 같은 것으로 본다", () => {
   qualityFixture();
