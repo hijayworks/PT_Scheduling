@@ -326,6 +326,17 @@ async function checkSwapReload(page, { pageConsole, injection }, tag, failures) 
   }
 }
 
+// 복원 창을 열고(열 때 입력칸을 비운다) 창이 열린 뒤 코드·비밀번호를 넣고, 실제로 들어갔는지 확인한다 — CI에서 한 번
+// 구버전 앱의 입력칸이 적용 시점에 비어 있었다(열기 처리와 입력 순서가 어긋난 것으로 의심).
+async function openBackupImport(p, code) {
+  await p.click("#backupImportOpenBtn");
+  await p.waitForSelector("#backupImportOverlay.open", { timeout: 5000 });
+  await p.fill("#backupImportTextarea", code);
+  await p.fill("#backupImportPinInput", BACKUP_PASSWORD);
+  const filled = async () => (await p.inputValue("#backupImportTextarea")) === code && (await p.inputValue("#backupImportPinInput")) === BACKUP_PASSWORD;
+  if (!(await filled())) throw new Error("복원 창 입력이 들어가지 않음(" + p.url() + ")");
+}
+
 // 옛 앱 커밋의 정적 파일을 임시 폴더로 꺼낸다. 커밋이 없으면(얕은 clone) 검사를 건너뛰지 않고 실패한다.
 function extractLegacyApp(commit = LEGACY_APP_COMMIT) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-legacy-"));
@@ -419,9 +430,7 @@ async function checkLegacyCompat(browser, site, failures) {
     legacy.on("dialog", (d) => { legacyDialogs.push(d.message()); d.dismiss(); });
     await legacy.click('.nav-item[data-page="settings"]');
     const legacyBefore = await read(legacy, LEGACY_STORAGE_KEY);
-    await legacy.click("#backupImportOpenBtn");
-    await legacy.fill("#backupImportTextarea", backupCode);
-    await legacy.fill("#backupImportPinInput", BACKUP_PASSWORD);
+    await openBackupImport(legacy, backupCode);
     await legacy.click("#backupImportApplyBtn");
     // 받아들이면 확인 창이 뜨고(위에서 취소) 안내가 비어 있다 — 기다림이 끝나지 않아도 아래 검사로 실패를 기록한다.
     await legacy.waitForFunction(() => document.getElementById("backupImportHint").textContent !== "", null, { timeout: 15000 }).catch(() => {});
@@ -435,9 +444,7 @@ async function checkLegacyCompat(browser, site, failures) {
     await app.locator("#noConsecutiveChipRow .chip button").click();
     assert(json(await ncOf()) === "[]", "연속 요일 배정 제외 해제가 저장되지 않음");
     await app.click('.nav-item[data-page="settings"]');
-    await app.click("#backupImportOpenBtn");
-    await app.fill("#backupImportTextarea", backupCode);
-    await app.fill("#backupImportPinInput", BACKUP_PASSWORD);
+    await openBackupImport(app, backupCode);
     app.once("dialog", (d) => d.accept());
     await app.click("#backupImportApplyBtn");
     await app.waitForSelector(".restore-recovery-banner", { timeout: 15000 });
@@ -551,9 +558,7 @@ async function checkPreviousCompat(browser, site, failures) {
     prev.on("dialog", (d) => { prevDialogs.push(d.message()); d.dismiss(); });
     await prev.click('.nav-item[data-page="settings"]');
     const prevBefore = await read(prev, PREVIOUS_STORAGE_KEY);
-    await prev.click("#backupImportOpenBtn");
-    await prev.fill("#backupImportTextarea", backupCode);
-    await prev.fill("#backupImportPinInput", BACKUP_PASSWORD);
+    await openBackupImport(prev, backupCode);
     await prev.click("#backupImportApplyBtn");
     await prev.waitForFunction(() => document.getElementById("backupImportHint").textContent !== "", null, { timeout: 15000 }).catch(() => {});
     const prevHint = await prev.locator("#backupImportHint").innerText();
@@ -561,9 +566,7 @@ async function checkPreviousCompat(browser, site, failures) {
     assert((await read(prev, PREVIOUS_STORAGE_KEY)) === prevBefore && (await read(app, STORAGE_KEY)) === appBefore, "복원 거부 뒤 저장분이 바뀜");
 
     // (6) 신버전에서 복원 → 백업 당시 이름·색
-    await app.click("#backupImportOpenBtn");
-    await app.fill("#backupImportTextarea", backupCode);
-    await app.fill("#backupImportPinInput", BACKUP_PASSWORD);
+    await openBackupImport(app, backupCode);
     app.once("dialog", (d) => d.accept());
     await app.click("#backupImportApplyBtn");
     await app.waitForSelector(".restore-recovery-banner", { timeout: 15000 });
@@ -706,9 +709,7 @@ async function checkBlockedStorage(browser, site, backupCode, failures) {
 
       // 정상 백업 복원 → 차단 해제 → 페이지 이동이 다시 저장된다
       await p.click('.nav-item[data-page="settings"]');
-      await p.click("#backupImportOpenBtn");
-      await p.fill("#backupImportTextarea", backupCode);
-      await p.fill("#backupImportPinInput", BACKUP_PASSWORD);
+      await openBackupImport(p, backupCode);
       p.once("dialog", (d) => d.accept());
       await p.click("#backupImportApplyBtn");
       await p.waitForSelector(".restore-recovery-banner", { timeout: 15000 });
