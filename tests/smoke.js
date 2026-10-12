@@ -816,12 +816,20 @@ async function checkCandidateDisplay(browser, site, failures) {
     // 글자 대비: 지점 색 블록의 글자는 진한 색(흰 글자 아님)
     const ink = await page.locator("#candidates3 .cal-block .time").first().evaluate((el) => window.getComputedStyle(el).color);
     assert(ink !== "rgb(255, 255, 255)", "밝은 지점 색 위 글자가 흰색");
-    for (const width of [1280, 390]) {
+    // 노트북 폭(1366·1440)은 후보 카드 2열 + 월~토 시간표가 카드 안에서 가로 스크롤 없이 보이고, 1280 이하는 1열이다.
+    const cardColumns = () => page.locator("#candidates3 .candidate-card").evaluateAll((cs) => new Set(cs.map((c) => Math.round(c.getBoundingClientRect().left))).size);
+    assert((await page.locator("#candidates3 .candidate-card").count()) >= 2, "열 배치 확인용 후보 카드가 2개 미만");
+    for (const [width, columns] of [[1440, 2], [1366, 2], [1280, 1], [720, 1], [390, 1]]) {
       await page.setViewportSize({ width, height: 900 });
       const problems = await timeLabelProblems(page);
       assert(problems.length === 0, width + "px 수업 시간 한 줄 표시 문제: " + json(problems.slice(0, 5)));
       const pageScroll = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       assert(pageScroll <= 0, width + "px 페이지 가로 스크롤 " + pageScroll + "px");
+      assert((await cardColumns()) === columns, width + "px 후보 카드 " + (await cardColumns()) + "열(기대 " + columns + "열)");
+      if (width >= 720) {
+        const inner = await page.locator("#candidates3 .grid-scroll").evaluateAll((gs) => Math.max(0, ...gs.map((g) => g.scrollWidth - g.clientWidth)));
+        assert(inner <= 0, width + "px 후보 시간표가 카드 안에서 가로 스크롤됨 " + inner + "px");
+      }
     }
     const inner = await page.locator("#candidates3 .grid-scroll").first().evaluate((el) => el.scrollWidth - el.clientWidth);
     assert(inner > 0, "390px에서 시간표가 카드 안에서 가로 스크롤되지 않음(요일 칸을 줄인 것으로 의심)");
