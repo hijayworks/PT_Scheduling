@@ -80,12 +80,31 @@ export const CONSULT_DURATION_MIN_2 = 30;
 
 // 저장 키는 schemaVersion이 오를 때마다 새로 만든다. 구버전 앱은 자기 키만 읽고 쓰므로, 아직 열려 있는
 // 구버전 탭의 자동 저장이 신버전 저장분을 덮어쓰지 못한다(state.js loadState가 옛 키를 한 번 복사해 이관).
-export const STORAGE_KEY = "pt_schedule_state_v4"; // schemaVersion 2: noConsecutiveDayMemberIds 추가
-export const LEGACY_STORAGE_KEY = "pt_schedule_state_v3"; // schemaVersion 0~1 — 이관 원본으로 읽기만 하고 지우지 않는다
+export const STORAGE_KEY = "pt_schedule_state_v5"; // schemaVersion 3: 지점 색상(location.color) 추가
+// 이관 원본(읽기만 하고 지우지 않는다). 신버전 키가 없을 때 앞에서부터 처음 있는 키 하나만 읽는다.
+export const PREVIOUS_STORAGE_KEY = "pt_schedule_state_v4"; // schemaVersion 2: noConsecutiveDayMemberIds 추가
+export const LEGACY_STORAGE_KEY = "pt_schedule_state_v3"; // schemaVersion 0~1
 export const OLD_STORAGE_KEY = "pt_schedule_state_v2"; // pre-migration key: 30분 슬롯 기준
 export const OLD_SLOT_MIN = 30;
 export const SLOT_SCALE = OLD_SLOT_MIN / SLOT_MIN; // 옛 슬롯 인덱스를 새 슬롯 인덱스로 환산
 export const DEFAULT_LOCATION_NAMES = ["여의도점", "상암점", "마포점"];
+// UI 표현값: 지점 색상 팔레트(지점 등록에서 고르는 6색, 순서 고정). 표시 전용이라 배정·후보 판정에 쓰지 않는다.
+// style.css의 .location-color-N(N = 이 배열의 위치)이 같은 색을 쓴다.
+export const LOCATION_PALETTE = [
+  { name: "민트", color: "#50d2c2" },
+  { name: "보라", color: "#8c88ff" },
+  { name: "파랑", color: "#5da7ff" },
+  { name: "코랄", color: "#e69a8d" },
+  { name: "웜 옐로우", color: "#d8b36a" },
+  { name: "세이지 그린", color: "#8db58a" },
+];
+// 색상이 없는 지점(schemaVersion 3 이전 저장분·첫 실행 기본 지점)에 채울 색 — 이관 시 한 번만 이름으로 찾는다.
+// 그 밖의 지점은 다른 지점이 쓰지 않는 팔레트 색을 앞에서부터 채운다(state.js fillLocationColors).
+export const DEFAULT_LOCATION_COLORS = {
+  여의도점: "#50d2c2",
+  상암점: "#8c88ff",
+  마포점: "#5da7ff",
+};
 export const DEFAULT_TRAVEL_MIN = 30;
 // 지점 쌍별 기본 이동 시간(분) — 이름 순서는 상관없이 두 이름을 짝으로 찾는다.
 export const DEFAULT_TRAVEL_PAIRS = [

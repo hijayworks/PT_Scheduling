@@ -82,8 +82,9 @@ function createCaseRunner({ aScale = 0.01, realClock = false } = {}) {
   ) {
     const out = {};
     let t = Date.now();
+    let bc = null;
     if (withBC) {
-      const bc = await lib.withSelectionOverride(...selection(c), () =>
+      bc = await lib.withSelectionOverride(...selection(c), () =>
         lib.generateCandidatesAsync(
           () => {},
           { workerCount: 0, attempts },
@@ -98,10 +99,12 @@ function createCaseRunner({ aScale = 0.01, realClock = false } = {}) {
       t = Date.now();
       const cards = await withClock(() =>
         lib.withSelectionOverride(...selection(c), () =>
+          // 앱(generateSchedule3Async)처럼 방금 만든 그리디 결과를 넘긴다 — 조건(시도 횟수·고정)이 같을 때만 재사용된다.
           lib.generateSchedule2Async(() => {}, {
             greedyAttempts: aAttempts,
             pins,
             budgetScale: aBudgetScale,
+            greedyResult: bc,
           }),
         ),
       );

@@ -6,10 +6,12 @@ import {
   DEFAULT_TRAVEL_MIN,
   DEFAULT_BUSINESS_START_SLOT,
   DEFAULT_BUSINESS_END_SLOT,
+  LOCATION_PALETTE,
 } from "../constants.js";
 import { cellKey, minutesLabel, uid, showToast } from "../utils.js";
 import { state, runtime, saveState } from "../state.js";
 import {
+  locationColorClass,
   pairKey,
   isValidTravelMinutes,
   parseTravelMinutesInput,
@@ -27,6 +29,9 @@ export const locationForm = document.getElementById("locationForm");
 export const locationNameInput = document.getElementById("locationName");
 export const locationHintEl = document.getElementById("locationHint");
 export const locationListEl = document.getElementById("locationList");
+export const locationColorPickerEl = document.getElementById(
+  "locationColorPicker",
+);
 export const travelTitleEl = document.getElementById("travelTitle");
 export const travelMatrixEl = document.getElementById("travelMatrix");
 
@@ -35,6 +40,60 @@ export function membersUsingLocation(locId) {
 }
 
 export let editingLocationId = null;
+// 색상 팔레트를 펼친 등록 지점(id). 지점 추가 폼에서 고른 색(없으면 다른 지점이 쓰지 않는 첫 색).
+let colorEditingLocationId = null;
+let newLocationColor = null;
+
+// 6색 팔레트 라디오 그룹(지점 추가 폼·등록 지점 색 변경 공용). name은 그룹마다 달라야 한다.
+function buildColorPicker(name, selected, onPick, labelledBy) {
+  const group = document.createElement("div");
+  group.className = "color-swatches";
+  group.setAttribute("role", "radiogroup");
+  if (labelledBy) group.setAttribute("aria-labelledby", labelledBy);
+  LOCATION_PALETTE.forEach((p, i) => {
+    const label = document.createElement("label");
+    label.className = "color-swatch location-color-" + i;
+    label.title = p.name;
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = name;
+    input.value = p.color;
+    input.checked = p.color === selected;
+    input.setAttribute("aria-label", p.name);
+    input.addEventListener("change", () => onPick(p.color));
+    label.appendChild(input);
+    group.appendChild(label);
+  });
+  return group;
+}
+
+function renderNewLocationColorPicker() {
+  const used = new Set(state.locations.map((l) => l.color));
+  if (!LOCATION_PALETTE.some((p) => p.color === newLocationColor))
+    newLocationColor = (
+      LOCATION_PALETTE.find((p) => !used.has(p.color)) || LOCATION_PALETTE[0]
+    ).color;
+  locationColorPickerEl.innerHTML = "";
+  locationColorPickerEl.appendChild(
+    buildColorPicker(
+      "newLocationColor",
+      newLocationColor,
+      (c) => (newLocationColor = c),
+      "locationColorLabel",
+    ),
+  );
+}
+
+// 지점 색상은 표시 전용이라 후보를 비우지 않는다(candidateInputKey에서도 빠져 있다) — 다시 그리기만 한다.
+export function setLocationColor(loc, color) {
+  loc.color = color;
+  colorEditingLocationId = null;
+  saveState();
+  renderLocationList();
+  renderMemberTable();
+  renderSchedule3Result();
+  showToast("'" + loc.name + "' 지점 색상이 저장되었습니다", "success");
+}
 
 // 기본 설정(근무 가능 시간·지점·이동 시간)이 바뀌면 이미 생성된 수업 스케줄 후보는 더 이상
 // 유효하지 않을 수 있으므로 자동으로 비운다.
@@ -118,6 +177,7 @@ export function deleteLocation(loc) {
 }
 
 export function renderLocationList() {
+  renderNewLocationColorPicker();
   locationListEl.innerHTML = "";
   if (state.locations.length === 0) {
     const empty = document.createElement("p");
@@ -182,7 +242,20 @@ export function renderLocationList() {
     }
 
     const chip = document.createElement("span");
-    chip.className = "chip location-chip";
+    chip.className = "chip location-chip " + locationColorClass(loc.id);
+
+    const colorBtn = document.createElement("button");
+    colorBtn.type = "button";
+    colorBtn.className = "location-color-btn";
+    const colorOpen = colorEditingLocationId === loc.id;
+    colorBtn.setAttribute("aria-expanded", String(colorOpen));
+    colorBtn.setAttribute("aria-label", "'" + loc.name + "' 색상 변경");
+    colorBtn.title = "색상 변경";
+    colorBtn.addEventListener("click", () => {
+      colorEditingLocationId = colorOpen ? null : loc.id;
+      renderLocationList();
+    });
+    chip.appendChild(colorBtn);
 
     const nameSpan = document.createElement("span");
     nameSpan.className = "location-chip-name";
@@ -200,6 +273,12 @@ export function renderLocationList() {
     delBtn.addEventListener("click", () => deleteLocation(loc));
 
     chip.appendChild(nameSpan);
+    if (colorOpen)
+      chip.appendChild(
+        buildColorPicker("locationColor-" + loc.id, loc.color, (c) =>
+          setLocationColor(loc, c),
+        ),
+      );
     chip.appendChild(delBtn);
     locationListEl.appendChild(chip);
   });
@@ -283,7 +362,8 @@ locationForm.addEventListener("submit", (e) => {
     return;
   }
   setLocationHint("");
-  const loc = { id: uid("loc"), name };
+  const loc = { id: uid("loc"), name, color: newLocationColor };
+  newLocationColor = null; // 다음 지점은 다시 쓰이지 않은 첫 색부터
   state.locations.push(loc);
   // seed travel time with existing locations so nothing is silently 0.
   state.locations.forEach((other) => {

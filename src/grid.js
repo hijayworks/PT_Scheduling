@@ -180,7 +180,7 @@ function blockColorClass(color) {
 }
 
 /* ---------------- Grid rendering ---------------- */
-// options: { blocks: [{day, startSlot, duration, label, loc, sublabel, color, excluded, onDelete, onMove}],
+// options: { blocks: [{day, startSlot, duration, label, loc, sublabel, color, colorClass, excluded, onDelete, onMove}],
 //   travelBlocks: [{day, startSlot, duration, label, type: "travel" | "break"}] }
 // onDelete(있는 블록만): 마우스 호버 시 우측 상단에 삭제(×) 버튼이 나타난다 (PC 전용 기능).
 // onMove(있는 블록만): 블록을 다른 (day, slot) 셀에 드래그해 놓으면 onMove(day, slot)를 호출한다.
@@ -326,7 +326,8 @@ export function renderGrid(container, availableSet, options) {
       (b.confirmed ? " confirmed" : "");
     // 확정된 일정은 흰색을 넉넉히 섞은 배경으로 칠하고, 테두리는 원래 회원 색상 그대로 두껍게
     // 둘러서 미확정 블록과 한눈에 확 구분되게 한다.
-    if (!b.excluded) block.classList.add(blockColorClass(b.color));
+    // colorClass(수업 스케줄 후보: 배정 지점 색)가 있으면 그것을, 없으면 회원 색(color)을 쓴다.
+    if (!b.excluded) block.classList.add(b.colorClass || blockColorClass(b.color));
     setGridPlacement(
       block,
       b.day + 2,

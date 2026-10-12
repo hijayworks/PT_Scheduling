@@ -53,12 +53,6 @@ const COLUMNS = [
 ];
 const LABEL = Object.fromEntries(COLUMNS);
 const metricRow = (m) => COLUMNS.map(([k]) => m[k]).join("/");
-const HIDDEN_REASON = {
-  "unassigned-gate": "미배정 gate(추천보다 미배정 많음)",
-  unlabeled: "unlabeled Pareto",
-  "role-taken": "같은 역할을 더 나은 후보가 차지",
-  "card-limit": "카드 수 상한",
-};
 const pct = (x) => Math.round(x * 100) + "%";
 const signed = (n) => (n > 0 ? "+" : "") + n;
 
@@ -81,7 +75,7 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
   const relationCount = {};
   const selectionTotals = { cases: 0 };
   const roleCount = {};
-  const hiddenAll = [];
+  const missingAll = [];
   for (const file of files) {
     const c = JSON.parse(fs.readFileSync(path.join(GOLDEN_DIR, file), "utf8"));
     runner.loadCase(c);
@@ -146,7 +140,9 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
     sel.cards.forEach(
       (cd) => (roleCount[cd.label] = (roleCount[cd.label] || 0) + 1),
     );
-    sel.hidden.forEach((h) => hiddenAll.push({ caseId: c.id, ...h }));
+    sel.rows
+      .filter((r) => !r.card)
+      .forEach((r) => missingAll.push({ caseId: c.id, role: r.label }));
     const describe = (cd) => ({
       role: cd.label,
       keys: cd.variants.map((v) => v.key),
@@ -169,15 +165,13 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
         .filter((e) => signature(e.result) !== signature(cd.variants[0].result))
         .map((e) => lib.placementChanges(e.result, cd.variants[0].result))
         .sort((a, b) => a - b),
-      reason: cd.reason,
-      qualifiesFor: cd.qualifiesFor,
     });
 
     report.cases[c.id] = {
       selection: {
         stats: sel.stats,
         cards: sel.cards.map(describe),
-        hidden: sel.hidden.map(describe),
+        missing: sel.rows.filter((r) => !r.card).map((r) => r.label),
       },
       ...s,
       metrics: Object.fromEntries(cands.map((x) => [x.key, x.metrics])),
@@ -229,15 +223,12 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
         `  ${i + 1}\t${d.role}\t${metricRow(d.metrics)}\t${d.tradeoff || "-"}\t${d.keys.length}(${d.variantChanges.join(",") || "-"})\t${d.keys.join(",")}\t그룹 배정 차이 [${d.groupChanges.join(",")}]`,
       );
     });
-    sel.hidden.forEach((h) => {
-      const d = describe(h);
-      console.log(
-        `  숨김\t${HIDDEN_REASON[d.reason]}${d.qualifiesFor.length ? "(" + d.qualifiesFor.join(",") + ")" : ""}\t${metricRow(d.metrics)}\t${d.tradeoff}\t${d.keys.length}\t${d.keys.join(",")}`,
-      );
-    });
+    sel.rows
+      .filter((r) => !r.card)
+      .forEach((r) => console.log(`  찾지 못함\t${r.label}`));
   }
   console.log(
-    `\n선정 합계(${selectionTotals.cases}개 케이스): 생성 ${selectionTotals.generated}, exact unique ${selectionTotals.exactUnique}(중복 ${selectionTotals.exactDuplicates}), 품질 그룹 ${selectionTotals.qualityGroups}, 미배정 gate 제거 그룹 ${selectionTotals.gatedGroups}(배치 ${selectionTotals.gatedLayouts}), Pareto 그룹 ${selectionTotals.paretoGroups}(지배 제거 그룹 ${selectionTotals.dominatedGroups}/배치 ${selectionTotals.dominatedLayouts}), 카드 ${selectionTotals.cardsShown}, 유사 variant 제거 ${selectionTotals.similarRemoved}, variant 상한 초과 ${selectionTotals.variantLimitRemoved}`,
+    `\n선정 합계(${selectionTotals.cases}개 케이스): 생성 ${selectionTotals.generated}, exact unique ${selectionTotals.exactUnique}(중복 ${selectionTotals.exactDuplicates}), 품질 그룹 ${selectionTotals.qualityGroups}(카드가 된 그룹 ${selectionTotals.shownGroups}, 카드가 안 된 배치 ${selectionTotals.notShownLayouts}), 찾은 역할 ${selectionTotals.rolesFound}, 카드 ${selectionTotals.cardsShown}, 유사 variant 제거 ${selectionTotals.similarRemoved}, variant 상한 초과 ${selectionTotals.variantLimitRemoved}`,
   );
   console.log(
     "역할별 카드: " +
@@ -246,13 +237,8 @@ const signed = (n) => (n > 0 ? "+" : "") + n;
         .join(", "),
   );
   console.log(
-    `숨긴 그룹(gate로 빠진 Pareto 포함) ${hiddenAll.length}개: ` +
-      (hiddenAll
-        .map(
-          (h) =>
-            `${h.caseId} ${HIDDEN_REASON[h.reason]} [${lib.formatTradeoff(h.deltas)}]`,
-        )
-        .join("; ") || "없음"),
+    `찾지 못한 역할 ${missingAll.length}개(회원별 추가 탐색은 이 측정에 없음): ` +
+      (missingAll.map((h) => `${h.caseId} ${h.role}`).join("; ") || "없음"),
   );
   report.selectionTotals = selectionTotals;
   report.roleCount = roleCount;

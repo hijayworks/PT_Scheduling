@@ -20,6 +20,7 @@ import {
   memberById,
   locationById,
   memberColor,
+  locationColorClass,
   travelMinutes,
   soloTravelMemberIds,
   breaksSoloTravel,
@@ -69,7 +70,12 @@ import {
   qualityKey,
   formatTradeoff,
   selectReoptimization,
+  representativeAdditions,
 } from "./engine/candidateSelection.js";
+import {
+  searchMemberExclusions,
+  EXCLUSION_ROLES,
+} from "./engine/memberExclusion.js";
 import { pinKey, pinsFromResult } from "./engine/pins.js";
 import { assignmentDiff } from "./engine/candidateDiff.js";
 import {
@@ -630,6 +636,8 @@ export function schedule2ToBlocks(assigned, { result, onDone } = {}) {
       sublabel:
         slotLabel(r.startSlot) + "~" + endLabel(r.startSlot, r.duration),
       color: m ? memberColor(m.id) : BLOCK_COLOR,
+      // 수업 블록은 실제 배정된 지점(id)의 색으로 칠한다(표시 전용).
+      colorClass: locationColorClass(r.locationId),
       confirmed: isConfirmed,
       contextMenuItems: () =>
         sessionSwapMenuItems(result, r, isConfirmed, onDone),
@@ -1016,13 +1024,14 @@ export async function generateSchedule3Async(onProgress, pins = []) {
       pins,
     ),
   );
+  // 후보A의 그리디 기준선은 방금 만든 이 결과와 같은 입력·시드·조건이라 다시 계산하지 않는다(greedyResult).
   const v2Result = await withSelectionOverride(
     excludedIds3,
     onceLimitIds3,
     () =>
       generateSchedule2Async(
         (progress) => onProgress(0.5 + progress * 0.5, "비교·최적화"),
-        { pins },
+        { pins, greedyResult: v1Built },
       ),
   );
   onProgress(1, "후보 정리");
@@ -1032,6 +1041,7 @@ export async function generateSchedule3Async(onProgress, pins = []) {
     poolsBC: v1Built.pools, // strategyIndex -> 동점 풀
     candidateAList: v2Result.map((c) => c.result), // 체인 DP 탐색 그룹 3개
     candidateAPools: v2Result.map((c) => c.pool), // 그룹 인덱스 -> 동점 풀
+    greedyAll: v1Built.all, // 그리디 시도 전체(세션 한정, addSearchRepresentatives용)
   };
 }
 
@@ -1051,6 +1061,17 @@ export const generateProgressText3El = document.getElementById(
   "generateProgressText3",
 );
 export const GENERATE3_IDLE_LABEL = "수업 스케줄 후보 생성";
+export const extraSearchBtn3El = document.getElementById("extraSearchBtn3");
+export const EXTRA_SEARCH3_LABEL = "미배정 1명 추가안 더 찾기";
+// UI 표현값: 비교표에서 조건을 충족하는 후보가 없는 행의 문구(추가 탐색 상태별, extraSearchStatus).
+const EXTRA_SEARCH_MISSING_TEXT = {
+  notRun: "아직 찾지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다",
+  stale:
+    "추천안이 바뀌어 다시 찾아야 함 — '" + EXTRA_SEARCH3_LABEL + "'로 찾습니다",
+  incomplete:
+    "탐색을 끝까지 하지 않음 — '" + EXTRA_SEARCH3_LABEL + "'로 다시 찾습니다",
+  done: "탐색에서 조건을 충족하는 후보를 찾지 못함",
+};
 
 // 사용자가 옮기거나 맞바꾸거나 교체·확정한 결과인지(사람의 의도가 담겼는지). 수동 편집은 모두
 // 손댄 자리를 confirmedIds에 넣으므로 이것 하나로 판단한다.
@@ -1069,7 +1090,7 @@ export function isUserEdited(result) {
 // 하드 제약을 어길 수 있으므로 dropInvalidCandidates로 위반 후보만 비운다. 비웠으면 true.
 export function dropStaleCandidates() {
   const slots = runtime.schedule3Result.candidateAList
-    .concat(runtime.candidates)
+    .concat(runtime.candidates, extraCandidates())
     .filter(Boolean);
   if (slots.length === 0) return false;
   // 미배정 명단은 배정에서 파생되는 값이라, 저장분이 어긋나 있으면 버리지 않고 다시 계산한다.
@@ -1122,6 +1143,12 @@ function dropInvalidCandidates() {
       dropped++;
     }
   });
+  const extras = extraCandidates();
+  const keptExtras = extras.filter((r) => !isInvalid(r));
+  if (keptExtras.length !== extras.length) {
+    dropped += extras.length - keptExtras.length;
+    runtime.schedule3Result.extraCandidates = keptExtras;
+  }
   const keptBC = runtime.candidates.filter((r) => !(r && isInvalid(r)));
   if (keptBC.length !== runtime.candidates.length) {
     dropped += runtime.candidates.length - keptBC.length;
@@ -1136,13 +1163,59 @@ function dropInvalidCandidates() {
   // 입력 변경 무효화(dropStaleCandidates)와 구분되게, 입력은 그대로이고 위반 후보만 비웠다고 알린다.
   const kept =
     runtime.schedule3Result.candidateAList.some(Boolean) ||
-    runtime.candidates.length > 0;
+    runtime.candidates.length > 0 ||
+    extraCandidates().length > 0;
   generateHint3El.textContent = kept
     ? `저장된 후보 중 필수 조건(${reasons})을 어긴 후보 ${dropped}개만 초기화했습니다. ` +
       "나머지 후보(내가 수정한 후보 포함)는 그대로 두었습니다."
     : `저장된 후보가 모두 필수 조건(${reasons})을 어겨 초기화되었습니다. 후보를 다시 생성해주세요.`;
   showToast(`필수 조건을 어긴 후보 ${dropped}개를 초기화했습니다`, "error");
   return true;
+}
+
+// 추가 후보 슬롯(저장됨, 동점 풀 없음): 본 생성의 그리디 시도 전체에서 고른 조건별 대표(addSearchRepresentatives)와
+// 회원별 추가 탐색(engine/memberExclusion.js)이 찾은 미배정 1명 추가·절충 후보(baseSig: 탐색 기준 추천 배치 서명).
+// 이 필드가 없는 저장분·초기화된 schedule3Result는 빈 목록이다.
+export function extraCandidates() {
+  return runtime.schedule3Result.extraCandidates || [];
+}
+
+// 본 생성에서 이미 계산한 그리디 시도 전체(results) 중, 지금 슬롯과 합쳐 같은 선정 정책으로 카드에 보이는 것만
+// 추가 후보 슬롯에 남긴다(candidateSelection.js representativeAdditions, 하드 제약 위반 제외). 후보B·C 최선·동점에
+// 들지 않은 절충 후보(예: 추천 미배정 0명·수업 10·이동 4 대비 1명·9·2)도 대표로 남는다. 엔진을 다시 돌리지 않는다.
+// 반환: 추가한 슬롯 수.
+export function addSearchRepresentatives(results) {
+  const entries = candidatePoolEntries();
+  const seen = new Set(entries.map((e) => layoutSignature(e.result)));
+  const extra = [];
+  (results || []).forEach((r) => {
+    if (!r) return;
+    const result = {
+      assigned: r.assigned.slice(),
+      unassignedMembers: r.unassignedMembers.slice(),
+    };
+    const sig = layoutSignature(result);
+    if (seen.has(sig)) return;
+    seen.add(sig);
+    extra.push({ result, metrics: scheduleMetrics(result) });
+  });
+  const added = representativeAdditions(
+    entries,
+    extra,
+    (r) => !scheduleViolations(r).length,
+  ).map((e) => e.result);
+  runtime.schedule3Result.extraCandidates = extraCandidates().concat(added);
+  return added.length;
+}
+
+// '미배정 1명 추가안 더 찾기' 상태(업무 정책): 추가 탐색은 그때 화면에 보이던 추천 배치(baseSig)를 기준으로 한다.
+// meta: schedule3Result.extraSearch({ baseSig, done }) | undefined, recSig: 지금 보이는 추천 배치 서명.
+//   notRun 찾은 적 없음 / stale 기준 추천안이 바뀜(수정·확정·배치 넘김 등 — 다시 찾아야 함) /
+//   incomplete 같은 기준에서 끝까지 하지 않음(취소·오류) / done 같은 기준에서 끝까지 찾음
+export function extraSearchStatus(meta, recSig) {
+  if (!meta) return "notRun";
+  if (meta.baseSig !== recSig) return "stale";
+  return meta.done ? "done" : "incomplete";
 }
 
 // 다시 생성할 때 슬롯 하나에 둘 결과: 사용자가 손댄 이전 결과는 덮어쓰지 않고 그대로 지킨다.
@@ -1173,6 +1246,14 @@ export function candidatePoolEntries() {
       store: (r) => (runtime.candidates[i] = r),
     }),
   );
+  extraCandidates().forEach((result, i) =>
+    slots.push({
+      key: "X" + (i + 1),
+      result,
+      pool: null,
+      store: (r) => (runtime.schedule3Result.extraCandidates[i] = r),
+    }),
+  );
   const entries = [];
   slots.forEach((slot) => {
     if (!slot.result) return;
@@ -1194,15 +1275,54 @@ export function candidatePoolEntries() {
 }
 
 // 카드마다 지금 보고 있는 배치(서명). 카드 키는 자동 카드면 품질 키, 수정 카드면 그 배치 서명.
-// 세션 한정 — 새로고침하면 각 카드의 첫 배치부터 다시 보인다.
+// 세션 한정 — 새로고침하면 각 카드의 첫 배치부터 다시 보인다(추천 카드는 아래 shownVariantIndex 참고).
 const shownVariantByCard = new Map();
+const cardKeyOf = (c) =>
+  c.role === "edited"
+    ? "edited:" + layoutSignature(c.variants[0].result)
+    : qualityKey(c.metrics);
+// 카드에서 지금 보고 있는 배치 번호. 이 세션에서 고른 적이 없으면 첫 배치 — 추천 카드는 추가 탐색 기준 배치
+// (extraSearch.baseSig)가 그 카드에 있으면 그 배치(새로고침해도 탐색한 기준 배치가 그대로 보이게).
+function shownVariantIndex(c) {
+  const meta = runtime.schedule3Result.extraSearch;
+  const sig = shownVariantByCard.has(cardKeyOf(c))
+    ? shownVariantByCard.get(cardKeyOf(c))
+    : c.role === "recommended" && meta
+      ? meta.baseSig
+      : undefined;
+  return Math.max(
+    0,
+    c.variants.findIndex((v) => layoutSignature(v.result) === sig),
+  );
+}
+// 지금 화면에 보이는 추천 배치 entry(없으면 null) — '미배정 1명 추가안 더 찾기'의 기준.
+export function shownRecommendation() {
+  const card = selectCandidates(candidatePoolEntries()).rows[0].card;
+  return card ? card.variants[shownVariantIndex(card)] : null;
+}
 // 추천안과 비교 중인 카드 키(세션 한정). 그 카드가 사라지면 비교 패널도 닫힌다.
 let compareCardKey = null;
 export const candidateCompare3El = document.getElementById("candidateCompare3");
 
-const CARD_DESC = {
+export const candidateSummary3El = document.getElementById("candidateSummary3");
+
+// UI 표현값: 대표 역할 설명(정책은 candidateSelection.js REPRESENTATIVE_ROLES). "가장 많은·적은"은 이번 탐색에서
+// 찾은 후보 중에서다.
+const ROLE_DESC = {
   recommended:
     "미배정 → 비효율 이동 → 수업·이동·빈 시간 균형(수업 1건 = 이동 1번 = 빈 시간 60분) 순으로 가장 나은 후보입니다.",
+  sessions:
+    "추천과 미배정 수가 같은 후보 중, 탐색한 후보 가운데 수업이 가장 많은 후보입니다(공강 허용).",
+  sessionsNoIdle:
+    "추천과 미배정 수가 같고 공강(필수 이동시간을 뺀 수업 사이 빈 시간)이 0분인 후보 중, 탐색한 후보 가운데 수업이 가장 많은 후보입니다.",
+  travelTradeoff:
+    "추천과 미배정 수가 같고 '수업 수 우선·공강 허용' 후보보다 이동이 적은 후보 중, 탐색한 후보 가운데 수업이 가장 많은 후보입니다.",
+  unassignedSessions:
+    "추천보다 미배정이 1명 많은 대신 수업이 2건 이상 많은 후보 중, 탐색한 후보 가운데 수업이 가장 많은 후보입니다.",
+  unassignedTravel:
+    "추천보다 미배정이 1명 많은 대신 이동이 2회 이상 적은 후보 중, 탐색한 후보 가운데 이동이 가장 적은 후보입니다.",
+};
+const CARD_DESC = {
   edited:
     "직접 옮기거나 확정한 후보입니다. 다시 생성해도 유지되지만, 회원·신청·설정이 바뀌면 함께 초기화됩니다.",
 };
@@ -1211,12 +1331,16 @@ const CARD_DESC = {
 // trade-off 문구는 저장하지 않는다).
 export function renderSchedule3Result() {
   candidates3El.innerHTML = "";
+  candidateSummary3El.hidden = true;
+  candidateSummary3El.innerHTML = "";
   candidateCompare3El.hidden = true;
   candidateCompare3El.innerHTML = "";
   reoptimize3El.hidden = true;
   reoptimize3El.innerHTML = "";
   const gridRange = businessHoursGridRange();
-  const { cards } = selectCandidates(candidatePoolEntries());
+  const { cards, rows } = selectCandidates(candidatePoolEntries());
+  // 추가 탐색은 추천 후보를 기준으로 하므로 추천 카드가 있을 때만 보인다.
+  extraSearchBtn3El.hidden = !rows[0].card;
 
   if (cards.length === 0) {
     reoptSession = null;
@@ -1233,16 +1357,16 @@ export function renderSchedule3Result() {
 
   let promoted = false;
   const shown = new Map(); // 카드 키 → {card, entry}
+  const keyOf = cardKeyOf;
+  const shownIdx = shownVariantIndex;
+  // 추천 카드에서 지금 보고 있는 배치 — 다른 카드의 "새로 미배정된 회원"을 이것과 비교한다.
+  const recShown = rows[0].card
+    ? rows[0].card.variants[shownIdx(rows[0].card)].result
+    : null;
+  renderCandidateSummary(rows);
   cards.forEach((c) => {
-    const cardKey =
-      c.role === "edited"
-        ? "edited:" + layoutSignature(c.variants[0].result)
-        : qualityKey(c.metrics);
-    const shownSig = shownVariantByCard.get(cardKey);
-    const idx = Math.max(
-      0,
-      c.variants.findIndex((v) => layoutSignature(v.result) === shownSig),
-    );
+    const cardKey = keyOf(c);
+    const idx = shownIdx(c);
     const entry = c.variants[idx];
     // 보고 있는 배치가 세션 한정 동점 풀에만 있으면 원래 슬롯에 저장한다 — 그래야 이 카드에서
     // 한 편집이 저장되고 새로고침 뒤에도 남는다(같은 슬롯의 배치는 모두 같은 품질이라 같은 카드다).
@@ -1279,22 +1403,95 @@ export function renderSchedule3Result() {
       renderSchedule3Result();
     });
   }
-  if (cards.filter((c) => c.role !== "edited").length === 1) {
+
+  // 대표 후보 비교표: 역할마다 한 행. 같은 배치를 고른 역할은 값이 같고 "같은 배치" 표시, 없으면 찾지 못함.
+  function renderCandidateSummary(rows) {
+    if (!rows.some((r) => r.card)) return;
+    candidateSummary3El.hidden = false;
+    const title = document.createElement("h3");
+    title.className = "candidate-compare-title";
+    title.textContent = "대표 후보 비교";
+    const wrap = document.createElement("div");
+    wrap.className = "candidate-compare-table-wrap";
+    const table = document.createElement("table");
+    table.className = "candidate-compare-table candidate-summary-table";
+    const thead = document.createElement("thead");
+    const htr = document.createElement("tr");
+    ["대표 조건", "미배정", "수업", "이동", "공강 시간", "비고"].forEach((t) => {
+      const th = document.createElement("th");
+      th.scope = "col";
+      th.textContent = t;
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr);
+    const tbody = document.createElement("tbody");
+    rows.forEach((r) => {
+      const tr = document.createElement("tr");
+      const th = document.createElement("th");
+      th.scope = "row";
+      th.textContent = r.label;
+      tr.appendChild(th);
+      const td = (text) => {
+        const cell = document.createElement("td");
+        cell.textContent = text;
+        tr.appendChild(cell);
+        return cell;
+      };
+      if (!r.card) {
+        const status = EXCLUSION_ROLES.includes(r.role)
+          ? extraSearchStatus(
+              runtime.schedule3Result.extraSearch,
+              recShown && layoutSignature(recShown),
+            )
+          : "done";
+        const cell = td(EXTRA_SEARCH_MISSING_TEXT[status]);
+        cell.colSpan = 5;
+        cell.className = "candidate-summary-missing";
+      } else {
+        const m = r.card.metrics;
+        td(m.unassigned ? m.unassigned + "명" : "없음");
+        td(m.sessions + "건");
+        td(m.travelCount + "번");
+        td(m.idleMinutes ? formatMinutesLabel(m.idleMinutes) : "없음");
+        const first = r.card.roles[0];
+        td(first.role === r.role ? "" : "'" + first.label + "' 카드와 같은 배치");
+      }
+      tbody.appendChild(tr);
+    });
+    table.append(thead, tbody);
+    wrap.appendChild(table);
     const note = document.createElement("p");
-    note.className = "pool-pager-hint candidates-note";
-    note.textContent = "장단점이 다른 후보가 없어 추천 후보만 보여줍니다.";
-    candidates3El.appendChild(note);
+    note.className = "pool-pager-hint";
+    note.textContent =
+      "공강 시간은 필수 이동시간을 뺀 수업 사이 빈 시간입니다. 같은 배치를 고른 조건은 아래에서 카드 하나로 보여줍니다. " +
+      "미배정 1명 추가 조건은 '" +
+      EXTRA_SEARCH3_LABEL +
+      "'로 회원을 한 명씩 빼고 다시 탐색해 찾습니다(회원 수에 따라 수 분~수십 분).";
+    candidateSummary3El.append(title, wrap, note);
   }
 
   function buildCard(c, cardKey, result, variantIdx, onSelectVariant) {
     const title = c.label;
+    // 추천 대비 새로 미배정된 회원(미배정 1명 추가·절충 후보에서 "누가 빠지는지").
+    const recIds = new Set(
+      ((recShown && recShown.unassignedMembers) || []).map((m) => m.id),
+    );
+    const newlyUnassigned = recShown
+      ? result.unassignedMembers.filter((m) => !recIds.has(m.id))
+      : [];
+    const versus =
+      (newlyUnassigned.length
+        ? " 추천 대비 새로 미배정: " +
+          newlyUnassigned.map((m) => m.name).join(", ") +
+          "."
+        : "") +
+      (c.deltas.length ? " 추천 대비 " + formatTradeoff(c.deltas) : "");
     const desc =
       c.role === "recommended"
-        ? CARD_DESC.recommended
+        ? c.roles.map((r) => ROLE_DESC[r.role]).join(" ")
         : c.role === "edited"
-          ? CARD_DESC.edited +
-            (c.deltas.length ? " 추천 대비 " + formatTradeoff(c.deltas) : "")
-          : "추천 대비 " + formatTradeoff(c.deltas);
+          ? CARD_DESC.edited + versus
+          : c.roles.map((r) => ROLE_DESC[r.role]).join(" ") + versus;
     const blocks = schedule2ToBlocks(result.assigned, {
       result,
       onDone: renderSchedule3Result,
@@ -1574,6 +1771,7 @@ function setCardReoptButtonsDisabled(disabled) {
 function startGenerationProgress(label, cancelLabel) {
   setCardReoptButtonsDisabled(true);
   generateBtn3El.disabled = true;
+  extraSearchBtn3El.disabled = true;
   generateBtn3El.classList.add("loading");
   generateBtn3LabelEl.textContent = label;
   generateProgressWrap3El.hidden = false;
@@ -1593,6 +1791,7 @@ function showGenerationProgress(progress, phase) {
 }
 function endGenerationProgress() {
   generateBtn3El.disabled = false;
+  extraSearchBtn3El.disabled = false;
   generateBtn3El.classList.remove("loading");
   generateBtn3LabelEl.textContent = GENERATE3_IDLE_LABEL;
   generateProgressWrap3El.hidden = true;
@@ -1998,6 +2197,7 @@ export async function runGenerate3() {
 
   const prevCandidateAList = runtime.schedule3Result.candidateAList;
   const prevCandidates = runtime.candidates;
+  const prevExtras = extraCandidates();
 
   startGenerationProgress("후보 생성 중...", "생성 취소");
 
@@ -2065,7 +2265,14 @@ export async function runGenerate3() {
       if (s.pool) candidatePools[idx] = s.pool;
     });
     runtime.candidates = keptBC.map((s) => s.candidate);
-    runtime.schedule3Result = { candidateAList, inputKey };
+    // 추가 후보 슬롯(본 생성 대표·회원별 추가 탐색)은 새로 고른다 — 사용자가 손댄 것만 지킨다. 추가 탐색
+    // 상태(extraSearch)도 새 결과에는 없다(새 추천 기준으로 다시 찾아야 한다).
+    runtime.schedule3Result = {
+      candidateAList,
+      inputKey,
+      extraCandidates: prevExtras.filter(keepsUserEditedSlot),
+    };
+    addSearchRepresentatives(result.greedyAll);
     // 생성하는 동안 입력이 바뀌었으면 방금 결과도 맞지 않는다.
     if (dropStaleCandidates()) return;
     renderSchedule3Result();
@@ -2085,7 +2292,102 @@ export async function runGenerate3() {
   }
 }
 
+// '미배정 1명 추가안 더 찾기'(사용자 결정 2026-10-11: 본 후보 생성과 분리해 선택 실행, 넓은 탐색·품질 우선).
+// 추천 후보 기준으로 회원별 추가 탐색(engine/memberExclusion.js)을 돌린다. 회원 하나가 끝날 때마다 찾은 후보를
+// 저장·표시하므로, 취소하거나 오류가 나도 기존 후보와 그때까지 찾은 후보는 남는다. 기준은 누를 때 화면에 보이는
+// 추천 배치(동점 배치를 넘겨 보고 있으면 그 배치, shownRecommendation)이고, schedule3Result.extraSearch
+// { baseSig, done }에 기록한다. 그사이 기준 추천안이 바뀌면 옛 기준의 결과를 새 추천의 완료로 보지 않는다
+// (extraSearchStatus가 stale). 계측은 콘솔 [회원별 추가 탐색].
+async function runExtraSearch3() {
+  if (runtime.generationInProgress) {
+    showToast("후보 생성이 진행 중입니다. 잠시 후 다시 시도해주세요.", "info");
+    return;
+  }
+  if (dropStaleCandidates()) return;
+  const base = shownRecommendation();
+  if (!base) return;
+  const baseSig = layoutSignature(base.result);
+  const meta = { baseSig, done: false };
+  runtime.schedule3Result.extraSearch = meta;
+  generateHint3El.textContent = "";
+  runtime.generationInProgress = true;
+  runtime.generationCancelRequested = false;
+  const inputKey = candidateInputKey();
+  const startedAt = performance.now();
+  let label = "";
+  let added = 0;
+  startGenerationProgress("추가 탐색 중...", "추가 탐색 취소");
+  await acquireWakeLock();
+  try {
+    renderSchedule3Result();
+    saveState();
+    const stats = await searchMemberExclusions(base, {
+      onMember: (i, n, member) => {
+        label =
+          "회원별 추가 탐색 " + (i + 1) + "/" + n + "명 (" + member.name + ")";
+        showGenerationProgress(i / n, label);
+      },
+      onProgress: (i, n, p) => showGenerationProgress((i + p) / n, label),
+      onFound: (results) => {
+        // 탐색 도중 입력이 바뀌었으면 맞지 않는 결과다(끝나면 dropStaleCandidates가 후보를 정리한다).
+        if (candidateInputKey() !== inputKey) return;
+        const have = new Set(extraCandidates().map(layoutSignature));
+        const fresh = results
+          .filter((r) => !have.has(layoutSignature(r)))
+          .map((r) => ({ ...r, baseSig }));
+        if (!fresh.length) return;
+        added += fresh.length;
+        runtime.schedule3Result.extraCandidates = extraCandidates().concat(fresh);
+        renderSchedule3Result();
+        saveState();
+      },
+    });
+    console.info(
+      "[회원별 추가 탐색]",
+      JSON.stringify({
+        ...stats,
+        added,
+        ms: Math.round(performance.now() - startedAt),
+      }),
+    );
+    if (dropStaleCandidates()) return;
+    // 끝까지 찾은 것은 기준(baseSig)에 대해서다 — 그사이 추천이 바뀌었으면 상태는 stale로 보인다.
+    meta.done = true;
+    const now = shownRecommendation();
+    const sameBase = !!now && layoutSignature(now.result) === baseSig;
+    renderSchedule3Result();
+    saveState();
+    if (!sameBase)
+      showToast(
+        "탐색 중 추천안이 바뀌어 완료로 처리하지 않았습니다. 바뀐 추천안으로 다시 찾아주세요",
+        "info",
+      );
+    else
+      showToast(
+        added
+          ? "미배정 1명 추가안 " + added + "개를 찾았습니다"
+          : "조건을 충족하는 미배정 1명 추가안을 찾지 못했습니다",
+        added ? "success" : "info",
+      );
+  } catch (err) {
+    if (err instanceof GenerationCancelledError) {
+      showToast(
+        "추가 탐색을 취소했습니다. 기존 후보와 지금까지 찾은 후보는 유지됩니다",
+        "info",
+      );
+    } else {
+      console.error(err);
+      generateHint3El.textContent =
+        "추가 탐색 중 오류가 발생했습니다. 기존 후보와 지금까지 찾은 후보는 그대로 두었습니다.";
+      showToast("추가 탐색에 실패했습니다", "danger");
+    }
+  } finally {
+    endGenerationProgress();
+  }
+}
+
 generateBtn3El.addEventListener("click", () => runGenerate3());
+extraSearchBtn3El.addEventListener("click", () => runExtraSearch3());
 generateBtn3CancelEl.addEventListener("click", () => {
   runtime.generationCancelRequested = true;
   generateBtn3CancelEl.disabled = true;

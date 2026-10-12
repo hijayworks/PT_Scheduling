@@ -14,6 +14,7 @@ import {
   state,
   runtime,
   GenerationCancelledError,
+  candidateInputKey,
 } from "../state.js";
 import {
   memberById,
@@ -30,7 +31,10 @@ import {
   scheduleTargetMemberIds,
   unassignedMembersFor,
 } from "../domain.js";
-import { currentExcludedIds } from "../selectionOverride.js";
+import {
+  currentExcludedIds,
+  currentOnceLimitIds,
+} from "../selectionOverride.js";
 import { schedule2TotalIdleMinutes } from "./scheduleCompare.js";
 import { engineWorkerInit, runTasksInWorkers } from "./workerPool.js";
 
@@ -1761,6 +1765,19 @@ export function resetCandidateSession() {
   Object.keys(candidateAPools).forEach((k) => delete candidateAPools[k]);
 }
 
+// 슬롯(후보 카드 하나의 현재 결과·동점 풀)마다 수정 가능한 데이터를 따로 갖도록 배치를 복사한다. 수동 편집은
+// 결과 객체의 assigned[i]·unassignedMembers·confirmedIds를 그 자리에서 바꾸므로, 두 슬롯이 같은 객체·배열을
+// 가리키면 한 슬롯의 편집이 다른 슬롯에도 보인다. 회원 객체(unassignedMembers 항목)는 state의 것을 그대로 둔다.
+export function copyLayout(r) {
+  const out = {
+    ...r,
+    assigned: r.assigned.map((a) => ({ ...a })),
+    unassignedMembers: (r.unassignedMembers || []).slice(),
+  };
+  if (Array.isArray(r.confirmedIds)) out.confirmedIds = r.confirmedIds.slice();
+  return out;
+}
+
 export function candidateSignature(cand) {
   return cand.assigned
     .map((r) => r.id)
@@ -1778,6 +1795,8 @@ export function candidateSignature(cand) {
 // 순서와 무관하게 pool은 순차 실행과 같은 순서가 되어, 호출하는 쪽의 최선 선택·동점 풀 구성도
 // 같다. 워커를 못 쓰거나 워커가 실패한 시도만 메인 스레드가 예전처럼 순서대로 계산한다.
 // pins: 모든 시도에 그대로 둘 고정 세션(재최적화, engine/pins.js). 앱의 일반 생성은 [].
+// runSync(fn): 선택(제외·1회 제한 회원)을 읽는 동기 계산(워커 초기값, 메인 스레드 대체 계산)을 감싼다 —
+// 회원별 추가 탐색이 임시 선택을 await 밖으로 새지 않게 넘긴다(withSelectionOverrideSync).
 export async function buildGreedySearchPool(
   eligible,
   eligibleIds,
@@ -1785,6 +1804,7 @@ export async function buildGreedySearchPool(
   onProgress,
   workerOptions = {},
   pins = [],
+  runSync = (fn) => fn(),
 ) {
   const searchAttempts =
     workerOptions.attempts !== undefined
@@ -1794,13 +1814,15 @@ export async function buildGreedySearchPool(
   const totalBuilds = STRATEGIES.length * perStrategy;
   let completed = 0;
   const pool = await runTasksInWorkers({
-    init: engineWorkerInit("greedy", {
-      eligible,
-      eligibleIds: [...eligibleIds],
-      allMemberIds: [...allMemberIds],
-      attempts: searchAttempts,
-      pins,
-    }),
+    init: runSync(() =>
+      engineWorkerInit("greedy", {
+        eligible,
+        eligibleIds: [...eligibleIds],
+        allMemberIds: [...allMemberIds],
+        attempts: searchAttempts,
+        pins,
+      }),
+    ),
     taskCount: totalBuilds,
     taskMessage: (i) => ({
       strategyIndex: Math.floor(i / perStrategy),
@@ -1834,14 +1856,16 @@ export async function buildGreedySearchPool(
         searchAttempts,
       )) {
         if (!pool[i]) {
-          pool[i] = buildCandidateFromStrategy(
-            idx,
-            eligible,
-            eligibleIds,
-            allMemberIds,
-            input.jitter,
-            pins,
-            input.dayOrder,
+          pool[i] = runSync(() =>
+            buildCandidateFromStrategy(
+              idx,
+              eligible,
+              eligibleIds,
+              allMemberIds,
+              input.jitter,
+              pins,
+              input.dayOrder,
+            ),
           );
           completed++;
           if (completed % PROGRESS_YIELD_EVERY === 0) {
@@ -1858,6 +1882,31 @@ export async function buildGreedySearchPool(
   return pool;
 }
 
+// 그리디 탐색의 입력. 현재 선택(제외·1회 제한 회원)을 읽는다.
+// "미배정 회원"으로 지정된 회원은 애초에 없었던 것처럼 취급한다 — 배정 대상에서도,
+// (배정 실패가 아니라 의도적 제외이므로) 미배정 통계에서도 뺀다(scheduleTargetMemberIds).
+export function greedySearchInputs() {
+  const eligible = state.requests.filter(isEligibleRequest);
+  return {
+    eligible,
+    eligibleIds: new Set(eligible.map((r) => r.id)),
+    allMemberIds: new Set(scheduleTargetMemberIds()),
+  };
+}
+
+// 그리디 탐색 결과를 다른 호출(후보A의 그리디 기준선)에 그대로 재사용해도 되는지 판정하는 지문. 탐색은 시드
+// 난수로만 정해지므로(워커 수와 무관) 입력(candidateInputKey)·현재 선택(override 포함)·시도 횟수·고정 세션이
+// 같으면 결과도 같다.
+export function greedySearchKey(attempts, pins) {
+  return JSON.stringify([
+    candidateInputKey(),
+    currentExcludedIds(),
+    currentOnceLimitIds(),
+    attempts !== undefined ? attempts : INITIAL_SEARCH_ATTEMPTS,
+    pins,
+  ]);
+}
+
 // workerOptions(createWorker/workerCount/attempts)는 테스트·벤치에서 워커 구성과 시도 횟수를 바꾸기
 // 위한 것이다 — 앱은 넘기지 않는다(buildGreedySearchPool 참고). pins는 재최적화의 고정 세션.
 export async function generateCandidatesAsync(
@@ -1865,11 +1914,8 @@ export async function generateCandidatesAsync(
   workerOptions = {},
   pins = [],
 ) {
-  // "미배정 회원"으로 지정된 회원은 애초에 없었던 것처럼 취급한다 — 배정 대상에서도,
-  // (배정 실패가 아니라 의도적 제외이므로) 미배정 통계에서도 뺀다(scheduleTargetMemberIds).
-  const allMemberIds = new Set(scheduleTargetMemberIds());
-  const eligible = state.requests.filter(isEligibleRequest);
-  const eligibleIds = new Set(eligible.map((r) => r.id));
+  const { eligible, eligibleIds, allMemberIds } = greedySearchInputs();
+  const searchKey = greedySearchKey(workerOptions.attempts, pins);
 
   // 그리디 배정은 동점 신청들을 처리하는 순서(jitter)뿐 아니라, 전략마다 회원을 채워나가는
   // 구조 자체(예: 후보B의 sessionCountFirst)가 달라서, 같은 횟수를 시도해도 어떤 전략은
@@ -1914,7 +1960,9 @@ export async function generateCandidatesAsync(
         bestScore = score;
       }
     });
-    const builtCand = Object.assign({}, best, {
+    // 대표·동점 배치 모두 복사한다(copyLayout) — 두 전략이 같은 시도를 고르거나 동점 풀에 같은 시도가 들어가면
+    // 후보B·C 슬롯이 같은 객체를 공유해, 한 슬롯의 수동 편집이 다른 슬롯까지 바꾼다.
+    const builtCand = Object.assign(copyLayout(best), {
       title: strategy.title,
       desc: strategy.desc,
       strategyIndex: idx,
@@ -1934,7 +1982,7 @@ export async function generateCandidatesAsync(
       if (seenSig.has(sig)) return;
       seenSig.add(sig);
       if (tied.length < MAX_POOL_VARIANTS)
-        tied.push(cand === best ? builtCand : cand);
+        tied.push(cand === best ? builtCand : copyLayout(cand));
     });
     // 캡에 먼저 도달하면 builtCand(best) 자신이 못 들어갈 수 있다 — best는 정의상
     // 항상 자기 자신과 동점이므로, 페이저가 현재 위치를 찾으려면 반드시 pool에 있어야 한다.
@@ -1945,9 +1993,13 @@ export async function generateCandidatesAsync(
     return { builtCand, tied };
   });
 
+  // all: 시도 전체(시도 번호 순, 세션 한정) — 조건별 대표 선정(schedule3.js addSearchRepresentatives)이 전략
+  // 기준에서 밀린 결과도 보게 한다. searchKey: greedySearchKey(재사용 판정).
   return {
     built: builtPairs.map((p) => p.builtCand),
     pools: builtPairs.map((p) => p.tied),
+    all: pool,
+    searchKey,
   };
 }
 

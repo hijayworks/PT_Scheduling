@@ -4,9 +4,12 @@ import {
   SLOT_SCALE,
   DAYS,
   STORAGE_KEY,
+  PREVIOUS_STORAGE_KEY,
   LEGACY_STORAGE_KEY,
   OLD_STORAGE_KEY,
   DEFAULT_LOCATION_NAMES,
+  LOCATION_PALETTE,
+  DEFAULT_LOCATION_COLORS,
   DEFAULT_BUSINESS_DAY_INDICES,
   DEFAULT_BUSINESS_START_SLOT,
   DEFAULT_BUSINESS_END_SLOT,
@@ -25,12 +28,13 @@ import {
 
 /* ---------------- State ---------------- */
 // 2: noConsecutiveDayMemberIds 추가 + 저장 키 분리(constants.js STORAGE_KEY). 올릴 때는 저장 키도 새로 만든다.
-export const CURRENT_SCHEMA_VERSION = 2;
+// 3: 지점 색상(location.color) 추가 + 저장 키 v5. 2 → 3 이관은 fillLocationColors(색상 채우기)뿐이다.
+export const CURRENT_SCHEMA_VERSION = 3;
 
 export let state = {
   schemaVersion: CURRENT_SCHEMA_VERSION,
   availableCells: [], // array of "day-slot" strings
-  locations: [], // {id, name}
+  locations: [], // {id, name, color} — color는 LOCATION_PALETTE의 색(표시 전용)
   travelTimes: {}, // { "locIdA|locIdB": minutes }
   members: [], // {id, name, locationIds: [locId, ...]}
   requests: [], // {id, memberId, locationId, day, startSlot, duration}
@@ -53,6 +57,9 @@ export const runtime = {
   // candidates: 그리디 전략 0(인원 최대)·전략 1(수업 횟수 최대)의 결과.
   candidates: [],
   // candidateAList: 체인 DP 탐색 그룹 3개의 결과. 배열 길이는 항상 SCHEDULE2_CARD_COUNT(3)와 같다.
+  // extraCandidates(선택): 회원별 추가 탐색이 찾은 미배정 1명 추가·절충 후보(schedule3.js extraCandidates).
+  //   본 생성의 그리디 시도 전체에서 고른 조건별 대표도 여기 둔다(schedule3.js addSearchRepresentatives).
+  // extraSearch(선택): '미배정 1명 추가안 더 찾기' 상태 { baseSig: 기준 추천 배치 서명, done: 끝까지 마쳤는지 }.
   schedule3Result: { candidateAList: [null, null, null] },
   // 세 생성 버튼 중 하나라도 계산 중이면 true — 동시에 두 계산이 겹치면 selectionOverride가
   // 서로 다른 페이지의 회원 선택 목록을 잘못 참조할 수 있어(withSelectionOverride 참고), 이 플래그로 막는다.
@@ -181,6 +188,7 @@ export function candidateInputKey() {
   const text = [
     sortedJson(state.requests),
     // 이름·메모는 배정에 쓰이지 않는다. (지점 이름은 세 지점·비효율 이동 규칙이 읽으므로 넣는다.)
+    // 지점 색상은 표시 전용이라 넣지 않는다 — 색만 바꿔도 후보가 지워지지 않고, 색상 이관 전에 저장된 키와도 같다.
     sortedJson(
       state.members.map((m) => ({
         id: m.id,
@@ -188,7 +196,7 @@ export function candidateInputKey() {
         category: m.category,
       })),
     ),
-    sortedJson(state.locations),
+    sortedJson(state.locations.map((l) => ({ id: l.id, name: l.name }))),
     JSON.stringify(Object.entries(state.travelTimes || {}).sort()),
     Array.from(runtime.availableCells).sort().join(","),
     (state.excludedMemberIds3 || []).slice().sort().join(","),
@@ -267,6 +275,29 @@ function migrateOldState(parsed) {
   };
 }
 
+// 지점 색상 이관·복구: 색이 없거나 팔레트 밖이면(schemaVersion 3 이전 저장분·구버전 백업·손상 값) 채운다 —
+// 기본 지점 이름이면 DEFAULT_LOCATION_COLORS, 아니면 다른 지점이 쓰지 않는 팔레트 색을 앞에서부터(모두 쓰였으면
+// 순환). 이미 고른 색은 바꾸지 않는다. 이름은 이 한 번의 채우기에만 쓰고 이후 색은 지점 id에 붙어 다닌다.
+export function fillLocationColors(locations) {
+  const valid = (c) => LOCATION_PALETTE.some((p) => p.color === c);
+  const used = new Set(locations.map((l) => l.color).filter(valid));
+  const missing = locations.filter((l) => !valid(l.color));
+  // 기본 지점 이름부터 채워야 다른 지점이 그 색을 먼저 가져가지 않는다.
+  missing.forEach((loc) => {
+    const byName = DEFAULT_LOCATION_COLORS[loc.name];
+    if (byName && !used.has(byName)) used.add((loc.color = byName));
+  });
+  missing
+    .filter((l) => !valid(l.color))
+    .forEach((loc, i) => {
+      const free = LOCATION_PALETTE.find((p) => !used.has(p.color));
+      loc.color = free
+        ? free.color
+        : LOCATION_PALETTE[i % LOCATION_PALETTE.length].color;
+      used.add(loc.color);
+    });
+}
+
 // 저장분의 최상위 값은 객체여야 한다 — null·false·0·배열 등은 손상으로 본다.
 function parseSavedObject(raw) {
   const parsed = JSON.parse(raw);
@@ -286,11 +317,14 @@ export function loadState() {
     if (raw !== null) {
       parsed = parseSavedObject(raw);
     } else {
-      // 이관: 신버전 키가 없을 때만 구버전(schemaVersion 0~1) 저장분을 복사해 읽는다. 원본은 그대로 두어
+      // 이관: 신버전 키가 없을 때만 구버전(schemaVersion 0~2) 저장분을 복사해 읽는다. 원본은 그대로 두어
       // 아직 열려 있는 구버전 탭은 자기 키만 계속 쓰고, 신버전 저장분은 다음 saveState부터 STORAGE_KEY에 쌓인다.
       // schemaVersion 1 → 2는 연속 요일 배정 제외 목록이 없을 뿐이라 아래 정규화(없음 → [])가 마이그레이션이다.
-      const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
-      if (legacyRaw !== null) parsed = parseSavedObject(legacyRaw);
+      // schemaVersion 2 → 3은 아래 fillLocationColors(색상 채우기)가 마이그레이션이다. 직전 키(v4)가 있으면 그것만 읽는다.
+      const legacyRaw = [PREVIOUS_STORAGE_KEY, LEGACY_STORAGE_KEY]
+        .map((k) => localStorage.getItem(k))
+        .find((v) => v !== null);
+      if (legacyRaw !== undefined) parsed = parseSavedObject(legacyRaw);
     }
     if (!parsed && raw === null) {
       const oldRaw = localStorage.getItem(OLD_STORAGE_KEY);
@@ -340,6 +374,26 @@ export function loadState() {
         // inputKey가 없으면(이 정책 이전 저장분) "모름"으로 두고 dropStaleCandidates가 처리한다.
         if (typeof parsed.schedule3Result.inputKey === "string")
           runtime.schedule3Result.inputKey = parsed.schedule3Result.inputKey;
+        // 회원별 추가 탐색 후보(schemaVersion 3). 모양이 맞지 않는 항목은 버린다(파생 데이터라 다시 생성하면 된다).
+        const extras = parsed.schedule3Result.extraCandidates;
+        if (Array.isArray(extras))
+          runtime.schedule3Result.extraCandidates = extras.filter(
+            (r) =>
+              r &&
+              Array.isArray(r.assigned) &&
+              Array.isArray(r.unassignedMembers),
+          );
+        // '미배정 1명 추가안 더 찾기' 상태({ baseSig, done }). 모양이 맞지 않으면 찾지 않은 것으로 본다.
+        const meta = parsed.schedule3Result.extraSearch;
+        if (
+          meta &&
+          typeof meta.baseSig === "string" &&
+          typeof meta.done === "boolean"
+        )
+          runtime.schedule3Result.extraSearch = {
+            baseSig: meta.baseSig,
+            done: meta.done,
+          };
       } else {
         const legacyCandidateA =
           (parsed.schedule3Result && parsed.schedule3Result.candidateA) || null;
@@ -383,6 +437,7 @@ export function loadState() {
     state.locations = DEFAULT_LOCATION_NAMES.map((name) => ({
       id: uid("loc"),
       name,
+      color: DEFAULT_LOCATION_COLORS[name],
     }));
     for (let i = 0; i < state.locations.length; i++) {
       for (let j = i + 1; j < state.locations.length; j++) {
@@ -405,6 +460,7 @@ export function loadState() {
         runtime.availableCells.add(cellKey(di, s));
     });
   }
+  fillLocationColors(state.locations);
   // Migrate members saved under the old single-branch field (locationId) to the
   // multi-branch array (locationIds), backfilling from their first request if neither is set.
   state.members.forEach((m) => {
