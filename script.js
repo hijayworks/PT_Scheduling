@@ -5583,6 +5583,15 @@
     Object.keys(candidatePools).forEach((k) => delete candidatePools[k]);
     Object.keys(candidateAPools).forEach((k) => delete candidateAPools[k]);
   }
+  function copyLayout(r) {
+    const out = {
+      ...r,
+      assigned: r.assigned.map((a) => ({ ...a })),
+      unassignedMembers: (r.unassignedMembers || []).slice()
+    };
+    if (Array.isArray(r.confirmedIds)) out.confirmedIds = r.confirmedIds.slice();
+    return out;
+  }
   function candidateSignature(cand) {
     return cand.assigned.map((r) => r.id).slice().sort().join(",");
   }
@@ -5698,9 +5707,7 @@
           bestScore = score;
         }
       });
-      const builtCand = Object.assign({}, best, {
-        assigned: best.assigned.slice(),
-        unassignedMembers: best.unassignedMembers.slice(),
+      const builtCand = Object.assign(copyLayout(best), {
         title: strategy.title,
         desc: strategy.desc,
         strategyIndex: idx
@@ -5716,7 +5723,7 @@
         if (seenSig.has(sig)) return;
         seenSig.add(sig);
         if (tied.length < MAX_POOL_VARIANTS)
-          tied.push(cand === best ? builtCand : cand);
+          tied.push(cand === best ? builtCand : copyLayout(cand));
       });
       if (!tied.includes(builtCand)) {
         if (tied.length >= MAX_POOL_VARIANTS) tied.length = MAX_POOL_VARIANTS - 1;
@@ -7786,10 +7793,10 @@
         const externalCandidates = (greedyBaseline.built || []).concat(runtime.candidates || []).concat([].concat(...greedyBaseline.pools || [])).map((cand) => {
           if (!cand || !cand.assigned) return null;
           if (missingPins(cand.assigned, pins).length) return null;
-          return {
-            assigned: cand.assigned.slice(),
-            unassignedMembers: (cand.unassignedMembers || []).slice()
-          };
+          return copyLayout({
+            assigned: cand.assigned,
+            unassignedMembers: cand.unassignedMembers || []
+          });
         }).filter(Boolean);
         cards.forEach((c) => considerAsCandidate(c.result));
         externalCandidates.forEach((asResult) => considerAsCandidate(asResult));
@@ -7818,14 +7825,10 @@
             if (g === IDLE_FIRST_CARD_INDEX !== idleMode) continue;
             if (!c.result || floorIsBetter(targetFloor, c.result)) continue;
             if (!isSchedule2ResultBetter(best, c.result)) continue;
-            const own = {
-              ...best,
-              assigned: best.assigned.slice(),
-              unassignedMembers: best.unassignedMembers.slice()
-            };
+            const own = copyLayout(best);
             cards[g] = {
               result: own,
-              pool: bestPool.map((r) => r === best ? own : r)
+              pool: bestPool.map((r) => r === best ? own : copyLayout(r))
             };
           }
         }

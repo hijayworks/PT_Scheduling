@@ -1765,6 +1765,19 @@ export function resetCandidateSession() {
   Object.keys(candidateAPools).forEach((k) => delete candidateAPools[k]);
 }
 
+// 슬롯(후보 카드 하나의 현재 결과·동점 풀)마다 수정 가능한 데이터를 따로 갖도록 배치를 복사한다. 수동 편집은
+// 결과 객체의 assigned[i]·unassignedMembers·confirmedIds를 그 자리에서 바꾸므로, 두 슬롯이 같은 객체·배열을
+// 가리키면 한 슬롯의 편집이 다른 슬롯에도 보인다. 회원 객체(unassignedMembers 항목)는 state의 것을 그대로 둔다.
+export function copyLayout(r) {
+  const out = {
+    ...r,
+    assigned: r.assigned.map((a) => ({ ...a })),
+    unassignedMembers: (r.unassignedMembers || []).slice(),
+  };
+  if (Array.isArray(r.confirmedIds)) out.confirmedIds = r.confirmedIds.slice();
+  return out;
+}
+
 export function candidateSignature(cand) {
   return cand.assigned
     .map((r) => r.id)
@@ -1947,11 +1960,9 @@ export async function generateCandidatesAsync(
         bestScore = score;
       }
     });
-    // 배열은 복사한다 — 두 전략이 같은 시도를 고르면 후보B·C가 같은 assigned 배열을 공유해, 수동 편집
-    // (assigned[i] 교체)이 다른 카드까지 바꾼다.
-    const builtCand = Object.assign({}, best, {
-      assigned: best.assigned.slice(),
-      unassignedMembers: best.unassignedMembers.slice(),
+    // 대표·동점 배치 모두 복사한다(copyLayout) — 두 전략이 같은 시도를 고르거나 동점 풀에 같은 시도가 들어가면
+    // 후보B·C 슬롯이 같은 객체를 공유해, 한 슬롯의 수동 편집이 다른 슬롯까지 바꾼다.
+    const builtCand = Object.assign(copyLayout(best), {
       title: strategy.title,
       desc: strategy.desc,
       strategyIndex: idx,
@@ -1971,7 +1982,7 @@ export async function generateCandidatesAsync(
       if (seenSig.has(sig)) return;
       seenSig.add(sig);
       if (tied.length < MAX_POOL_VARIANTS)
-        tied.push(cand === best ? builtCand : cand);
+        tied.push(cand === best ? builtCand : copyLayout(cand));
     });
     // 캡에 먼저 도달하면 builtCand(best) 자신이 못 들어갈 수 있다 — best는 정의상
     // 항상 자기 자신과 동점이므로, 페이저가 현재 위치를 찾으려면 반드시 pool에 있어야 한다.

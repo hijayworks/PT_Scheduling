@@ -6,6 +6,7 @@ import {
   MAX_POOL_VARIANTS,
   generateCandidatesAsync,
   greedySearchKey,
+  copyLayout,
 } from "./greedy.js";
 import { isEligibleRequest2, runChainDP, setIdleFirst } from "./chainDpCore.js";
 import { runSchedule2Pipeline } from "./chainDpPolish.js";
@@ -566,12 +567,12 @@ export async function generateSchedule2Async(onProgress, options = {}) {
         .map((cand) => {
           if (!cand || !cand.assigned) return null;
           if (missingPins(cand.assigned, pins).length) return null;
-          // 배열은 복사한다 — 카드가 이 결과로 바뀌면 후보B·C(같은 그리디 결과를 재사용하거나 화면의
-          // runtime.candidates)와 assigned 배열을 공유해, 한 카드의 수동 편집이 다른 카드까지 바꾼다.
-          return {
-            assigned: cand.assigned.slice(),
-            unassignedMembers: (cand.unassignedMembers || []).slice(),
-          };
+          // 복사한다 — 카드가 이 결과로 바뀌면 후보B·C(같은 그리디 결과를 재사용하거나 화면의
+          // runtime.candidates)와 객체를 공유해, 한 카드의 수동 편집이 다른 카드까지 바꾼다.
+          return copyLayout({
+            assigned: cand.assigned,
+            unassignedMembers: cand.unassignedMembers || [],
+          });
         })
         .filter(Boolean);
       cards.forEach((c) => considerAsCandidate(c.result));
@@ -612,16 +613,13 @@ export async function generateSchedule2Async(onProgress, options = {}) {
           // bestPool을 그대로(참조로) 나눠주면 여러 카드가 같은 배열을 공유하게 되어, 한
           // 카드에서 페이저로 다른 배치를 골라(pickCandidateASlot의 pool.unshift 등) 배열을
           // 바꾸면 다른 카드의 풀까지 조용히 같이 바뀐다 — 카드마다 독립된 복사본을 준다.
-          // 결과도 카드마다 따로 복사한다 — 여러 카드가 같은 best 객체를 가리키면 한 카드의 편집이 다른
-          // 카드에도 보인다. 풀 안의 best 자리는 그 카드의 복사본으로 바꾼다(페이저가 풀에서 현재 결과를 찾는다).
-          const own = {
-            ...best,
-            assigned: best.assigned.slice(),
-            unassignedMembers: best.unassignedMembers.slice(),
-          };
+          // 결과와 동점 풀 전체를 카드마다 따로 복사한다(copyLayout) — bestPool의 배치는 다른 카드의 결과·
+          // 풀에서 왔거나 여러 카드에 나눠 주므로, 공유하면 한 카드의 동점 배치 편집이 다른 카드에도 보인다.
+          // 풀 안의 best 자리는 그 카드의 결과 복사본 그대로 둔다(페이저가 풀에서 현재 결과를 찾는다).
+          const own = copyLayout(best);
           cards[g] = {
             result: own,
-            pool: bestPool.map((r) => (r === best ? own : r)),
+            pool: bestPool.map((r) => (r === best ? own : copyLayout(r))),
           };
         }
       }

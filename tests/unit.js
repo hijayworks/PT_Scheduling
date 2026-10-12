@@ -1857,6 +1857,118 @@ testAsync("그리디 기준선 재사용: 같은 입력·선택·시도 횟수·
   swapped[0].result.assigned[0] = { ...swapped[0].result.assigned[0], startSlot: 99 };
   assertEqual([sig(better)].concat(swapped.slice(1).map((c) => sig(c.result))), before, "한 카드 편집이 다른 카드에 번짐");
 }));
+// 서로 다른 슬롯(key)의 배치(현재 결과·동점 풀)가 수정 가능한 데이터(결과 객체·assigned 배열과 항목·unassignedMembers
+// 배열·confirmedIds 배열)를 공유하는 곳. 같은 슬롯 안에서 현재 결과가 동점 풀의 항목과 같은 객체인 것은 페이저용이라 허용한다.
+function crossSlotSharing(slots) {
+  const owner = new Map();
+  const shared = [];
+  slots.forEach(({ key, layouts }) =>
+    layouts.forEach((r, i) =>
+      [r, r.assigned, ...r.assigned, r.unassignedMembers, r.confirmedIds].filter((x) => x && typeof x === "object").forEach((ref) => {
+        if (owner.has(ref) && owner.get(ref) !== key) shared.push(owner.get(ref) + "↔" + key + "#" + i);
+        else owner.set(ref, key);
+      }),
+    ),
+  );
+  return shared;
+}
+// 같은 요일·같은 지점에 배정된 두 회원의 자리를 맞바꾼 동점 배치(품질 지표가 같다).
+function swappedTie(r) {
+  const a = r.assigned.find((x) => r.assigned.some((y) => y !== x && y.day === x.day && y.locationId === x.locationId && y.memberId !== x.memberId));
+  const b = r.assigned.find((y) => y !== a && y.day === a.day && y.locationId === a.locationId && y.memberId !== a.memberId);
+  const reqAt = (m, x) => ({ ...lib.state.requests.find((q) => q.memberId === m && q.day === x.day && q.startSlot === x.startSlot), locationId: x.locationId });
+  return { ...r, assigned: r.assigned.map((x) => (x === a ? reqAt(b.memberId, a) : x === b ? reqAt(a.memberId, b) : x)) };
+}
+// UI처럼 슬롯 key의 동점 배치 중 sig가 같은 것을 골라(renderSchedule3Result의 슬롯 저장) 그 결과를 돌려준다.
+function pickVariant(key, sigOf, wanted) {
+  const entry = lib.candidatePoolEntries().find((e) => e.slot.key === key && sigOf(e.result) === wanted);
+  assert(entry && entry.key !== key, "픽스처 확인: " + key + " 슬롯에 대표가 아닌 동점 배치가 있어야 함");
+  entry.slot.store(entry.result);
+  return entry.result;
+}
+// 고른 배치를 실제 편집 함수로 이동·교체·확정한다. 각 편집이 실제로 일어났는지도 확인한다.
+function editAll(v, sigOf) {
+  let before = sigOf(v);
+  // 실제 검증(validateMove)을 통과하는 첫 이동: 그 회원의 다른 신청 자리 중 하나.
+  const move = v.assigned
+    .flatMap((x) => lib.state.requests.filter((q) => q.memberId === x.memberId && q.startSlot !== x.startSlot).map((q) => [x, q.day, q.startSlot]))
+    .find(([x, day, slot]) => { const r = lib.validateMove(v, x, day, slot); return r.ok && !r.noop; });
+  assert(move, "픽스처 확인: 옮길 수 있는 자리가 있어야 함");
+  lib.moveSession(v, move[0], move[1], move[2], noopDone);
+  assert(sigOf(v) !== before, "이동이 일어나지 않음");
+  before = sigOf(v);
+  const swapReq = v.assigned.find((x) => lib.state.members.some((m) => m.id !== x.memberId && m.locationIds.includes(x.locationId) && !v.assigned.some((y) => y.memberId === m.id && y.day === x.day)));
+  const newMember = lib.state.members.find((m) => m.id !== swapReq.memberId && m.locationIds.includes(swapReq.locationId) && !v.assigned.some((y) => y.memberId === m.id && y.day === swapReq.day));
+  lib.swapSessionMember(v, swapReq, newMember, noopDone);
+  assert(sigOf(v) !== before, "교체가 일어나지 않음");
+  const toConfirm = v.assigned.find((x) => !v.confirmedIds.includes(x.id));
+  lib.confirmSession(v, toConfirm.id, noopDone);
+  assert(v.confirmedIds.includes(toConfirm.id), "확정이 일어나지 않음");
+}
+testAsync("후보B·C 동점 배치: 슬롯마다 수정 가능한 데이터를 따로 가져, 한 슬롯의 동점 배치를 이동·교체·확정해도 다른 슬롯의 결과·동점 풀은 그대로다", () => withRaf(async () => {
+  const { rec } = tradeoffCounterexample();
+  const tie = swappedTie(rec);
+  const sig = (r) => r.assigned.map((x) => x.id + "@" + x.startSlot).sort().join();
+  try {
+    const gen = await lib.generateCandidatesAsync(() => {}, { createWorker: poolWorker([rec, tie]), workerCount: 1, attempts: 3 });
+    assertEqual(gen.pools.map((p) => p.map(sig)), [[sig(rec), sig(tie)], [sig(rec), sig(tie)]], "픽스처 확인: 두 전략의 동점 풀이 같은 두 배치");
+    assert(gen.pools.every((p, i) => p.includes(gen.built[i])), "페이저: 현재 결과는 자기 슬롯의 동점 풀 항목과 같은 객체");
+    lib.runtime.schedule3Result = { candidateAList: [null, null, null], extraCandidates: [] };
+    lib.runtime.candidates = gen.built;
+    gen.pools.forEach((pool, i) => (lib.candidatePools[i] = pool));
+    const slots = () => [0, 1].map((i) => ({ key: i ? "C" : "B", layouts: [lib.runtime.candidates[i]].concat(lib.candidatePools[i]) }));
+    assertEqual(crossSlotSharing(slots()), [], "후보B·C 동점 풀이 수정 가능한 데이터를 공유");
+    const otherBefore = JSON.stringify(slots()[1].layouts);
+    const v = pickVariant("B", sig, sig(tie));
+    editAll(v, sig);
+    assertEqual(JSON.stringify(slots()[1].layouts), otherBefore, "B의 동점 배치 편집이 C의 결과·동점 풀에 번짐");
+  } finally {
+    lib.runtime.candidates = [];
+    lib.resetCandidateSession();
+  }
+}));
+testAsync("후보A 동점 배치: 카드가 같은 최선으로 바뀌어도 슬롯마다 동점 풀을 따로 가져, 한 카드의 동점 배치를 이동·교체·확정해도 다른 카드의 결과·동점 풀은 그대로다", () => withRaf(async () => {
+  exclusionFixture();
+  // 수요일(빈 요일)에도 근무·신청을 열어 동점 배치를 옮길 자리를 만든다.
+  for (let s = 0; s < 24; s++) lib.runtime.availableCells.add("2-" + s);
+  for (const q of ["Q1", "Q2", "Q3", "Q4"]) for (let s = 0; s <= 18; s += 6) lib.state.requests.push({ id: q + "2_" + s, memberId: q, day: 2, startSlot: s, duration: 60 });
+  const realNow = performance.now;
+  let t = 0;
+  performance.now = () => (t += 1);
+  const sig = (r) => r.assigned.map((x) => x.id + "@" + x.startSlot).sort().join();
+  try {
+    const gen = await lib.generateCandidatesAsync(() => {}, { workerCount: 0, attempts: 5 });
+    // 수업이 1건 더 많은 그리디 결과와 그 동점 배치를 넣어 여러 카드가 같은 최선·동점 풀로 바뀌게 한다.
+    const top = gen.built[0];
+    const used = new Set(top.assigned.map((a) => a.memberId + "|" + a.day));
+    const busy = (r) => top.assigned.some((a) => a.day === r.day && Math.abs(a.startSlot - r.startSlot) < 9);
+    const count = (m) => top.assigned.filter((a) => a.memberId === m).length;
+    const extraReq = lib.state.requests.find((r) => !used.has(r.memberId + "|" + r.day) && !busy(r) && r.memberId !== "P" && count(r.memberId) < 2);
+    const better = { ...top, assigned: top.assigned.concat({ ...extraReq, locationId: "L1" }) };
+    const betterTie = swappedTie(better);
+    const boosted = { ...gen, built: [better, gen.built[1]], pools: [[better, betterTie], gen.pools[1]] };
+    const cards = await lib.generateSchedule2Async(() => {}, { greedyAttempts: 5, budgetScale: 0.001, greedyResult: boosted });
+    performance.now = realNow;
+    const withTie = cards.filter((c) => c.pool.some((r) => sig(r) === sig(betterTie)));
+    assert(withTie.length >= 2, "픽스처 확인: 두 카드 이상이 같은 동점 배치를 풀에 가져야 함: " + withTie.length);
+    assert(cards.every((c) => c.pool.includes(c.result)), "페이저: 현재 결과는 자기 슬롯의 동점 풀 항목과 같은 객체");
+    lib.runtime.schedule3Result = { candidateAList: cards.map((c) => c.result), extraCandidates: [] };
+    lib.runtime.candidates = [];
+    cards.forEach((c, i) => (lib.candidateAPools[i] = c.pool));
+    const slots = () => [0, 1, 2].map((i) => ({ key: "A" + (i + 1), layouts: [lib.runtime.schedule3Result.candidateAList[i]].concat(lib.candidateAPools[i]) }));
+    assertEqual(crossSlotSharing(slots()), [], "후보A 카드끼리 동점 풀이 수정 가능한 데이터를 공유");
+    const k = cards.indexOf(withTie[0]);
+    const others = () => JSON.stringify(slots().filter((_, i) => i !== k).map((x) => x.layouts));
+    const othersBefore = others();
+    const v = pickVariant("A" + (k + 1), sig, sig(betterTie));
+    editAll(v, sig);
+    assertEqual(others(), othersBefore, "한 카드의 동점 배치 편집이 다른 카드의 결과·동점 풀에 번짐");
+  } finally {
+    performance.now = realNow;
+    lib.runtime.schedule3Result = { candidateAList: [null, null, null] };
+    lib.resetCandidateSession();
+  }
+}));
 test("추가 탐색 상태: 기준 추천 배치가 지금 보이는 추천과 같을 때만 완료·미완료이고, 바뀌면 다시 찾아야 한다", () => {
   const s = lib.extraSearchStatus;
   assertEqual(
