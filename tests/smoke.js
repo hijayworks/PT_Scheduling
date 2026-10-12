@@ -58,13 +58,20 @@ const SECTIONS = {
 };
 const onlyArg = process.argv.indexOf("--only");
 const ONLY = onlyArg >= 0 ? String(process.argv[onlyArg + 1] || "").split(",").filter(Boolean) : null;
-const unknownSections = (ONLY || []).filter((name) => !SECTIONS[name]);
+// 상속 속성(toString·constructor·__proto__ 등)을 구간으로 인정하지 않도록 직접 정의된 키만 본다.
+const unknownSections = (ONLY || []).filter((name) => !Object.hasOwn(SECTIONS, name));
 if ((ONLY && ONLY.length === 0) || unknownSections.length) {
   console.error("알 수 없는 smoke 구간: " + (unknownSections.join(",") || "(비어 있음)") + "\n사용 가능:\n" +
     Object.entries(SECTIONS).map(([name, desc]) => "  " + name + " — " + desc).join("\n"));
   process.exit(1);
 }
-const want = (name) => !ONLY || ONLY.includes(name);
+// 실제로 들어간 구간을 기록해, 고른 구간(전체 실행이면 SECTIONS 전부)이 하나라도 실행되지 않았으면 PASS 대신 실패한다.
+const ranSections = new Set();
+const want = (name) => {
+  const on = !ONLY || ONLY.includes(name);
+  if (on) ranSections.add(name);
+  return on;
+};
 
 // 트레이너 근무 가능 시간(월요일 14:00~17:00)과 그 안에 들어오는 회원 희망 시간 하나를
 // 미리 채워서, 실제 UI(커스텀 드롭다운·그리드 클릭)를 조작하지 않고도 두 생성 엔진
@@ -1455,6 +1462,8 @@ async function main() {
     fs.rmSync(previousRoot, { recursive: true, force: true });
   }
 
+  const notRun = (ONLY || Object.keys(SECTIONS)).filter((name) => !ranSections.has(name));
+  if (notRun.length) failures.push("선택한 smoke 구간이 실행되지 않음(SECTIONS와 want() 호출 불일치): " + notRun.join(","));
   if (failures.length > 0) {
     console.error("FAIL — 스모크 테스트 실패:");
     failures.forEach((f) => console.error("  - " + f));
