@@ -42,6 +42,29 @@ const SWAP_REPEAT = Number(process.env.SMOKE_SWAP_REPEAT || "20");
 const ARTIFACT_DIR = path.join(ROOT, "test-artifacts");
 const FULL_BUDGET_A = process.env.SMOKE_FULL_BUDGET_A === "1";
 const A_BUDGET_SCALE = Number(process.env.SMOKE_A_BUDGET_SCALE || "0.005");
+// 구간 선택 실행(개발 중 빠른 확인): node tests/smoke.js --only reopt,manual-edit
+// 인자가 없으면 전 구간을 돌린다(npm test·CI). 구간마다 새 페이지·컨텍스트를 열고 시드를 직접 넣으므로 서로 독립이다.
+const SECTIONS = {
+  core: "후보 생성·추천 카드·확정 후보 보존·이미지 저장·새로고침·신청 변경 무효화·붙여넣기 미리보기·CSP",
+  compare: "후보 비교 패널·모바일 가로 스크롤·알림 폭",
+  reopt: "재최적화(취소·제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패)",
+  "manual-edit": "근무 시간 밖 드래그·회원 교체 후 새로고침 저장값(SMOKE_SWAP_REPEAT회)·설정 입력 보정",
+  "stale-saved": "옛 저장분 위반 후보만 정리",
+  "legacy-compat": "구버전(schemaVersion 1) 탭·백업 호환·비정상 신버전 저장분 보호",
+  "no-consecutive": "연속 배정 제외 설정 위치·선택 유지·후보 무효화·생성 적용",
+  "previous-compat": "직전 버전(schemaVersion 2) 이관·지점 색상·백업",
+  "candidate-display": "대표 후보 비교표·미배정 1명 추가 후보·지점 색·시간 표시·추가 탐색 중 후보 유지",
+  file: "file:// 저장·새로고침·브라우저 재실행",
+};
+const onlyArg = process.argv.indexOf("--only");
+const ONLY = onlyArg >= 0 ? String(process.argv[onlyArg + 1] || "").split(",").filter(Boolean) : null;
+const unknownSections = (ONLY || []).filter((name) => !SECTIONS[name]);
+if ((ONLY && ONLY.length === 0) || unknownSections.length) {
+  console.error("알 수 없는 smoke 구간: " + (unknownSections.join(",") || "(비어 있음)") + "\n사용 가능:\n" +
+    Object.entries(SECTIONS).map(([name, desc]) => "  " + name + " — " + desc).join("\n"));
+  process.exit(1);
+}
+const want = (name) => !ONLY || ONLY.includes(name);
 
 // 트레이너 근무 가능 시간(월요일 14:00~17:00)과 그 안에 들어오는 회원 희망 시간 하나를
 // 미리 채워서, 실제 UI(커스텀 드롭다운·그리드 클릭)를 조작하지 않고도 두 생성 엔진
@@ -994,8 +1017,6 @@ async function main() {
       );
     }
 
-    await openWithSeed(page, buildSeedState(), site);
-
     // 후보 생성(그리디 탐색 + 체인 DP 다듬기). 기본값은 위에서 주입한 __PT_TEST_BUDGET_SCALE__로
     // 체인 DP의 시간 예산을 축소해 몇 초 안에 끝난다. SMOKE_FULL_BUDGET_A=1이면 실제 운영 예산
     // 그대로 돌린다(트리비얼한 입력도 몇 분~수십 분).
@@ -1003,413 +1024,429 @@ async function main() {
     // 진행바: 생성 전에는 숨기고, 버튼을 누른 그 순간(첫 await 전 동기 구간) 보이고, 끝나면 다시 숨긴다.
     // [hidden]을 클래스의 display: flex가 덮어 '후보 탐색 0%'가 생성 전부터 보이던 회귀를 막는다.
     const progressVisible = (p = page) => p.locator("#generateProgressWrap3").isVisible();
-    assert(!(await progressVisible()), "생성 전에 진행바(후보 탐색 0%)가 보임");
-    const shownOnStart = await page.evaluate(() => {
-      document.getElementById("generateBtn3").click();
-      const el = document.getElementById("generateProgressWrap3");
-      return window.getComputedStyle(el).display !== "none" && el.getBoundingClientRect().height > 0;
-    });
-    assert(shownOnStart, "생성을 시작했는데 진행바가 보이지 않음");
-    await page.waitForFunction(() => !document.querySelector("#generateBtn3").disabled, null, { timeout: generateTimeout });
-    assert(!(await progressVisible()), "생성이 끝났는데 진행바가 남음");
-    let state = await readState(page);
-    assert(
-      state && Array.isArray(state.candidates) && state.candidates.length > 0,
-      "그리디 후보 슬롯이 비어있음 (그리디 엔진 회귀 의심)"
-    );
-    assert(
-      state && state.schedule3Result && state.schedule3Result.candidateAList
-        && state.schedule3Result.candidateAList.some(Boolean),
-      "체인 DP 후보 슬롯이 비어있음 (체인DP 엔진 회귀 의심)"
-    );
-    const workerMessages = await page.evaluate(() => window.__PT_WORKER_MESSAGES__);
-    assert(
-      workerMessages > 0,
-      "후보 생성이 Web Worker를 쓰지 않음 (워커 생성·CSP·번들 회귀 의심)"
-    );
-    const cardTitles = () => page.locator("#candidates3 .candidate-title").allTextContents();
-    let titles = await cardTitles();
-    assert(
-      titles.length >= 1 && titles[0].startsWith("추천·균형"),
-      "첫 후보 카드가 '추천·균형'이 아님 (실제: " + JSON.stringify(titles) + ")"
-    );
-    assert(
-      (await page.locator("#candidateSummary3 tbody tr").count()) === 6,
-      "대표 후보 비교표가 6행이 아님"
-    );
-    const pageText = await page.locator("#pageSchedule3").innerText();
-    assert(!/후보\s?[ABC]/.test(pageText), "화면에 엔진 이름(후보A/B/C)이 노출됨");
 
-    // 수업 블록을 눌러 확정하면 그 후보는 '내가 수정한 후보'가 되고, 다시 생성해도 지워지지 않는다.
-    // 블록은 드래그 가능해서 Playwright의 포인터 클릭이 드래그 처리와 엉킨다(메뉴가 열렸다가
-    // 다시 그려짐). 메뉴 동작만 확인하면 되므로 DOM click 이벤트로 연다.
-    await page.locator("#candidates3 .cal-block.clickable").first().evaluate((el) => el.click());
-    await page
-      .locator(".block-context-menu-item", { hasText: "확정" })
-      .first()
-      .evaluate((el) => el.click());
-    titles = await cardTitles();
-    assert(
-      titles.includes("내가 수정한 후보"),
-      "확정한 후보가 '내가 수정한 후보'로 바뀌지 않음 (실제: " + JSON.stringify(titles) + ")"
-    );
-    await clickGenerateAndWait(page, "#generateBtn3", generateTimeout);
-    titles = await cardTitles();
-    assert(
-      titles.includes("내가 수정한 후보"),
-      "다시 생성한 뒤 '내가 수정한 후보'가 사라짐 (실제: " + JSON.stringify(titles) + ")"
-    );
-    // 생성 중에 다시 그려진 카드의 재최적화 버튼은 생성이 끝나면 다시 눌러져야 한다.
-    const reoptDisabled = await page.locator("#candidates3 .reopt-btn").evaluateAll((bs) => bs.map((b) => b.disabled));
-    assert(
-      reoptDisabled.length > 0 && reoptDisabled.every((d) => !d),
-      "다시 생성한 뒤 '나머지 일정 다시 최적화' 버튼이 비활성으로 남음: " + JSON.stringify(reoptDisabled)
-    );
-
-    // strict style CSP에서 html2canvas 캡처 경로도 실제로 동작하는지 확인한다.
-    // 후보 생성 직후 첫 카드의 이미지 저장 버튼을 눌러 다운로드 완료까지 기다린다.
-    const imageSaveBtn = page
-      .locator('button[aria-label="이미지로 저장"]')
-      .first();
-    if (await imageSaveBtn.count()) {
-      const downloadPromise = page.waitForEvent("download", { timeout: 15000 });
-      await imageSaveBtn.click();
-      await downloadPromise;
-    } else {
-      failures.push("이미지 저장 버튼을 찾지 못함");
-    }
-
-    // 새로고침 후에도 데이터와 생성 결과가 유지되는지(localStorage 로드 경로 회귀 확인)
-    await reloadChecked(page, "생성 결과 새로고침", failures);
-    await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
-    assert(!(await progressVisible()), "새로고침 후 진행바가 보임");
-    const reloadedMemberCount = await page.evaluate((key) => {
-      const raw = localStorage.getItem(key);
-      return raw ? JSON.parse(raw).members.length : -1;
-    }, STORAGE_KEY);
-    assert(reloadedMemberCount === 1, "새로고침 후 회원 데이터가 유지되지 않음");
-    titles = await cardTitles();
-    assert(
-      titles.includes("내가 수정한 후보"),
-      "새로고침 후 '내가 수정한 후보'가 유지되지 않음 (실제: " + JSON.stringify(titles) + ")"
-    );
-
-    // 회원관리 페이지가 정상적으로 회원 1명을 렌더링하는지(페이지 전환 + 렌더링 회귀 확인)
-    await page.click('.nav-item[data-page="members"]');
-    await page.waitForSelector("#pageMembers.active", { timeout: 5000 });
-    const memberRowCount = await page.locator("#memberTableBody tr").count();
-    assert(memberRowCount === 1, "회원관리 표에 회원이 정상적으로 표시되지 않음 (실제: " + memberRowCount + "행)");
-
-    // 신청이 바뀌면(전체 스케줄 초기화) 새로고침을 거쳐도 '내가 수정한 후보'까지 비워진다. 예전에는
-    // 런타임 플래그로만 표시해서 새로고침하면 플래그가 사라지고 옛 수정 후보가 남았다.
-    await page.click('.nav-item[data-page="memberSchedule"]');
-    page.once("dialog", (d) => d.accept());
-    await page.click("#resetAllSchedulesBtn");
-    await reloadChecked(page, "신청 변경 뒤 새로고침", failures);
-    await page.click('.nav-item[data-page="schedule3"]');
-    await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
-    titles = await cardTitles();
-    assert(
-      titles.length === 0,
-      "신청이 바뀐 뒤 새로고침하자 옛 후보가 남음 (실제: " + JSON.stringify(titles) + ")"
-    );
-    const staleHint = await page.locator("#generateHint3").innerText();
-    assert(staleHint.includes("회원·신청·설정이 변경되어") && !staleHint.includes("필수 조건"), "입력 변경 안내가 다름: " + staleHint);
-    // 시작 전 입력 검증에서 멈추면(신청 없음) 진행바를 띄우지 않는다.
-    await page.click("#generateBtn3");
-    assert((await page.locator("#generateHint3").innerText()).includes("가능 시간을 등록"), "신청이 없을 때 안내가 다름");
-    assert(!(await progressVisible()), "입력 검증에서 멈췄는데 진행바가 보임");
-
-    // 붙여넣기 미리보기: 신규 회원일 때만 지점·구분 드롭다운을 보이고, 기존 회원·건너뛰기에서는 숨긴다(여러 번 바꿔도).
-    await page.click('.nav-item[data-page="memberSchedule"]');
-    await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
-    await page.click("#bulkImportOpenBtn"); // 신청이 비어 있어 확인 창 없이 바로 열린다
-    await page.fill("#bulkImportTextarea", "테스터 x\n새회원 x");
-    await page.click("#bulkImportPreviewBtn");
-    const rowSelect = page.locator(".bulk-preview-row").nth(0).locator(".bulk-preview-row-head > select");
-    const rowFields = (i) => page.locator(".bulk-preview-row").nth(i).locator(".bulk-preview-new-fields");
-    assert(!(await rowFields(0).isVisible()), "기존 회원 줄에 신규 회원용 지점·구분 드롭다운이 보임");
-    assert(await rowFields(1).isVisible(), "신규 회원 줄에 지점·구분 드롭다운이 보이지 않음");
-    for (const [choice, visible] of [["__new__", true], ["__skip__", false], ["mem1", false], ["__new__", true], ["mem1", false]]) {
-      await rowSelect.selectOption(choice);
-      assert((await rowFields(0).isVisible()) === visible, `미리보기 선택 ${choice}에서 지점·구분 드롭다운 표시가 ${visible ? "보여야" : "숨겨야"} 함`);
-    }
-    await page.click("#bulkImportCloseBtn");
-
-    const cspViolations = await page.evaluate(() => window.__PT_CSP_VIOLATIONS__ || []);
-    assert(
-      cspViolations.length === 0,
-      "CSP 위반 발생: " + JSON.stringify(cspViolations),
-    );
-
-    // 후보 비교: 골든 CASE-09 생성 결과(추천 + 공강 최소)를 넣고 '추천안과 비교'를 연다. 이 저장
-    // 상태에는 inputKey가 없어 기존 저장분 경로(하드 제약 재검사 후 인정)도 함께 지난다.
-    const cmp = await browser.newPage();
-    // 둘째 배치(수업 -1·빈 시간 -60분)는 공강이 0분이 아니라 어느 대표 조건에도 들지 않으므로, 확정 표시를 붙여
-    // '내가 수정한 후보'로 비교한다(대표 조건 판정은 unit 테스트가 본다).
-    const fixtureState = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "compare-CASE-09.state.json"), "utf8"));
-    fixtureState.candidates[0].confirmedIds = [fixtureState.candidates[0].assigned[1].id];
-    await openWithSeed(cmp, JSON.stringify(fixtureState), site);
-    const cmpTitles = await cmp.locator("#candidates3 .candidate-title").allTextContents();
-    assert(
-      JSON.stringify(cmpTitles) === JSON.stringify(["추천·균형 · 수업 수 우선·공강 허용", "내가 수정한 후보"]),
-      "비교용 저장 상태의 카드가 다름 (실제: " + JSON.stringify(cmpTitles) + ")"
-    );
-    await cmp.locator(".compare-candidate-btn").first().click();
-    const panel = cmp.locator("#candidateCompare3");
-    const panelText = (await panel.isVisible()) ? await panel.innerText() : "";
-    assert(panelText.includes("빈 시간 -60분 / 체류 시간 -120분 대신 수업 -1"), "비교 요약 문장이 다름: " + panelText);
-    assert((await panel.locator("tbody tr").count()) === 10, "비교 지표가 10개가 아님");
-    assert(panelText.includes("변경 회원 2명"), "배정 차이 회원 수가 다름");
-    await cmp.locator(".candidate-compare-close").click();
-    assert(!(await panel.isVisible()), "닫기를 눌러도 비교 패널이 남음");
-
-    // 모바일 폭에서는 긴 회원·지점명이나 넓은 표가 있어도 페이지 전체가 가로로 스크롤되지 않는다
-    // (넓은 시간표·비교 표는 각자의 래퍼 안에서만 스크롤).
-    const longState = JSON.parse(JSON.stringify(fixtureState));
-    longState.members.forEach((m) => (m.name = "아주긴회원이름".repeat(6) + m.name));
-    longState.locations.forEach((l) => (l.name = "아주긴지점이름ABCDEFGHIJKLMNOP".repeat(2) + l.name));
-    for (const width of [320, 360, 390]) {
-      const mob = await browser.newPage({ viewport: { width, height: 800 } });
-      await openWithSeed(mob, longState, site);
-      await mob.locator(".compare-candidate-btn").first().click();
-      const scrollWidth = await mob.evaluate(() => document.documentElement.scrollWidth);
-      assert(scrollWidth <= width, `${width}px 화면에서 페이지가 가로로 스크롤됨 (scrollWidth ${scrollWidth})`);
-      for (const t of await measureToasts(mob, TOAST_SAMPLES)) {
-        assert(t.left >= 0 && t.right <= width, `${width}px 화면에서 알림이 화면 밖으로 잘림 (${t.left}~${t.right}): ${t.message}`);
-        assert(t.overflow <= 0, `${width}px 화면에서 알림 문구가 줄바꿈되지 않고 넘침 (${t.overflow}px): ${t.message}`);
-        assert(t.pageScroll <= width, `${width}px 화면에서 알림 때문에 페이지가 가로로 스크롤됨 (scrollWidth ${t.pageScroll})`);
-      }
-      await mob.close();
-    }
-    // 데스크톱에서는 기존처럼 문구 길이만큼(최소 200px) 한 줄로 나온다.
-    const [shortToast, ...longToasts] = await measureToasts(cmp, TOAST_SAMPLES.slice(0, 3));
-    assert(shortToast.width === 200, `데스크톱 짧은 알림 폭이 최소 200px이 아님 (${shortToast.width})`);
-    for (const t of longToasts)
-      assert(t.width > 200 && t.height === shortToast.height, `데스크톱에서 알림이 문구 길이만큼 한 줄로 나오지 않음 (폭 ${t.width}, 높이 ${t.height}): ${t.message}`);
-
-    // 재최적화(5b-2b): 취소(카드 그대로) → L1 변경 최소화 제안(전체 자동 실행 없음) → 버리기 → 다시 → 전체 일정
-    // 다시 탐색(더 나은 결과는 기존 제안과 함께 비교) → 넓은 결과 적용(확정은 사용자 고정만) → 되돌리기 → 새로고침.
-    const openReoptPage = async (layout) => {
-      const page = await browser.newPage();
-      const log = [];
-      page.on("pageerror", (err) => failures.push("재최적화 페이지 런타임 에러: " + err.message));
-      page.on("console", (msg) => {
-        if (msg.type() === "error") failures.push("재최적화 콘솔 에러: " + msg.text());
-        if (msg.text().startsWith("[재최적화]")) log.push(JSON.parse(msg.text().slice("[재최적화] ".length)));
+    if (want("core")) {
+      await openWithSeed(page, buildSeedState(), site);
+      assert(!(await progressVisible()), "생성 전에 진행바(후보 탐색 0%)가 보임");
+      const shownOnStart = await page.evaluate(() => {
+        document.getElementById("generateBtn3").click();
+        const el = document.getElementById("generateProgressWrap3");
+        return window.getComputedStyle(el).display !== "none" && el.getBoundingClientRect().height > 0;
       });
-      const seed = buildReoptSeedState(layout);
-      await page.addInitScript((scale) => {
-        if (scale) window.__PT_TEST_BUDGET_SCALE__ = scale;
-      }, FULL_BUDGET_A ? 0 : A_BUDGET_SCALE);
-      await openWithSeed(page, seed, site);
-      return { page, log, seed };
-    };
-    const { page: ro, log: reoptLog, seed: reoptSeed } = await openReoptPage("default");
-    const editedCard = async () => (await readState(ro)).candidates[0];
-    const seedJson = JSON.stringify(reoptSeed.candidates[0].assigned.map((a) => a.id).sort());
-    const editedIds = async () => JSON.stringify((await editedCard()).assigned.map((a) => a.id).sort());
-    const reoptBtn = ro.locator("#candidates3 .reopt-btn");
-    const reoptPanel = ro.locator("#reoptimize3");
-    assert((await reoptBtn.count()) === 1, "수정 카드에 '나머지 일정 다시 최적화' 버튼이 없음");
-    const hintText = await ro.locator("#candidates3 .reopt-hint").innerText().catch(() => "");
-    assert(hintText.includes("유지할 수업 1개"), "유지할 수업 수 안내가 다름: " + hintText);
-    const waitIdle = (page = ro) =>
-      page.waitForFunction(() => !document.querySelector("#generateBtn3").disabled, null, { timeout: generateTimeout });
-    const levelsRun = (log) => log.filter((e) => e.event === "level").map((e) => e.level + "×" + e.budgetScale).join(",");
-    const eventOf = (log, event) => log.find((e) => e.event === event);
+      assert(shownOnStart, "생성을 시작했는데 진행바가 보이지 않음");
+      await page.waitForFunction(() => !document.querySelector("#generateBtn3").disabled, null, { timeout: generateTimeout });
+      assert(!(await progressVisible()), "생성이 끝났는데 진행바가 남음");
+      let state = await readState(page);
+      assert(
+        state && Array.isArray(state.candidates) && state.candidates.length > 0,
+        "그리디 후보 슬롯이 비어있음 (그리디 엔진 회귀 의심)"
+      );
+      assert(
+        state && state.schedule3Result && state.schedule3Result.candidateAList
+          && state.schedule3Result.candidateAList.some(Boolean),
+        "체인 DP 후보 슬롯이 비어있음 (체인DP 엔진 회귀 의심)"
+      );
+      const workerMessages = await page.evaluate(() => window.__PT_WORKER_MESSAGES__);
+      assert(
+        workerMessages > 0,
+        "후보 생성이 Web Worker를 쓰지 않음 (워커 생성·CSP·번들 회귀 의심)"
+      );
+      const cardTitles = () => page.locator("#candidates3 .candidate-title").allTextContents();
+      let titles = await cardTitles();
+      assert(
+        titles.length >= 1 && titles[0].startsWith("추천·균형"),
+        "첫 후보 카드가 '추천·균형'이 아님 (실제: " + JSON.stringify(titles) + ")"
+      );
+      assert(
+        (await page.locator("#candidateSummary3 tbody tr").count()) === 6,
+        "대표 후보 비교표가 6행이 아님"
+      );
+      const pageText = await page.locator("#pageSchedule3").innerText();
+      assert(!/후보\s?[ABC]/.test(pageText), "화면에 엔진 이름(후보A/B/C)이 노출됨");
 
-    await reoptBtn.click();
-    assert(await progressVisible(ro), "다시 최적화를 시작했는데 진행바가 보이지 않음");
-    await ro.click("#generateBtn3Cancel");
-    await waitIdle();
-    assert(!(await progressVisible(ro)), "다시 최적화를 취소했는데 진행바가 남음");
-    assert(eventOf(reoptLog, "abort")?.reason === "cancelled", "취소가 계측에 남지 않음: " + JSON.stringify(reoptLog));
-    assert(!(await reoptPanel.isVisible()), "재최적화를 취소했는데 제안이 나타남");
-    assert((await editedIds()) === seedJson, "재최적화 취소 뒤 카드가 바뀜");
+      // 수업 블록을 눌러 확정하면 그 후보는 '내가 수정한 후보'가 되고, 다시 생성해도 지워지지 않는다.
+      // 블록은 드래그 가능해서 Playwright의 포인터 클릭이 드래그 처리와 엉킨다(메뉴가 열렸다가
+      // 다시 그려짐). 메뉴 동작만 확인하면 되므로 DOM click 이벤트로 연다.
+      await page.locator("#candidates3 .cal-block.clickable").first().evaluate((el) => el.click());
+      await page
+        .locator(".block-context-menu-item", { hasText: "확정" })
+        .first()
+        .evaluate((el) => el.click());
+      titles = await cardTitles();
+      assert(
+        titles.includes("내가 수정한 후보"),
+        "확정한 후보가 '내가 수정한 후보'로 바뀌지 않음 (실제: " + JSON.stringify(titles) + ")"
+      );
+      await clickGenerateAndWait(page, "#generateBtn3", generateTimeout);
+      titles = await cardTitles();
+      assert(
+        titles.includes("내가 수정한 후보"),
+        "다시 생성한 뒤 '내가 수정한 후보'가 사라짐 (실제: " + JSON.stringify(titles) + ")"
+      );
+      // 생성 중에 다시 그려진 카드의 재최적화 버튼은 생성이 끝나면 다시 눌러져야 한다.
+      const reoptDisabled = await page.locator("#candidates3 .reopt-btn").evaluateAll((bs) => bs.map((b) => b.disabled));
+      assert(
+        reoptDisabled.length > 0 && reoptDisabled.every((d) => !d),
+        "다시 생성한 뒤 '나머지 일정 다시 최적화' 버튼이 비활성으로 남음: " + JSON.stringify(reoptDisabled)
+      );
 
-    reoptLog.length = 0;
-    await reoptBtn.click();
-    await waitIdle();
-    const proposalText = (await reoptPanel.isVisible()) ? await reoptPanel.innerText() : "";
-    assert(proposalText.includes("변경 최소화 제안"), "변경 최소화 제안 패널이 나타나지 않음: " + (await ro.locator("#generateHint3").innerText()) + " / " + levelsRun(reoptLog));
-    assert(levelsRun(reoptLog) === "L1×0.1", "L1에서 개선을 찾았으면 그 Level에서 멈춰야 함(전체 자동 실행 금지): " + levelsRun(reoptLog));
-    // 시드는 저장 데이터로 넣었으므로 되돌리기 기록이 없다 — "이동 없음"이 아니라 "기록 없음"으로 남아야 한다.
-    const l1 = eventOf(reoptLog, "level");
-    assert(
-      l1.mode === "first" && l1.status === "improved" && l1.changedMembers === 1 && l1.changedSessions === 1 &&
-        l1.originStatus === "no-history" && l1.originCount === 0 && typeof l1.ms === "number" && l1.source,
-      "L1 계측(mode·변경 회원/세션·원래 위치 상태·시간·엔진)이 다름: " + JSON.stringify(l1)
-    );
-    assert(proposalText.includes("유지할 수업 1개") && proposalText.includes("고정한 수업 바로 앞뒤 범위"), "제안에 유지할 수업 수·범위가 없음");
-    assert(proposalText.includes("가장 좋은 일정이라는 뜻은 아닙니다"), "변경 최소화 제안이 최선이 아님을 알리지 않음");
-    assert(/좋아지는 것\s*빈 시간 -\d+분/.test(proposalText), "제안 요약에 빈 시간 개선이 없음: " + proposalText);
-    assert(proposalText.includes("나빠지는 것"), "제안 요약에 나빠지는 것 줄이 없음");
-    assert((await reoptPanel.locator("tbody tr").count()) === 10, "제안 지표가 10개가 아님");
-    assert(/회원 1명\(수업 1개\)의 일정이 바뀝니다/.test(proposalText) && proposalText.includes("배정 차이"), "변경 회원·세션 수·상세가 없음");
-    // L2·L3 범위는 전체와 같아 국소로 다시 돌리지 않으므로 다음 단계는 전체 탐색이다.
-    assert((await reoptPanel.locator(".reopt-widen").innerText()) === "전체 일정 다시 탐색", "다음 단계 버튼이 전체 일정 다시 탐색이 아님");
-    assert((await editedIds()) === seedJson, "제안을 보여주기만 했는데 카드가 바뀜");
+      // strict style CSP에서 html2canvas 캡처 경로도 실제로 동작하는지 확인한다.
+      // 후보 생성 직후 첫 카드의 이미지 저장 버튼을 눌러 다운로드 완료까지 기다린다.
+      const imageSaveBtn = page
+        .locator('button[aria-label="이미지로 저장"]')
+        .first();
+      if (await imageSaveBtn.count()) {
+        const downloadPromise = page.waitForEvent("download", { timeout: 15000 });
+        await imageSaveBtn.click();
+        await downloadPromise;
+      } else {
+        failures.push("이미지 저장 버튼을 찾지 못함");
+      }
 
-    await ro.setViewportSize({ width: 320, height: 800 });
-    const reoptScroll = await ro.evaluate(() => document.documentElement.scrollWidth);
-    assert(reoptScroll <= 320, `320px 화면에서 재최적화 제안 때문에 페이지가 가로로 스크롤됨 (scrollWidth ${reoptScroll})`);
-    if (process.env.SMOKE_SHOT_DIR) {
-      await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-320.png") });
-      await ro.setViewportSize({ width: 1280, height: 900 });
-      await ro.locator("#candidates3 .candidate-card").first().screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-card.png") });
-      await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-desktop.png") });
-    }
-    await ro.setViewportSize({ width: 1280, height: 720 });
-    await ro.click("#reoptimize3 .reopt-discard");
-    assert(eventOf(reoptLog, "discard")?.widened === 0, "버리기가 계측에 남지 않음: " + JSON.stringify(reoptLog));
-    assert(!(await reoptPanel.isVisible()), "버리기 뒤에도 제안 패널이 남음");
-    assert((await editedIds()) === seedJson, "버리기 뒤 카드가 바뀜");
+      // 새로고침 후에도 데이터와 생성 결과가 유지되는지(localStorage 로드 경로 회귀 확인)
+      await reloadChecked(page, "생성 결과 새로고침", failures);
+      await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+      assert(!(await progressVisible()), "새로고침 후 진행바가 보임");
+      const reloadedMemberCount = await page.evaluate((key) => {
+        const raw = localStorage.getItem(key);
+        return raw ? JSON.parse(raw).members.length : -1;
+      }, STORAGE_KEY);
+      assert(reloadedMemberCount === 1, "새로고침 후 회원 데이터가 유지되지 않음");
+      titles = await cardTitles();
+      assert(
+        titles.includes("내가 수정한 후보"),
+        "새로고침 후 '내가 수정한 후보'가 유지되지 않음 (실제: " + JSON.stringify(titles) + ")"
+      );
 
-    reoptLog.length = 0;
-    await reoptBtn.click();
-    await waitIdle();
-    await ro.click("#reoptimize3 .reopt-widen");
-    await waitIdle();
-    assert(levelsRun(reoptLog) === "L1×0.1,full×1", "전체 탐색은 버튼을 눌렀을 때 운영 예산으로 한 번만 돌아야 함: " + levelsRun(reoptLog));
-    const choices = reoptPanel.locator(".reopt-choice");
-    const widerText = (await reoptPanel.isVisible()) ? await reoptPanel.innerText() : "";
-    assert((await choices.count()) === 2, "더 넓게 찾은 더 나은 결과와 변경 최소화 제안을 함께 보여주지 않음: " + widerText);
-    assert((await choices.first().getAttribute("aria-pressed")) === "true", "더 넓은 결과가 변경 최소화 제안 선택을 자동으로 덮어씀");
-    assert(widerText.includes("변경 최소화 제안과 더 넓은 탐색 결과 비교") && widerText.includes("두 제안의 배정 차이"), "두 제안 비교가 없음");
-    assert((await reoptPanel.locator(".reopt-widen").count()) === 0, "전체 탐색 뒤에도 더 넓게 찾기 버튼이 남음");
-    assert((await editedIds()) === seedJson, "더 넓게 찾기만 했는데 카드가 바뀜");
-    if (process.env.SMOKE_SHOT_DIR) await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-compare.png") });
-    await choices.nth(1).click();
-    await ro.click("#reoptimize3 .reopt-apply");
-    const applyEvent = eventOf(reoptLog, "apply");
-    assert(
-      reoptLog.filter((e) => e.event === "level").map((e) => e.mode).join(",") === "first,widen" &&
-        JSON.stringify(applyEvent && [applyEvent.level, applyEvent.kind, applyEvent.proposalIndex, applyEvent.proposalLevels, applyEvent.widened]) ===
-          JSON.stringify(["full", "full", 1, ["L1", "full"], 1]),
-      "적용 계측(넓히기 사용·적용한 제안 종류·제안 목록)이 다름: " + JSON.stringify(reoptLog)
-    );
-    let applied = await editedCard();
-    assert((await editedIds()) !== seedJson, "적용했는데 카드가 그대로임");
-    assert(
-      applied.assigned.some((a) => a.id === "A_12" && a.locationId === "loc1") &&
-        JSON.stringify(applied.confirmedIds) === JSON.stringify(["A_12"]),
-      "적용 뒤 유지할 수업(A 14:00)만 확정 상태여야 함(임시 고정 제외): " + JSON.stringify(applied)
-    );
-    assert(!(await reoptPanel.isVisible()), "적용 뒤에도 제안 패널이 남음");
-    const undoBtn = ro.locator('#candidates3 button[aria-label="편집 취소"]');
-    if (await undoBtn.isEnabled()) await undoBtn.click();
-    else failures.push("적용 뒤 편집 취소(되돌리기) 버튼이 비활성");
-    assert((await editedIds()) === seedJson, "되돌리기로 재최적화 전 카드가 복원되지 않음");
-    await reloadChecked(ro, "재최적화 되돌리기 뒤 새로고침", failures);
-    await ro.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
-    assert((await editedIds()) === seedJson, "되돌린 카드가 새로고침 뒤 유지되지 않음");
+      // 회원관리 페이지가 정상적으로 회원 1명을 렌더링하는지(페이지 전환 + 렌더링 회귀 확인)
+      await page.click('.nav-item[data-page="members"]');
+      await page.waitForSelector("#pageMembers.active", { timeout: 5000 });
+      const memberRowCount = await page.locator("#memberTableBody tr").count();
+      assert(memberRowCount === 1, "회원관리 표에 회원이 정상적으로 표시되지 않음 (실제: " + memberRowCount + "행)");
 
-    // 국소 범위에서 모두 실패: 전체 탐색을 자동으로 시작하지 않고 안내 + 전체 일정 다시 탐색 버튼만 보인다.
-    const { page: tp, log: tightLog } = await openReoptPage("tight");
-    const tightPanel = tp.locator("#reoptimize3");
-    await tp.click("#candidates3 .reopt-btn");
-    await waitIdle(tp);
-    const tightText = (await tightPanel.isVisible()) ? await tightPanel.innerText() : "";
-    assert(tightText.includes("변경 범위를 제한한 탐색에서는 더 나은 일정을 찾지 못했습니다."), "국소 실패 안내가 없음: " + tightText);
-    assert(!levelsRun(tightLog).includes("full"), "국소 실패 뒤 전체 탐색이 자동으로 시작됨: " + levelsRun(tightLog));
-    assert((await tightPanel.locator(".reopt-apply").count()) === 0, "제안이 없는데 적용 버튼이 있음");
-    if (process.env.SMOKE_SHOT_DIR) await tightPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-local-exhausted.png") });
-    await tp.click("#reoptimize3 .reopt-widen");
-    await waitIdle(tp);
-    assert(levelsRun(tightLog).endsWith("full×1"), "전체 일정 다시 탐색이 운영 예산으로 돌지 않음: " + levelsRun(tightLog));
-    assert(!(await tightPanel.isVisible()), "전체 탐색에서도 나은 결과가 없으면 패널을 닫아야 함");
-    assert((await tp.locator("#generateHint3").innerText()).includes("지금보다 나은 배치를 찾지 못했습니다"), "전체 탐색 실패 안내가 없음");
+      // 신청이 바뀌면(전체 스케줄 초기화) 새로고침을 거쳐도 '내가 수정한 후보'까지 비워진다. 예전에는
+      // 런타임 플래그로만 표시해서 새로고침하면 플래그가 사라지고 옛 수정 후보가 남았다.
+      await page.click('.nav-item[data-page="memberSchedule"]');
+      page.once("dialog", (d) => d.accept());
+      await page.click("#resetAllSchedulesBtn");
+      await reloadChecked(page, "신청 변경 뒤 새로고침", failures);
+      await page.click('.nav-item[data-page="schedule3"]');
+      await page.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+      titles = await cardTitles();
+      assert(
+        titles.length === 0,
+        "신청이 바뀐 뒤 새로고침하자 옛 후보가 남음 (실제: " + JSON.stringify(titles) + ")"
+      );
+      const staleHint = await page.locator("#generateHint3").innerText();
+      assert(staleHint.includes("회원·신청·설정이 변경되어") && !staleHint.includes("필수 조건"), "입력 변경 안내가 다름: " + staleHint);
+      // 시작 전 입력 검증에서 멈추면(신청 없음) 진행바를 띄우지 않는다.
+      await page.click("#generateBtn3");
+      assert((await page.locator("#generateHint3").innerText()).includes("가능 시간을 등록"), "신청이 없을 때 안내가 다름");
+      assert(!(await progressVisible()), "입력 검증에서 멈췄는데 진행바가 보임");
 
-    // 수동 편집·설정 입력의 화면 연결(판정 정책 자체는 unit이 맡는다): 드래그를 놓으면 근무 시간 검사가 적용되고,
-    // 메뉴로 회원을 교체하면 카드의 미배정 표시가 바뀌고, 입력칸·선택창은 보정된 값을 보여준다.
-    const me = await browser.newPage();
-    const meOpen = await openManualEditPage(me, site, failures);
-    const meCard = async () => (await readState(me)).candidates[0];
-    const toastTexts = () => me.locator(".toast").allTextContents();
-    const assignedBefore = JSON.stringify((await meCard()).assigned);
-    await me
-      .locator("#candidates3 .cal-block", { hasText: "회원A" })
-      .first()
-      .dragTo(me.locator('#candidates3 .cal-cell[data-day="1"][data-slot="0"]'));
-    assert(JSON.stringify((await meCard()).assigned) === assignedBefore, "근무하지 않는 화요일로 드래그한 수업이 옮겨짐");
-    assert((await toastTexts()).some((t) => t.includes("근무 가능 시간 밖")), "근무 시간 밖 드래그에 안내가 없음: " + JSON.stringify(await toastTexts()));
-    await checkSwapReload(me, meOpen, "http-1", failures);
-    await me.click('.nav-item[data-page="settings"]');
-    const travelInput = me.locator(".travel-min-input").first();
-    await travelInput.fill("");
-    await travelInput.dispatchEvent("change");
-    assert((await travelInput.inputValue()) === "30" && (await readState(me)).travelTimes["loc1|loc2"] === 30, "이동 시간 빈칸이 원래 값(30분)으로 되돌아가지 않음");
-    await travelInput.fill("0");
-    await travelInput.dispatchEvent("change");
-    assert((await readState(me)).travelTimes["loc1|loc2"] === 0, "이동 시간 0을 입력했는데 0분으로 저장되지 않음");
-    const monSelects = me.locator(".avail-day-row").first().locator("select");
-    await monSelects.nth(0).selectOption("33"); // 17:30
-    await monSelects.nth(1).selectOption("30"); // 17:00
-    const endShown = await monSelects.nth(1).evaluate((sel) => (sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : ""));
-    assert(endShown === "18:00", "근무 종료를 시작보다 이르게 고르면 선택창이 18:00을 보여야 함 (실제: '" + endShown + "')");
-    await me.close();
-    // 새 컨텍스트의 첫 문서에서 저장 → 새로고침하는 조건을 반복한다(CI에서 간헐적으로 저장소가 비어 있던 단계).
-    for (let i = 2; i <= SWAP_REPEAT; i++) {
-      const rp = await browser.newPage();
-      await checkSwapReload(rp, await openManualEditPage(rp, site, failures), "http-" + i, failures);
-      await rp.close();
+      // 붙여넣기 미리보기: 신규 회원일 때만 지점·구분 드롭다운을 보이고, 기존 회원·건너뛰기에서는 숨긴다(여러 번 바꿔도).
+      await page.click('.nav-item[data-page="memberSchedule"]');
+      await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+      await page.click("#bulkImportOpenBtn"); // 신청이 비어 있어 확인 창 없이 바로 열린다
+      await page.fill("#bulkImportTextarea", "테스터 x\n새회원 x");
+      await page.click("#bulkImportPreviewBtn");
+      const rowSelect = page.locator(".bulk-preview-row").nth(0).locator(".bulk-preview-row-head > select");
+      const rowFields = (i) => page.locator(".bulk-preview-row").nth(i).locator(".bulk-preview-new-fields");
+      assert(!(await rowFields(0).isVisible()), "기존 회원 줄에 신규 회원용 지점·구분 드롭다운이 보임");
+      assert(await rowFields(1).isVisible(), "신규 회원 줄에 지점·구분 드롭다운이 보이지 않음");
+      for (const [choice, visible] of [["__new__", true], ["__skip__", false], ["mem1", false], ["__new__", true], ["mem1", false]]) {
+        await rowSelect.selectOption(choice);
+        assert((await rowFields(0).isVisible()) === visible, `미리보기 선택 ${choice}에서 지점·구분 드롭다운 표시가 ${visible ? "보여야" : "숨겨야"} 함`);
+      }
+      await page.click("#bulkImportCloseBtn");
+
+      const cspViolations = await page.evaluate(() => window.__PT_CSP_VIOLATIONS__ || []);
+      assert(
+        cspViolations.length === 0,
+        "CSP 위반 발생: " + JSON.stringify(cspViolations),
+      );
     }
 
-    // inputKey가 없는 옛 저장분에 정상 수정·확정 후보와 근무 시간 위반 후보(근무 안 하는 화요일)가 섞여 있으면
-    // 위반 후보만 비우고, 정상 후보는 확정 상태 그대로 새로고침 뒤에도 남는다. 안내는 입력 변경이 아니라 필수 조건 위반이다.
-    const lg = await browser.newPage();
-    lg.on("pageerror", (err) => failures.push("옛 저장분 페이지 런타임 에러: " + err.message));
-    const lgSeed = buildManualEditSeedState();
-    const lgAt = (day) => ({ id: "A" + day + "_0", memberId: "A", day, startSlot: 0, duration: 60, locationId: "loc1" });
-    const lgMemberB = lgSeed.members[1];
-    lgSeed.schedule3Result = { candidateAList: [{ assigned: [lgAt(0), lgAt(2)], unassignedMembers: [lgMemberB], confirmedIds: ["A0_0"] }, null, null] };
-    lgSeed.candidates = [{ assigned: [lgAt(0), lgAt(1)], unassignedMembers: [lgMemberB], confirmedIds: ["A1_0"], strategyIndex: 0 }];
-    await openWithSeed(lg, lgSeed, site);
-    const lgHint = await lg.locator("#generateHint3").innerText();
-    assert(lgHint.includes("필수 조건(근무 가능 시간에만 배정한다)을 어긴 후보 1개만") && !lgHint.includes("변경되어"), "옛 저장분 위반 안내가 다름: " + lgHint);
-    for (const when of ["로드 직후", "새로고침 후"]) {
-      const st = await readState(lg);
-      const kept = st.schedule3Result.candidateAList[0];
-      assert(st.candidates.length === 0 && kept && JSON.stringify(kept.confirmedIds) === JSON.stringify(["A0_0"]), when + ": 위반 후보만 비우고 정상 확정 후보를 남겨야 함: " + JSON.stringify(st.schedule3Result) + JSON.stringify(st.candidates));
-      assert(typeof st.schedule3Result.inputKey === "string", when + ": 현재 입력 키가 저장되지 않음");
-      assert((await lg.locator("#candidates3 .candidate-card").count()) === 1, when + ": 정상 후보 카드가 보이지 않음");
-      if (when === "로드 직후") {
-        await reloadChecked(lg, "옛 저장분 새로고침", failures);
-        await lg.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+    if (want("compare")) {
+      // 후보 비교: 골든 CASE-09 생성 결과(추천 + 공강 최소)를 넣고 '추천안과 비교'를 연다. 이 저장
+      // 상태에는 inputKey가 없어 기존 저장분 경로(하드 제약 재검사 후 인정)도 함께 지난다.
+      const cmp = await browser.newPage();
+      // 둘째 배치(수업 -1·빈 시간 -60분)는 공강이 0분이 아니라 어느 대표 조건에도 들지 않으므로, 확정 표시를 붙여
+      // '내가 수정한 후보'로 비교한다(대표 조건 판정은 unit 테스트가 본다).
+      const fixtureState = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "compare-CASE-09.state.json"), "utf8"));
+      fixtureState.candidates[0].confirmedIds = [fixtureState.candidates[0].assigned[1].id];
+      await openWithSeed(cmp, JSON.stringify(fixtureState), site);
+      const cmpTitles = await cmp.locator("#candidates3 .candidate-title").allTextContents();
+      assert(
+        JSON.stringify(cmpTitles) === JSON.stringify(["추천·균형 · 수업 수 우선·공강 허용", "내가 수정한 후보"]),
+        "비교용 저장 상태의 카드가 다름 (실제: " + JSON.stringify(cmpTitles) + ")"
+      );
+      await cmp.locator(".compare-candidate-btn").first().click();
+      const panel = cmp.locator("#candidateCompare3");
+      const panelText = (await panel.isVisible()) ? await panel.innerText() : "";
+      assert(panelText.includes("빈 시간 -60분 / 체류 시간 -120분 대신 수업 -1"), "비교 요약 문장이 다름: " + panelText);
+      assert((await panel.locator("tbody tr").count()) === 10, "비교 지표가 10개가 아님");
+      assert(panelText.includes("변경 회원 2명"), "배정 차이 회원 수가 다름");
+      await cmp.locator(".candidate-compare-close").click();
+      assert(!(await panel.isVisible()), "닫기를 눌러도 비교 패널이 남음");
+
+      // 모바일 폭에서는 긴 회원·지점명이나 넓은 표가 있어도 페이지 전체가 가로로 스크롤되지 않는다
+      // (넓은 시간표·비교 표는 각자의 래퍼 안에서만 스크롤).
+      const longState = JSON.parse(JSON.stringify(fixtureState));
+      longState.members.forEach((m) => (m.name = "아주긴회원이름".repeat(6) + m.name));
+      longState.locations.forEach((l) => (l.name = "아주긴지점이름ABCDEFGHIJKLMNOP".repeat(2) + l.name));
+      for (const width of [320, 360, 390]) {
+        const mob = await browser.newPage({ viewport: { width, height: 800 } });
+        await openWithSeed(mob, longState, site);
+        await mob.locator(".compare-candidate-btn").first().click();
+        const scrollWidth = await mob.evaluate(() => document.documentElement.scrollWidth);
+        assert(scrollWidth <= width, `${width}px 화면에서 페이지가 가로로 스크롤됨 (scrollWidth ${scrollWidth})`);
+        for (const t of await measureToasts(mob, TOAST_SAMPLES)) {
+          assert(t.left >= 0 && t.right <= width, `${width}px 화면에서 알림이 화면 밖으로 잘림 (${t.left}~${t.right}): ${t.message}`);
+          assert(t.overflow <= 0, `${width}px 화면에서 알림 문구가 줄바꿈되지 않고 넘침 (${t.overflow}px): ${t.message}`);
+          assert(t.pageScroll <= width, `${width}px 화면에서 알림 때문에 페이지가 가로로 스크롤됨 (scrollWidth ${t.pageScroll})`);
+        }
+        await mob.close();
+      }
+      // 데스크톱에서는 기존처럼 문구 길이만큼(최소 200px) 한 줄로 나온다.
+      const [shortToast, ...longToasts] = await measureToasts(cmp, TOAST_SAMPLES.slice(0, 3));
+      assert(shortToast.width === 200, `데스크톱 짧은 알림 폭이 최소 200px이 아님 (${shortToast.width})`);
+      for (const t of longToasts)
+        assert(t.width > 200 && t.height === shortToast.height, `데스크톱에서 알림이 문구 길이만큼 한 줄로 나오지 않음 (폭 ${t.width}, 높이 ${t.height}): ${t.message}`);
+    }
+
+    if (want("reopt")) {
+      // 재최적화(5b-2b): 취소(카드 그대로) → L1 변경 최소화 제안(전체 자동 실행 없음) → 버리기 → 다시 → 전체 일정
+      // 다시 탐색(더 나은 결과는 기존 제안과 함께 비교) → 넓은 결과 적용(확정은 사용자 고정만) → 되돌리기 → 새로고침.
+      const openReoptPage = async (layout) => {
+        const page = await browser.newPage();
+        const log = [];
+        page.on("pageerror", (err) => failures.push("재최적화 페이지 런타임 에러: " + err.message));
+        page.on("console", (msg) => {
+          if (msg.type() === "error") failures.push("재최적화 콘솔 에러: " + msg.text());
+          if (msg.text().startsWith("[재최적화]")) log.push(JSON.parse(msg.text().slice("[재최적화] ".length)));
+        });
+        const seed = buildReoptSeedState(layout);
+        await page.addInitScript((scale) => {
+          if (scale) window.__PT_TEST_BUDGET_SCALE__ = scale;
+        }, FULL_BUDGET_A ? 0 : A_BUDGET_SCALE);
+        await openWithSeed(page, seed, site);
+        return { page, log, seed };
+      };
+      const { page: ro, log: reoptLog, seed: reoptSeed } = await openReoptPage("default");
+      const editedCard = async () => (await readState(ro)).candidates[0];
+      const seedJson = JSON.stringify(reoptSeed.candidates[0].assigned.map((a) => a.id).sort());
+      const editedIds = async () => JSON.stringify((await editedCard()).assigned.map((a) => a.id).sort());
+      const reoptBtn = ro.locator("#candidates3 .reopt-btn");
+      const reoptPanel = ro.locator("#reoptimize3");
+      assert((await reoptBtn.count()) === 1, "수정 카드에 '나머지 일정 다시 최적화' 버튼이 없음");
+      const hintText = await ro.locator("#candidates3 .reopt-hint").innerText().catch(() => "");
+      assert(hintText.includes("유지할 수업 1개"), "유지할 수업 수 안내가 다름: " + hintText);
+      const waitIdle = (page = ro) =>
+        page.waitForFunction(() => !document.querySelector("#generateBtn3").disabled, null, { timeout: generateTimeout });
+      const levelsRun = (log) => log.filter((e) => e.event === "level").map((e) => e.level + "×" + e.budgetScale).join(",");
+      const eventOf = (log, event) => log.find((e) => e.event === event);
+
+      await reoptBtn.click();
+      assert(await progressVisible(ro), "다시 최적화를 시작했는데 진행바가 보이지 않음");
+      await ro.click("#generateBtn3Cancel");
+      await waitIdle();
+      assert(!(await progressVisible(ro)), "다시 최적화를 취소했는데 진행바가 남음");
+      assert(eventOf(reoptLog, "abort")?.reason === "cancelled", "취소가 계측에 남지 않음: " + JSON.stringify(reoptLog));
+      assert(!(await reoptPanel.isVisible()), "재최적화를 취소했는데 제안이 나타남");
+      assert((await editedIds()) === seedJson, "재최적화 취소 뒤 카드가 바뀜");
+
+      reoptLog.length = 0;
+      await reoptBtn.click();
+      await waitIdle();
+      const proposalText = (await reoptPanel.isVisible()) ? await reoptPanel.innerText() : "";
+      assert(proposalText.includes("변경 최소화 제안"), "변경 최소화 제안 패널이 나타나지 않음: " + (await ro.locator("#generateHint3").innerText()) + " / " + levelsRun(reoptLog));
+      assert(levelsRun(reoptLog) === "L1×0.1", "L1에서 개선을 찾았으면 그 Level에서 멈춰야 함(전체 자동 실행 금지): " + levelsRun(reoptLog));
+      // 시드는 저장 데이터로 넣었으므로 되돌리기 기록이 없다 — "이동 없음"이 아니라 "기록 없음"으로 남아야 한다.
+      const l1 = eventOf(reoptLog, "level");
+      assert(
+        l1.mode === "first" && l1.status === "improved" && l1.changedMembers === 1 && l1.changedSessions === 1 &&
+          l1.originStatus === "no-history" && l1.originCount === 0 && typeof l1.ms === "number" && l1.source,
+        "L1 계측(mode·변경 회원/세션·원래 위치 상태·시간·엔진)이 다름: " + JSON.stringify(l1)
+      );
+      assert(proposalText.includes("유지할 수업 1개") && proposalText.includes("고정한 수업 바로 앞뒤 범위"), "제안에 유지할 수업 수·범위가 없음");
+      assert(proposalText.includes("가장 좋은 일정이라는 뜻은 아닙니다"), "변경 최소화 제안이 최선이 아님을 알리지 않음");
+      assert(/좋아지는 것\s*빈 시간 -\d+분/.test(proposalText), "제안 요약에 빈 시간 개선이 없음: " + proposalText);
+      assert(proposalText.includes("나빠지는 것"), "제안 요약에 나빠지는 것 줄이 없음");
+      assert((await reoptPanel.locator("tbody tr").count()) === 10, "제안 지표가 10개가 아님");
+      assert(/회원 1명\(수업 1개\)의 일정이 바뀝니다/.test(proposalText) && proposalText.includes("배정 차이"), "변경 회원·세션 수·상세가 없음");
+      // L2·L3 범위는 전체와 같아 국소로 다시 돌리지 않으므로 다음 단계는 전체 탐색이다.
+      assert((await reoptPanel.locator(".reopt-widen").innerText()) === "전체 일정 다시 탐색", "다음 단계 버튼이 전체 일정 다시 탐색이 아님");
+      assert((await editedIds()) === seedJson, "제안을 보여주기만 했는데 카드가 바뀜");
+
+      await ro.setViewportSize({ width: 320, height: 800 });
+      const reoptScroll = await ro.evaluate(() => document.documentElement.scrollWidth);
+      assert(reoptScroll <= 320, `320px 화면에서 재최적화 제안 때문에 페이지가 가로로 스크롤됨 (scrollWidth ${reoptScroll})`);
+      if (process.env.SMOKE_SHOT_DIR) {
+        await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-320.png") });
+        await ro.setViewportSize({ width: 1280, height: 900 });
+        await ro.locator("#candidates3 .candidate-card").first().screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-card.png") });
+        await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-desktop.png") });
+      }
+      await ro.setViewportSize({ width: 1280, height: 720 });
+      await ro.click("#reoptimize3 .reopt-discard");
+      assert(eventOf(reoptLog, "discard")?.widened === 0, "버리기가 계측에 남지 않음: " + JSON.stringify(reoptLog));
+      assert(!(await reoptPanel.isVisible()), "버리기 뒤에도 제안 패널이 남음");
+      assert((await editedIds()) === seedJson, "버리기 뒤 카드가 바뀜");
+
+      reoptLog.length = 0;
+      await reoptBtn.click();
+      await waitIdle();
+      await ro.click("#reoptimize3 .reopt-widen");
+      await waitIdle();
+      assert(levelsRun(reoptLog) === "L1×0.1,full×1", "전체 탐색은 버튼을 눌렀을 때 운영 예산으로 한 번만 돌아야 함: " + levelsRun(reoptLog));
+      const choices = reoptPanel.locator(".reopt-choice");
+      const widerText = (await reoptPanel.isVisible()) ? await reoptPanel.innerText() : "";
+      assert((await choices.count()) === 2, "더 넓게 찾은 더 나은 결과와 변경 최소화 제안을 함께 보여주지 않음: " + widerText);
+      assert((await choices.first().getAttribute("aria-pressed")) === "true", "더 넓은 결과가 변경 최소화 제안 선택을 자동으로 덮어씀");
+      assert(widerText.includes("변경 최소화 제안과 더 넓은 탐색 결과 비교") && widerText.includes("두 제안의 배정 차이"), "두 제안 비교가 없음");
+      assert((await reoptPanel.locator(".reopt-widen").count()) === 0, "전체 탐색 뒤에도 더 넓게 찾기 버튼이 남음");
+      assert((await editedIds()) === seedJson, "더 넓게 찾기만 했는데 카드가 바뀜");
+      if (process.env.SMOKE_SHOT_DIR) await reoptPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-compare.png") });
+      await choices.nth(1).click();
+      await ro.click("#reoptimize3 .reopt-apply");
+      const applyEvent = eventOf(reoptLog, "apply");
+      assert(
+        reoptLog.filter((e) => e.event === "level").map((e) => e.mode).join(",") === "first,widen" &&
+          JSON.stringify(applyEvent && [applyEvent.level, applyEvent.kind, applyEvent.proposalIndex, applyEvent.proposalLevels, applyEvent.widened]) ===
+            JSON.stringify(["full", "full", 1, ["L1", "full"], 1]),
+        "적용 계측(넓히기 사용·적용한 제안 종류·제안 목록)이 다름: " + JSON.stringify(reoptLog)
+      );
+      let applied = await editedCard();
+      assert((await editedIds()) !== seedJson, "적용했는데 카드가 그대로임");
+      assert(
+        applied.assigned.some((a) => a.id === "A_12" && a.locationId === "loc1") &&
+          JSON.stringify(applied.confirmedIds) === JSON.stringify(["A_12"]),
+        "적용 뒤 유지할 수업(A 14:00)만 확정 상태여야 함(임시 고정 제외): " + JSON.stringify(applied)
+      );
+      assert(!(await reoptPanel.isVisible()), "적용 뒤에도 제안 패널이 남음");
+      const undoBtn = ro.locator('#candidates3 button[aria-label="편집 취소"]');
+      if (await undoBtn.isEnabled()) await undoBtn.click();
+      else failures.push("적용 뒤 편집 취소(되돌리기) 버튼이 비활성");
+      assert((await editedIds()) === seedJson, "되돌리기로 재최적화 전 카드가 복원되지 않음");
+      await reloadChecked(ro, "재최적화 되돌리기 뒤 새로고침", failures);
+      await ro.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+      assert((await editedIds()) === seedJson, "되돌린 카드가 새로고침 뒤 유지되지 않음");
+
+      // 국소 범위에서 모두 실패: 전체 탐색을 자동으로 시작하지 않고 안내 + 전체 일정 다시 탐색 버튼만 보인다.
+      const { page: tp, log: tightLog } = await openReoptPage("tight");
+      const tightPanel = tp.locator("#reoptimize3");
+      await tp.click("#candidates3 .reopt-btn");
+      await waitIdle(tp);
+      const tightText = (await tightPanel.isVisible()) ? await tightPanel.innerText() : "";
+      assert(tightText.includes("변경 범위를 제한한 탐색에서는 더 나은 일정을 찾지 못했습니다."), "국소 실패 안내가 없음: " + tightText);
+      assert(!levelsRun(tightLog).includes("full"), "국소 실패 뒤 전체 탐색이 자동으로 시작됨: " + levelsRun(tightLog));
+      assert((await tightPanel.locator(".reopt-apply").count()) === 0, "제안이 없는데 적용 버튼이 있음");
+      if (process.env.SMOKE_SHOT_DIR) await tightPanel.screenshot({ path: path.join(process.env.SMOKE_SHOT_DIR, "reopt-local-exhausted.png") });
+      await tp.click("#reoptimize3 .reopt-widen");
+      await waitIdle(tp);
+      assert(levelsRun(tightLog).endsWith("full×1"), "전체 일정 다시 탐색이 운영 예산으로 돌지 않음: " + levelsRun(tightLog));
+      assert(!(await tightPanel.isVisible()), "전체 탐색에서도 나은 결과가 없으면 패널을 닫아야 함");
+      assert((await tp.locator("#generateHint3").innerText()).includes("지금보다 나은 배치를 찾지 못했습니다"), "전체 탐색 실패 안내가 없음");
+    }
+
+    if (want("manual-edit")) {
+      // 수동 편집·설정 입력의 화면 연결(판정 정책 자체는 unit이 맡는다): 드래그를 놓으면 근무 시간 검사가 적용되고,
+      // 메뉴로 회원을 교체하면 카드의 미배정 표시가 바뀌고, 입력칸·선택창은 보정된 값을 보여준다.
+      const me = await browser.newPage();
+      const meOpen = await openManualEditPage(me, site, failures);
+      const meCard = async () => (await readState(me)).candidates[0];
+      const toastTexts = () => me.locator(".toast").allTextContents();
+      const assignedBefore = JSON.stringify((await meCard()).assigned);
+      await me
+        .locator("#candidates3 .cal-block", { hasText: "회원A" })
+        .first()
+        .dragTo(me.locator('#candidates3 .cal-cell[data-day="1"][data-slot="0"]'));
+      assert(JSON.stringify((await meCard()).assigned) === assignedBefore, "근무하지 않는 화요일로 드래그한 수업이 옮겨짐");
+      assert((await toastTexts()).some((t) => t.includes("근무 가능 시간 밖")), "근무 시간 밖 드래그에 안내가 없음: " + JSON.stringify(await toastTexts()));
+      await checkSwapReload(me, meOpen, "http-1", failures);
+      await me.click('.nav-item[data-page="settings"]');
+      const travelInput = me.locator(".travel-min-input").first();
+      await travelInput.fill("");
+      await travelInput.dispatchEvent("change");
+      assert((await travelInput.inputValue()) === "30" && (await readState(me)).travelTimes["loc1|loc2"] === 30, "이동 시간 빈칸이 원래 값(30분)으로 되돌아가지 않음");
+      await travelInput.fill("0");
+      await travelInput.dispatchEvent("change");
+      assert((await readState(me)).travelTimes["loc1|loc2"] === 0, "이동 시간 0을 입력했는데 0분으로 저장되지 않음");
+      const monSelects = me.locator(".avail-day-row").first().locator("select");
+      await monSelects.nth(0).selectOption("33"); // 17:30
+      await monSelects.nth(1).selectOption("30"); // 17:00
+      const endShown = await monSelects.nth(1).evaluate((sel) => (sel.selectedOptions[0] ? sel.selectedOptions[0].textContent : ""));
+      assert(endShown === "18:00", "근무 종료를 시작보다 이르게 고르면 선택창이 18:00을 보여야 함 (실제: '" + endShown + "')");
+      await me.close();
+      // 새 컨텍스트의 첫 문서에서 저장 → 새로고침하는 조건을 반복한다(CI에서 간헐적으로 저장소가 비어 있던 단계).
+      for (let i = 2; i <= SWAP_REPEAT; i++) {
+        const rp = await browser.newPage();
+        await checkSwapReload(rp, await openManualEditPage(rp, site, failures), "http-" + i, failures);
+        await rp.close();
       }
     }
-    await lg.close();
 
-    const backupCode = await checkLegacyCompat(browser, site, failures);
-    if (backupCode) await checkBlockedStorage(browser, site, backupCode, failures);
-    else failures.push("[저장 보호] 구버전 호환 검사에서 백업 코드를 받지 못해 검사하지 못함");
-    await checkNoConsecutiveSetting(browser, site, failures);
-    await checkPreviousCompat(browser, site, failures);
-    await checkCandidateDisplay(browser, site, failures);
-
-    // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-file-"));
-    try {
-      fs.writeFileSync(path.join(tmp, "blank.html"), BLANK_HTML);
-      const fileSite = { blank: pathToFileURL(path.join(tmp, "blank.html")).href, index: pathToFileURL(path.join(ROOT, "index.html")).href };
-      const profile = path.join(tmp, "profile");
-      let ctx = await chromium.launchPersistentContext(profile);
-      const fp = ctx.pages()[0] || (await ctx.newPage());
-      await checkSwapReload(fp, await openManualEditPage(fp, fileSite, failures), "file", failures);
-      await ctx.close();
-      ctx = await chromium.launchPersistentContext(profile);
-      const rp = ctx.pages()[0] || (await ctx.newPage());
-      await rp.goto(fileSite.index);
-      const after = await rp.evaluate(({ key, logKey }) => ({ url: location.href, origin: location.origin, keys: Object.keys(localStorage), raw: localStorage.getItem(key), logged: localStorage.getItem(logKey) }), { key: STORAGE_KEY, logKey: SEED_LOG_KEY });
-      if (!after.logged) failures.push("[환경 저장소 유실] file:// 브라우저 재실행: 저장소가 비어 있음 " + JSON.stringify({ url: after.url, origin: after.origin, keys: after.keys }));
-      else {
-        const c = after.raw && JSON.parse(after.raw).candidates[0];
-        assert(JSON.stringify(c && swapSummary(c)) === JSON.stringify(SWAPPED), "file:// 브라우저 재실행 후 저장값(배정·미배정·확정)이 다름: " + JSON.stringify(c && swapSummary(c)));
+    if (want("stale-saved")) {
+      // inputKey가 없는 옛 저장분에 정상 수정·확정 후보와 근무 시간 위반 후보(근무 안 하는 화요일)가 섞여 있으면
+      // 위반 후보만 비우고, 정상 후보는 확정 상태 그대로 새로고침 뒤에도 남는다. 안내는 입력 변경이 아니라 필수 조건 위반이다.
+      const lg = await browser.newPage();
+      lg.on("pageerror", (err) => failures.push("옛 저장분 페이지 런타임 에러: " + err.message));
+      const lgSeed = buildManualEditSeedState();
+      const lgAt = (day) => ({ id: "A" + day + "_0", memberId: "A", day, startSlot: 0, duration: 60, locationId: "loc1" });
+      const lgMemberB = lgSeed.members[1];
+      lgSeed.schedule3Result = { candidateAList: [{ assigned: [lgAt(0), lgAt(2)], unassignedMembers: [lgMemberB], confirmedIds: ["A0_0"] }, null, null] };
+      lgSeed.candidates = [{ assigned: [lgAt(0), lgAt(1)], unassignedMembers: [lgMemberB], confirmedIds: ["A1_0"], strategyIndex: 0 }];
+      await openWithSeed(lg, lgSeed, site);
+      const lgHint = await lg.locator("#generateHint3").innerText();
+      assert(lgHint.includes("필수 조건(근무 가능 시간에만 배정한다)을 어긴 후보 1개만") && !lgHint.includes("변경되어"), "옛 저장분 위반 안내가 다름: " + lgHint);
+      for (const when of ["로드 직후", "새로고침 후"]) {
+        const st = await readState(lg);
+        const kept = st.schedule3Result.candidateAList[0];
+        assert(st.candidates.length === 0 && kept && JSON.stringify(kept.confirmedIds) === JSON.stringify(["A0_0"]), when + ": 위반 후보만 비우고 정상 확정 후보를 남겨야 함: " + JSON.stringify(st.schedule3Result) + JSON.stringify(st.candidates));
+        assert(typeof st.schedule3Result.inputKey === "string", when + ": 현재 입력 키가 저장되지 않음");
+        assert((await lg.locator("#candidates3 .candidate-card").count()) === 1, when + ": 정상 후보 카드가 보이지 않음");
+        if (when === "로드 직후") {
+          await reloadChecked(lg, "옛 저장분 새로고침", failures);
+          await lg.waitForSelector("#pageSchedule3.active", { timeout: 5000 });
+        }
       }
-      await ctx.close();
-    } finally {
-      fs.rmSync(tmp, { recursive: true, force: true });
+      await lg.close();
+    }
+
+    if (want("legacy-compat")) {
+      const backupCode = await checkLegacyCompat(browser, site, failures);
+      if (backupCode) await checkBlockedStorage(browser, site, backupCode, failures);
+      else failures.push("[저장 보호] 구버전 호환 검사에서 백업 코드를 받지 못해 검사하지 못함");
+    }
+    if (want("no-consecutive")) await checkNoConsecutiveSetting(browser, site, failures);
+    if (want("previous-compat")) await checkPreviousCompat(browser, site, failures);
+    if (want("candidate-display")) await checkCandidateDisplay(browser, site, failures);
+
+    if (want("file")) {
+      // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-file-"));
+      try {
+        fs.writeFileSync(path.join(tmp, "blank.html"), BLANK_HTML);
+        const fileSite = { blank: pathToFileURL(path.join(tmp, "blank.html")).href, index: pathToFileURL(path.join(ROOT, "index.html")).href };
+        const profile = path.join(tmp, "profile");
+        let ctx = await chromium.launchPersistentContext(profile);
+        const fp = ctx.pages()[0] || (await ctx.newPage());
+        await checkSwapReload(fp, await openManualEditPage(fp, fileSite, failures), "file", failures);
+        await ctx.close();
+        ctx = await chromium.launchPersistentContext(profile);
+        const rp = ctx.pages()[0] || (await ctx.newPage());
+        await rp.goto(fileSite.index);
+        const after = await rp.evaluate(({ key, logKey }) => ({ url: location.href, origin: location.origin, keys: Object.keys(localStorage), raw: localStorage.getItem(key), logged: localStorage.getItem(logKey) }), { key: STORAGE_KEY, logKey: SEED_LOG_KEY });
+        if (!after.logged) failures.push("[환경 저장소 유실] file:// 브라우저 재실행: 저장소가 비어 있음 " + JSON.stringify({ url: after.url, origin: after.origin, keys: after.keys }));
+        else {
+          const c = after.raw && JSON.parse(after.raw).candidates[0];
+          assert(JSON.stringify(c && swapSummary(c)) === JSON.stringify(SWAPPED), "file:// 브라우저 재실행 후 저장값(배정·미배정·확정)이 다름: " + JSON.stringify(c && swapSummary(c)));
+        }
+        await ctx.close();
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
     }
   } finally {
     await browser.close();
@@ -1424,6 +1461,10 @@ async function main() {
     process.exit(1);
   }
   const aNote = FULL_BUDGET_A ? "체인 DP 실제 운영 예산으로 검증" : "체인 DP 예산 축소 검증";
+  if (ONLY) {
+    console.log("PASS — 스모크 일부 구간만 통과 (" + aNote + ", " + ONLY.join(", ") + "). 전체 검증은 인자 없이 실행한다.");
+    return;
+  }
   console.log(
     "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 구버전 탭·백업과 저장 분리(이관·자동 저장·복원 거부)·비정상 신버전 저장분 보호와 백업 복원 해제, 연속 요일 배정 제외 설정 위치(수업 스케줄 생성)·선택 유지·후보 무효화·생성 적용, 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 새로고침·브라우저 재실행 유지, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );

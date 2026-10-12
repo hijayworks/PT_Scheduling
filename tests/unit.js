@@ -15,7 +15,13 @@ const lib = require("./loadLib.js");
 
 let pass = 0;
 let fail = 0;
+// 개발 중 선택 실행: node tests/unit.js --grep 재최적화 — 이름에 그 문자열이 든 테스트만 돌린다(인자가 없으면 전부, npm test·CI).
+// 테스트는 공유 state를 쓰므로 고른 테스트만 돌리면 앞 테스트가 만든 상태가 없어 실패할 수 있다 — 그때는 전체로 확인한다.
+const grepArg = process.argv.indexOf("--grep");
+const only = grepArg >= 0 ? String(process.argv[grepArg + 1] || "") : null;
+const selected = (name) => only === null || name.includes(only);
 function test(name, fn) {
+  if (!selected(name)) return;
   try {
     fn();
     pass++;
@@ -28,7 +34,7 @@ function test(name, fn) {
 // 비동기 테스트는 등록만 해두고, 동기 테스트가 모두 끝난 뒤 맨 아래에서 순서대로 실행한다.
 const asyncTests = [];
 function testAsync(name, fn) {
-  asyncTests.push({ name, fn });
+  if (selected(name)) asyncTests.push({ name, fn });
 }
 function assertEqual(actual, expected, msg) {
   const a = JSON.stringify(actual);
@@ -1158,6 +1164,11 @@ test("removeRequestRun: 지점 블록을 지우면 공통 시각은 다른 지�
 
 /* ---------------- 회귀: 후보A 무결성 / migration / 확정 ---------------- */
 test("후보A 빈 시간 압축: 현재 지점에서 가능한 더 이른 신청만 선택", () => {
+  // 후보 지점은 등록된 지점만 인정하므로 지점 목록을 직접 둔다(앞 테스트가 남긴 state에 기대지 않는다).
+  lib.state.locations = [
+    { id: "M", name: "마포점" },
+    { id: "Y", name: "여의도점" },
+  ];
   lib.state.members = [
     { id: "m1", name: "홍", locationIds: ["M", "Y"], category: "등록" },
   ];
@@ -3743,6 +3754,6 @@ test("연속 요일 배정 제외: 선택이 없으면 입력 지문이 필드�
       console.error("  " + (err && err.stack ? err.stack : err));
     }
   }
-  console.log(pass + "개 통과, " + fail + "개 실패 (단위 테스트)");
-  if (fail > 0) process.exit(1);
+  console.log(pass + "개 통과, " + fail + "개 실패 (단위 테스트" + (only === null ? "" : ", --grep " + JSON.stringify(only) + "만") + ")");
+  if (fail > 0 || pass === 0) process.exit(1);
 })();
