@@ -300,14 +300,19 @@ export function hourMarkLabel(mark) {
 // "월345"처럼 매시 정각이 연달아 이어진 마크들은, 회원이 그 사이 언제든 시작할 수 있다는
 // 뜻으로 보고 하나의 이어진 구간으로 묶는다(예: 3,4,5시 -> 3시~5시 사이 10분 단위로 전부
 // 희망 시작 시각이 됨). 시간이 하나라도 비면(연속이 아니면) 새 구간으로 나눈다.
-export function groupConsecutiveMarks(marks) {
+// 숫자 나열에서는 정시끼리만 묶는다 — "6730"(6시·7시30분)을 18:00~19:30으로 넓히지 않는다. 명시한 범위
+// ("6~730", "640~9")의 스펙은 continuous=true라 분이 붙은 끝도 한 시간 차이면 이어서 묶는다.
+export function groupConsecutiveMarks(marks, continuous = false) {
   const groups = [];
   let current = [];
   marks.forEach((mark) => {
     if (current.length > 0) {
       const prevHour24 = (current[current.length - 1].hour % 12) + 12;
       const hour24 = (mark.hour % 12) + 12;
-      if (hour24 !== prevHour24 + 1) {
+      const prev = current[current.length - 1];
+      const joinable =
+        continuous || (prev.minute === 0 && mark.minute === 0);
+      if (hour24 !== prevHour24 + 1 || !joinable) {
         groups.push(current);
         current = [];
       }
@@ -346,9 +351,51 @@ export function expandHourRange(leftMark, rightMark) {
   return marks;
 }
 
+// 숫자열을 시(한 자리 1~9, 두 자리 10·11·12)와 바로 뒤에 붙은 분(30·40·50)으로 나누는 모든 방법.
+// 앞쪽이 tokenizeHourDigits와 같은 순서(두 자리·분 우선)이고, 많으면 limit개까지만 찾는다(그만큼이면
+// 어차피 고르게 할 수 없다). 끝까지 나눠지는지 여부를 기억해 막다른 분기를 다시 탐색하지 않는다.
+export function allHourDigitSplits(digits, limit = 20) {
+  const completable = new Map();
+  const pieces = (rest) => {
+    const out = [];
+    for (const len of [2, 1]) {
+      if (rest.length < len) continue;
+      const hour = parseInt(rest.slice(0, len), 10);
+      const valid = len === 2 ? hour >= 10 && hour <= 12 : hour >= 1;
+      if (!valid) continue;
+      const after = rest.slice(len);
+      HOUR_DIGIT_MINUTE_SUFFIXES.forEach((minute) => {
+        if (after.slice(0, 2) === String(minute))
+          out.push({ mark: { hour, minute }, rest: after.slice(2) });
+      });
+      out.push({ mark: { hour, minute: 0 }, rest: after });
+    }
+    return out;
+  };
+  const canFinish = (rest) => {
+    if (rest === "") return true;
+    if (!completable.has(rest))
+      completable.set(rest, pieces(rest).some((p) => canFinish(p.rest)));
+    return completable.get(rest);
+  };
+  const splits = [];
+  (function walk(rest, acc) {
+    if (splits.length >= limit) return;
+    if (rest === "") {
+      splits.push(acc);
+      return;
+    }
+    pieces(rest).forEach((p) => {
+      if (canFinish(p.rest)) walk(p.rest, acc.concat([p.mark]));
+    });
+  })(digits, []);
+  return splits;
+}
+
 // 숫자 묶음 하나(물결 앞뒤 한쪽 등)의 해석 후보 목록. 표기 규칙은 두 가지다:
 //  - 시+분: 세·네 자리 숫자(410 → 4:10). "4:10"처럼 콜론이 있으면 그 한 시각뿐이다.
-//  - 이어 쓴 정시: tokenizeHourDigits(410 → 4시·10시, 730 → 7:30, 8910 → 8·9·10시).
+//  - 이어 쓴 정시: allHourDigitSplits의 모든 분해(410 → 4시·10시, 123 → 12·3시와 1·2·3시).
+// 숫자 전체가 한 시각(1~12)이면 단독 시간이라 다른 분해를 찾지 않는다("12"는 1·2시가 아니다).
 // 결과가 같은 후보는 하나로 합친다. 시간순이 아니거나 같은 시각이 반복되는 후보도 버리지 않는다
 // (marksInTimeOrder로 따로 표시해 확인을 받는다 — "1110"을 23:10으로만 읽으면 23:00·22:00을 잃는다).
 export function hourMarkReadings(s) {
@@ -356,6 +403,7 @@ export function hourMarkReadings(s) {
     const marks = parseHourMarks(s);
     return marks ? [marks] : [];
   }
+  if (/^(1[0-2]|[1-9])$/.test(s)) return [[{ hour: parseInt(s, 10), minute: 0 }]];
   const readings = [];
   if (/^\d{3,4}$/.test(s)) {
     const hour = parseInt(s.slice(0, -2), 10);
@@ -363,11 +411,12 @@ export function hourMarkReadings(s) {
     if (hour >= 1 && hour <= 12 && minute < 60 && minute % SLOT_MIN === 0)
       readings.push([{ hour, minute }]);
   }
-  const hours = tokenizeHourDigits(s);
   const same = (a, b) =>
     a.length === b.length &&
     a.every((m, i) => m.hour === b[i].hour && m.minute === b[i].minute);
-  if (hours && !readings.some((r) => same(r, hours))) readings.push(hours);
+  allHourDigitSplits(s).forEach((split) => {
+    if (!readings.some((r) => same(r, split))) readings.push(split);
+  });
   return readings;
 }
 
@@ -458,7 +507,10 @@ export function parseTimeToken(token) {
         rights.forEach(([r]) => {
           const marks = expandHourRange(l, r);
           if (marks)
-            candidates.push({ spec: { type: "point", marks }, unordered: false });
+            candidates.push({
+              spec: { type: "point", marks, continuous: true },
+              unordered: false,
+            });
         }),
       );
     } else if (rightStr === "") {
@@ -489,10 +541,20 @@ export function parseTimeToken(token) {
         }));
     }
   } else {
-    candidates = hourMarkReadings(clean).map((marks) => ({
-      spec: { type: "point", marks },
-      unordered: !marksInTimeOrder(marks),
-    }));
+    // 반시각이 섞여 한 시간 차이로 이어지는 나열("6730")은 두 시각과 연속 구간 두 후보를 모두 낸다.
+    candidates = [];
+    hourMarkReadings(clean).forEach((marks) => {
+      const unordered = !marksInTimeOrder(marks);
+      candidates.push({ spec: { type: "point", marks }, unordered });
+      if (
+        groupConsecutiveMarks(marks, true).length !==
+        groupConsecutiveMarks(marks).length
+      )
+        candidates.push({
+          spec: { type: "point", marks, continuous: true },
+          unordered,
+        });
+    });
   }
   const options = [];
   candidates.forEach(({ spec, unordered }) => {
@@ -506,10 +568,13 @@ export function parseTimeToken(token) {
   return { ambiguous: true, token: ambiguousPart, warning, options };
 }
 
+// 미리보기에서 버튼으로 고르게 하는 해석 수의 상한(UI 표현값). 더 많으면 버튼 대신 구분자(, ~ :)로 줄을 고치게 한다.
+export const MAX_TIME_CHOICES = 4;
+
 // 해석 선택지 문구: 떨어진 시각은 각각 "시작", 이어진 정시는 "연속 가능 구간", 열린 범위는 "~마감"·"시작~".
 export function describeClockOption(spec) {
-  const groups = (marks) =>
-    groupConsecutiveMarks(marks).map((group) =>
+  const groups = (marks, continuous) =>
+    groupConsecutiveMarks(marks, continuous).map((group) =>
       group.length > 1
         ? hourMarkLabel(group[0]) +
           "~" +
@@ -523,7 +588,7 @@ export function describeClockOption(spec) {
     parts = extra.concat([hourMarkLabel(spec.mark) + "~마감"]);
   else if (spec.type === "openEnd")
     parts = ["시작~" + hourMarkLabel(spec.mark)].concat(extra);
-  else parts = groups(spec.marks).concat(extra);
+  else parts = groups(spec.marks, spec.continuous).concat(extra);
   return parts.join(" · ");
 }
 
@@ -777,9 +842,14 @@ function hasUnresolvedTime(row) {
   return row.parsed.ambiguities.some((a) => !a.choice);
 }
 
-// 신규 회원 줄이 실제로 회원을 만드는지: 시간이 있거나 "이름 x"(시간 없이 회원만 등록)일 때.
+// 신규 회원 줄이 실제로 회원을 만드는지: 시간이 있거나 "이름 x"(시간 없이 회원만 등록)이거나, 해석을 고르면
+// 시간이 생기는 줄일 때(확인 전이라 시간이 비어 있어도 미리보기 요약에서 신규 회원으로 센다).
 function createsNewMember(row) {
-  return row.parsed.days.length > 0 || row.parsed.clearAll;
+  return (
+    row.parsed.days.length > 0 ||
+    row.parsed.clearAll ||
+    row.parsed.ambiguities.length > 0
+  );
 }
 
 // 계획을 state에 반영한다(저장·화면 갱신은 호출하는 쪽). 막혀야 하는 경우 아무것도 바꾸지 않고 { error }.
@@ -913,8 +983,8 @@ export function applyBulkImportPlan(plan) {
     function addRange(startSlot, endSlot) {
       addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
     }
-    function applyMarks(marks) {
-      groupConsecutiveMarks(marks).forEach((group) => {
+    function applyMarks(marks, continuous) {
+      groupConsecutiveMarks(marks, continuous).forEach((group) => {
         addRange(
           hourMarkToStartSlot(group[0]),
           hourMarkToStartSlot(group[group.length - 1]),
@@ -930,7 +1000,7 @@ export function applyBulkImportPlan(plan) {
         locId = dayEntry.locationId;
         dayEntry.specs.forEach((spec) => {
           if (spec.type === "point") {
-            applyMarks(spec.marks);
+            applyMarks(spec.marks, spec.continuous);
             applyMarks(spec.extraPoints || []);
           } else if (spec.type === "openStart") {
             applyMarks(spec.extraPoints || []);
@@ -952,8 +1022,8 @@ export function applyBulkImportPlan(plan) {
 }
 
 // 마크 배열(연속이면 하나로 묶어)을 미리보기용 문구 조각들로 바꾼다.
-export function describeMarks(marks) {
-  return groupConsecutiveMarks(marks).map((group) =>
+export function describeMarks(marks, continuous = false) {
+  return groupConsecutiveMarks(marks, continuous).map((group) =>
     group.length > 1
       ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1])
       : hourMarkLabel(group[0]),
@@ -965,7 +1035,7 @@ export function describeDaySpecs(specs) {
   const parts = [];
   specs.forEach((spec) => {
     if (spec.type === "point") {
-      parts.push(...describeMarks(spec.marks));
+      parts.push(...describeMarks(spec.marks, spec.continuous));
       parts.push(...describeMarks(spec.extraPoints || []));
     } else if (spec.type === "openStart") {
       parts.push(...describeMarks(spec.extraPoints || []));
@@ -1313,12 +1383,24 @@ function renderBulkPreviewRow(row) {
       highlightedRaw(parsed, index),
     );
     box.appendChild(title);
-    if (amb.options.some((o) => o.unordered)) {
+    // 해석이 너무 많으면 버튼 대신 구분자로 줄을 고치게 한다.
+    const tooMany = amb.options.length > MAX_TIME_CHOICES;
+    const hintText = tooMany
+      ? "해석이 " +
+        amb.options.length +
+        "가지 이상이라 고를 수 없습니다. '줄 수정'에서 쉼표(,)·물결(~)·콜론(:)으로 나눠 적어주세요. (예: 11,12 · 1~2 · 11:10)"
+      : amb.options.some((o) => o.unordered)
+        ? "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '줄 수정'으로 고쳐주세요."
+        : "";
+    if (hintText) {
       const hint = document.createElement("p");
       hint.className = "bulk-preview-ambiguity-hint";
-      hint.textContent =
-        "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '줄 수정'으로 고쳐주세요.";
+      hint.textContent = hintText;
       box.appendChild(hint);
+    }
+    if (tooMany) {
+      rowEl.appendChild(box);
+      return;
     }
     const options = document.createElement("div");
     options.className = "bulk-preview-ambiguity-options";

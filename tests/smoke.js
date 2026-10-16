@@ -1093,12 +1093,15 @@ async function checkBulkImportAmbiguity(browser, site, failures) {
     const kimRow = () => row("김기존");
     await page.click("#bulkImportOpenBtn");
     if (await page.locator("#bulkImportConfirmOverlay.open").count()) await page.click("#bulkImportJustAddBtn");
-    await page.fill("#bulkImportTextarea", "김기존 월5\n신규회원 월1110");
+    await page.fill("#bulkImportTextarea", "김기존 월5\n신규회원 월1110\n많은회원 월1112");
     await page.click("#bulkImportPreviewBtn");
     await page.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
     // 시간순이 아닌 정시 나열(23:00·22:00)도 버리지 않고 23:10과 함께 확인을 요구한다.
-    assert(json(await options("신규회원").allTextContents()) === json(["23:10 시작", "23:00 시작 · 22:00 시작 (시간순 아님)"]), "1110 해석 선택지: " + json(await options("신규회원").allTextContents()));
+    assert(json(await options("신규회원").allTextContents()) === json(["23:10 시작", "23:00 시작 · 22:00 시작 (시간순 아님)", "13:00 시작 · 13:00 시작 · 22:00 시작 (시간순 아님)"]), "1110 해석 선택지: " + json(await options("신규회원").allTextContents()));
+    // 해석이 MAX_TIME_CHOICES(4)보다 많으면 버튼 없이 구분자로 고치라고 안내한다.
+    assert((await options("많은회원").count()) === 0 && (await row("많은회원").locator(".bulk-preview-ambiguity-hint").innerText()).includes("고를 수 없습니다"), "선택지가 많은 줄 안내");
     await row("신규회원").locator(".bulk-preview-row-head > select").selectOption("__skip__");
+    await row("많은회원").locator(".bulk-preview-row-head > select").selectOption("__skip__");
     await kimRow().locator(".bulk-preview-edit-btn").click();
     await kimRow().locator(".bulk-preview-edit-input").fill("김기존 월910");
     alertMessage = "";
@@ -1181,6 +1184,11 @@ async function checkBulkImportSections(browser, site, failures) {
     await page.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
     return page.locator("#bulkImportPreviewSummary").innerText();
   };
+  // 원문의 반시각이 섞인 두 줄은 해석 확인 대상이다 — 예전 해석(연속 구간)을 고른다(unit FIXTURE_PICKS와 같음).
+  const resolveFixture = async () => {
+    await row("최진택").locator(".bulk-preview-ambiguity-option", { hasText: /^17:00 시작 · 17:30~18:00 연속 가능 구간$/ }).click();
+    await row("황민지").locator(".bulk-preview-ambiguity-option", { hasText: /^18:30~20:00 연속 가능 구간$/ }).click();
+  };
   try {
     await openWithSeed(page, seed, site);
     const empty = await readState(page);
@@ -1189,7 +1197,7 @@ async function checkBulkImportSections(browser, site, failures) {
 
     // 미리보기: 생성 예정 지점·회원과 시간별 지점을 보여 주고, 취소하면 아무것도 바뀌지 않는다.
     let summary = await openAndPreview(text);
-    assert(summary.includes("생성 예정 지점 여의도점·상암점·마포점") && summary.includes("신규 회원 22명") && summary.includes("기존 회원 연결 0명"), "미리보기 요약: " + summary);
+    assert(summary.includes("생성 예정 지점 여의도점·상암점·마포점") && summary.includes("신규 회원 22명") && summary.includes("기존 회원 연결 0명") && summary.includes("해석 확인 필요 2줄"), "미리보기 요약: " + summary);
     const hurChips = await row("허종원").locator(".bulk-preview-day-chip").allTextContents();
     assert(
       json(hurChips.slice(0, 2)) === json(["월 (여의도점·새 지점) 18:00", "월 (마포점·새 지점) 20:00~22:00"]) && hurChips.length === 8,
@@ -1208,6 +1216,7 @@ async function checkBulkImportSections(browser, site, failures) {
     await page.click('.nav-item[data-page="memberSchedule"]');
     await openAndPreview(text);
     await row("진애화").locator(".bulk-preview-new-fields select").nth(1).selectOption("상담");
+    await resolveFixture();
     await page.click("#bulkImportApplyBtn");
     let saved = await readState(page);
     assert(json(saved.locations.map((l) => l.name)) === json(["여의도점", "상암점", "마포점"]) && new Set(saved.locations.map((l) => l.color)).size === 3, "생성된 지점: " + json(saved.locations));
@@ -1227,6 +1236,7 @@ async function checkBulkImportSections(browser, site, failures) {
     await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
     summary = await openAndPreview(text);
     assert(!summary.includes("생성 예정 지점") && summary.includes("신규 회원 0명") && summary.includes("기존 회원 연결 22명"), "재등록 미리보기: " + summary);
+    await resolveFixture();
     await page.click("#bulkImportApplyBtn");
     saved = await readState(page);
     const shape = (s) => json({

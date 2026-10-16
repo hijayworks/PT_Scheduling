@@ -8777,14 +8777,16 @@
     const hour24 = mark.hour % 12 + 12;
     return minutesLabel(hour24 * 60 + mark.minute);
   }
-  function groupConsecutiveMarks(marks) {
+  function groupConsecutiveMarks(marks, continuous = false) {
     const groups = [];
     let current = [];
     marks.forEach((mark) => {
       if (current.length > 0) {
         const prevHour24 = current[current.length - 1].hour % 12 + 12;
         const hour24 = mark.hour % 12 + 12;
-        if (hour24 !== prevHour24 + 1) {
+        const prev = current[current.length - 1];
+        const joinable = continuous || prev.minute === 0 && mark.minute === 0;
+        if (hour24 !== prevHour24 + 1 || !joinable) {
           groups.push(current);
           current = [];
         }
@@ -8815,11 +8817,49 @@
     }
     return marks;
   }
+  function allHourDigitSplits(digits, limit = 20) {
+    const completable = /* @__PURE__ */ new Map();
+    const pieces = (rest) => {
+      const out = [];
+      for (const len of [2, 1]) {
+        if (rest.length < len) continue;
+        const hour = parseInt(rest.slice(0, len), 10);
+        const valid = len === 2 ? hour >= 10 && hour <= 12 : hour >= 1;
+        if (!valid) continue;
+        const after = rest.slice(len);
+        HOUR_DIGIT_MINUTE_SUFFIXES.forEach((minute) => {
+          if (after.slice(0, 2) === String(minute))
+            out.push({ mark: { hour, minute }, rest: after.slice(2) });
+        });
+        out.push({ mark: { hour, minute: 0 }, rest: after });
+      }
+      return out;
+    };
+    const canFinish = (rest) => {
+      if (rest === "") return true;
+      if (!completable.has(rest))
+        completable.set(rest, pieces(rest).some((p) => canFinish(p.rest)));
+      return completable.get(rest);
+    };
+    const splits = [];
+    (function walk(rest, acc) {
+      if (splits.length >= limit) return;
+      if (rest === "") {
+        splits.push(acc);
+        return;
+      }
+      pieces(rest).forEach((p) => {
+        if (canFinish(p.rest)) walk(p.rest, acc.concat([p.mark]));
+      });
+    })(digits, []);
+    return splits;
+  }
   function hourMarkReadings(s) {
     if (s.includes(":")) {
       const marks = parseHourMarks(s);
       return marks ? [marks] : [];
     }
+    if (/^(1[0-2]|[1-9])$/.test(s)) return [[{ hour: parseInt(s, 10), minute: 0 }]];
     const readings = [];
     if (/^\d{3,4}$/.test(s)) {
       const hour = parseInt(s.slice(0, -2), 10);
@@ -8827,9 +8867,10 @@
       if (hour >= 1 && hour <= 12 && minute < 60 && minute % SLOT_MIN === 0)
         readings.push([{ hour, minute }]);
     }
-    const hours = tokenizeHourDigits(s);
     const same = (a, b) => a.length === b.length && a.every((m, i) => m.hour === b[i].hour && m.minute === b[i].minute);
-    if (hours && !readings.some((r) => same(r, hours))) readings.push(hours);
+    allHourDigitSplits(s).forEach((split) => {
+      if (!readings.some((r) => same(r, split))) readings.push(split);
+    });
     return readings;
   }
   function marksInTimeOrder(marks) {
@@ -8891,7 +8932,10 @@
           ([l]) => rights.forEach(([r]) => {
             const marks = expandHourRange(l, r);
             if (marks)
-              candidates.push({ spec: { type: "point", marks }, unordered: false });
+              candidates.push({
+                spec: { type: "point", marks, continuous: true },
+                unordered: false
+              });
           })
         );
       } else if (rightStr === "") {
@@ -8912,10 +8956,16 @@
         }));
       }
     } else {
-      candidates = hourMarkReadings(clean).map((marks) => ({
-        spec: { type: "point", marks },
-        unordered: !marksInTimeOrder(marks)
-      }));
+      candidates = [];
+      hourMarkReadings(clean).forEach((marks) => {
+        const unordered = !marksInTimeOrder(marks);
+        candidates.push({ spec: { type: "point", marks }, unordered });
+        if (groupConsecutiveMarks(marks, true).length !== groupConsecutiveMarks(marks).length)
+          candidates.push({
+            spec: { type: "point", marks, continuous: true },
+            unordered
+          });
+      });
     }
     const options = [];
     candidates.forEach(({ spec, unordered }) => {
@@ -8928,8 +8978,9 @@
       return Object.assign(options[0].spec, { warning });
     return { ambiguous: true, token: ambiguousPart, warning, options };
   }
+  var MAX_TIME_CHOICES = 4;
   function describeClockOption(spec) {
-    const groups = (marks) => groupConsecutiveMarks(marks).map(
+    const groups = (marks, continuous) => groupConsecutiveMarks(marks, continuous).map(
       (group) => group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) + " 연속 가능 구간" : hourMarkLabel(group[0]) + " 시작"
     );
     const extra = groups(spec.extraPoints || []);
@@ -8938,7 +8989,7 @@
       parts = extra.concat([hourMarkLabel(spec.mark) + "~마감"]);
     else if (spec.type === "openEnd")
       parts = ["시작~" + hourMarkLabel(spec.mark)].concat(extra);
-    else parts = groups(spec.marks).concat(extra);
+    else parts = groups(spec.marks, spec.continuous).concat(extra);
     return parts.join(" · ");
   }
   function existingLocationId(name) {
@@ -9122,7 +9173,7 @@
     return row.parsed.ambiguities.some((a) => !a.choice);
   }
   function createsNewMember(row) {
-    return row.parsed.days.length > 0 || row.parsed.clearAll;
+    return row.parsed.days.length > 0 || row.parsed.clearAll || row.parsed.ambiguities.length > 0;
   }
   function applyBulkImportPlan(plan) {
     const editing = plan.rows.filter(
@@ -9228,8 +9279,8 @@
       function addRange(startSlot, endSlot) {
         addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
       }
-      function applyMarks(marks) {
-        groupConsecutiveMarks(marks).forEach((group) => {
+      function applyMarks(marks, continuous) {
+        groupConsecutiveMarks(marks, continuous).forEach((group) => {
           addRange(
             hourMarkToStartSlot(group[0]),
             hourMarkToStartSlot(group[group.length - 1])
@@ -9241,7 +9292,7 @@
         locId = dayEntry.locationId;
         dayEntry.specs.forEach((spec) => {
           if (spec.type === "point") {
-            applyMarks(spec.marks);
+            applyMarks(spec.marks, spec.continuous);
             applyMarks(spec.extraPoints || []);
           } else if (spec.type === "openStart") {
             applyMarks(spec.extraPoints || []);
@@ -9261,8 +9312,8 @@
     });
     return report;
   }
-  function describeMarks(marks) {
-    return groupConsecutiveMarks(marks).map(
+  function describeMarks(marks, continuous = false) {
+    return groupConsecutiveMarks(marks, continuous).map(
       (group) => group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) : hourMarkLabel(group[0])
     );
   }
@@ -9270,7 +9321,7 @@
     const parts = [];
     specs.forEach((spec) => {
       if (spec.type === "point") {
-        parts.push(...describeMarks(spec.marks));
+        parts.push(...describeMarks(spec.marks, spec.continuous));
         parts.push(...describeMarks(spec.extraPoints || []));
       } else if (spec.type === "openStart") {
         parts.push(...describeMarks(spec.extraPoints || []));
@@ -9573,11 +9624,17 @@
         highlightedRaw(parsed, index)
       );
       box.appendChild(title);
-      if (amb.options.some((o) => o.unordered)) {
+      const tooMany = amb.options.length > MAX_TIME_CHOICES;
+      const hintText = tooMany ? "해석이 " + amb.options.length + "가지 이상이라 고를 수 없습니다. '줄 수정'에서 쉼표(,)·물결(~)·콜론(:)으로 나눠 적어주세요. (예: 11,12 · 1~2 · 11:10)" : amb.options.some((o) => o.unordered) ? "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '줄 수정'으로 고쳐주세요." : "";
+      if (hintText) {
         const hint = document.createElement("p");
         hint.className = "bulk-preview-ambiguity-hint";
-        hint.textContent = "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '줄 수정'으로 고쳐주세요.";
+        hint.textContent = hintText;
         box.appendChild(hint);
+      }
+      if (tooMany) {
+        rowEl.appendChild(box);
+        return;
       }
       const options = document.createElement("div");
       options.className = "bulk-preview-ambiguity-options";

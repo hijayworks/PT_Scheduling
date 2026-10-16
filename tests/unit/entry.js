@@ -96,6 +96,7 @@ export {
   chooseBulkAmbiguity,
   editBulkImportRow,
   describeClockOption,
+  MAX_TIME_CHOICES,
   requestAllowedLocationIds,
   describeDaySpecs,
   hourMarkToStartSlot,
