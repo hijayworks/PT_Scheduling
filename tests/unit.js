@@ -1261,6 +1261,50 @@ test("123·1230·6730은 확인 전 적용을 막고 기존 신청을 지키며,
     assertEqual(requestsOf("H"), expected.sort(), line + " → " + label);
   });
 });
+test("같은 시 안의 범위도 시·분을 함께 비교해 10분 간격 시작 시각으로 등록한다", () => {
+  const range = (day, from, to) => {
+    const out = [];
+    for (let min = from; min <= to; min += 10) out.push(day + " " + lib.minutesLabel(min));
+    return out;
+  };
+  resetBulkState();
+  lib.state.locations = bulkLocations();
+  lib.state.members = [{ id: "H", name: "홍길동", locationIds: ["M"], category: "등록", memo: "" }];
+  const line = "홍길동 월5~530 화5:10~5:40 수5~5 목6~730 금6,730";
+  const parsed = lib.parseBulkImportLine(line);
+  assertEqual([parsed.errors, parsed.ambiguities], [[], []]);
+  assertEqual(
+    parsed.days.map((d) => lib.DAYS[d.day] + " " + lib.describeDaySpecs(d.specs)),
+    ["월 17:00~17:30", "화 17:10~17:40", "수 17:00", "목 18:00~19:30", "금 18:00, 19:30"],
+  );
+  applyBulkText(line);
+  assertEqual(
+    requestsOf("H"),
+    [
+      ...range(0, 17 * 60, 17 * 60 + 30),
+      ...range(1, 17 * 60 + 10, 17 * 60 + 40),
+      "2 17:00",
+      ...range(3, 18 * 60, 19 * 60 + 30),
+      "4 18:00",
+      "4 19:30",
+    ].sort(),
+  );
+});
+test("시작이 끝보다 늦은 범위는 같은 시 안이어도 거부하고 기존 신청을 지킨다", () => {
+  resetBulkState();
+  lib.state.locations = bulkLocations();
+  lib.state.members = [{ id: "H", name: "홍길동", locationIds: ["M"], category: "등록", memo: "" }];
+  lib.state.requests = [{ id: "r1", memberId: "H", day: 2, startSlot: 30, duration: 60 }];
+  ["월530~5", "월5:40~5:10", "월5시40분-5시10분", "월10~1"].forEach((t) => {
+    const parsed = lib.parseBulkImportLine("홍길동 " + t);
+    assertEqual(parsed.days, [], t + " 등록 없음");
+    assert(parsed.errors.length === 1 && parsed.errors[0].includes("시작이 끝보다 늦"), t + " 역순 오류: " + parsed.errors);
+  });
+  const before = bulkDataSnapshot();
+  const report = applyBulkText("홍길동 월530~5 화5:40~5:10");
+  assertEqual(report.unparsedSkippedNames, ["홍길동"]);
+  assertEqual(bulkDataSnapshot(), before, "역순 범위만 있는 줄은 기존 신청을 바꾸지 않는다");
+});
 test("늦은시간은 바로 앞 시각과 이어진 구간으로 묶지 않는다", () => {
   resetBulkState();
   lib.state.locations = bulkLocations();

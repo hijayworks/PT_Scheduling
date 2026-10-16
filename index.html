@@ -381,7 +381,7 @@
         </ul>
         <p class="rules-group-title">범위</p>
         <ul class="schedule-example-list">
-          <li>두 시각 사이에 물결(~)이나 하이픈(-)을 넣으면 그 사이 전부입니다. (예: 3~6 = 3-6 = 3456) 앞 시각이 더 늦으면(10~1) 오류로 표시됩니다.</li>
+          <li>두 시각 사이에 물결(~)이나 하이픈(-)을 넣으면 그 사이 전부입니다. (예: 3~6 = 3-6 = 3456, 5~530 → 17:00~17:30) 사이의 10분 단위 시각이 모두 시작 가능 시각이 됩니다. 앞 시각이 더 늦으면(10~1, 530~5) 오류로 표시됩니다.</li>
           <li>시각 뒤에 물결 또는 "부터"·"이후"를 붙이면 그 시각부터 마감까지입니다. 물결 앞에 여러 시각을 이어 쓰면 마지막 시각만 범위가 됩니다. (예: 6630~ → 18:00, 18:30~마감)</li>
           <li>시각 앞에 물결을 붙이거나 "까지"를 붙이면 시작부터 그 시각까지입니다. (예: ~5 = 5까지 → 시작~17:00)</li>
         </ul>
@@ -500,6 +500,6 @@
 <script src="vendor/html2canvas.min.js"></script>
 <!-- script.js / style.css의 ?v= 값은 scripts/bump-cache-version.js가 파일 해시로 자동 갱신합니다
      (git pre-commit 훅에서 자동 실행됨). 손으로 바꾸지 마세요. -->
-<script src="script.js?v=1499052e"></script>
+<script src="script.js?v=f43ad0fa"></script>
 </body>
 </html>

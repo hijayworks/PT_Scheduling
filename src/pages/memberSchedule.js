@@ -300,8 +300,9 @@ export function hourMarkLabel(mark) {
 // "월345"처럼 매시 정각이 연달아 이어진 마크들은, 회원이 그 사이 언제든 시작할 수 있다는
 // 뜻으로 보고 하나의 이어진 구간으로 묶는다(예: 3,4,5시 -> 3시~5시 사이 10분 단위로 전부
 // 희망 시작 시각이 됨). 시간이 하나라도 비면(연속이 아니면) 새 구간으로 나눈다.
-// 숫자 나열에서는 정시끼리만 묶는다 — "6730"(6시·7시30분)을 18:00~19:30으로 넓히지 않는다. 명시한 범위
-// ("6~730", "640~9")의 스펙은 continuous=true라 분이 붙은 끝도 한 시간 차이면 이어서 묶는다.
+// 숫자 나열에서는 정시끼리만 묶는다 — "6730"(6시·7시30분)을 18:00~19:30으로 넓히지 않는다.
+// continuous=true는 숫자 나열의 "연속" 해석 선택지로, 분이 붙은 시각도 한 시간 차이면 이어서 묶는다.
+// 명시한 범위("6~730")는 이 함수가 아니라 pointSpecGroups에서 시작~끝 한 구간으로 다룬다.
 export function groupConsecutiveMarks(marks, continuous = false) {
   const groups = [];
   let current = [];
@@ -323,16 +324,19 @@ export function groupConsecutiveMarks(marks, continuous = false) {
   return groups;
 }
 
-// "2~5"(왼쪽·오른쪽 모두 시각이 있는 물결)는 "2345"를 이어 쓴 것과 같은 뜻으로, 두 시각
-// 사이의 매시 정각을 전부 개별 희망 시작 시각으로 펼친다. 양쪽 끝의 반시간(30분) 표기는
-// 그 끝에서만 그대로 반영한다. 근무 가능 시간이 12:00(정오)~24:00(자정) 하루 안에서만
-// 이어지므로(자정을 넘겨 다음 날로 순환하는 범위는 없음), 12시가 가장 이른 시각·11시가
-// 가장 늦은 시각인 실제 시간 순서(12,1,2,...,11)로 비교해 왼쪽이 오른쪽보다 늦으면
-// "10~1"처럼 순서가 뒤바뀐(오타 등) 입력으로 보고 실패 처리한다(자정을 넘겨 순환시키지 않음).
+// "2~5"(왼쪽·오른쪽 모두 시각이 있는 물결)는 수업을 시작할 수 있는 시각의 범위다. 두 시각 사이의 매시
+// 정각을 마크로 펼치고(양쪽 끝의 분은 그 끝에서만 반영), 스펙은 range=true로 시작~끝 한 구간으로 등록한다
+// (10분 간격 시작 시각, 같은 시 안의 "5~530"도 17:00~17:30). 근무 가능 시간이 12:00(정오)~24:00(자정)
+// 하루 안에서만 이어지므로(자정을 넘겨 다음 날로 순환하는 범위는 없음), 12시가 가장 이른 시각·11시가
+// 가장 늦은 시각인 실제 시간 순서(12,1,2,...,11)로 시·분을 함께 비교해 왼쪽이 오른쪽보다 늦으면
+// "10~1"·"530~5"처럼 순서가 뒤바뀐(오타 등) 입력으로 보고 실패 처리한다. 같은 시각이면 그 한 시각이다.
 export function expandHourRange(leftMark, rightMark) {
   const leftHour24 = (leftMark.hour % 12) + 12;
   const rightHour24 = (rightMark.hour % 12) + 12;
-  if (rightHour24 < leftHour24) return null;
+  const leftAt = leftHour24 * 60 + leftMark.minute;
+  const rightAt = rightHour24 * 60 + rightMark.minute;
+  if (rightAt < leftAt) return null;
+  if (rightAt === leftAt) return [{ hour: leftMark.hour, minute: leftMark.minute }];
   const marks = [];
   for (let h24 = leftHour24; h24 <= rightHour24; h24++) {
     const hour = h24 === 12 ? 12 : h24 - 12;
@@ -508,11 +512,13 @@ export function parseTimeToken(token) {
           const marks = expandHourRange(l, r);
           if (marks)
             candidates.push({
-              spec: { type: "point", marks, continuous: true },
+              spec: { type: "point", marks, range: true },
               unordered: false,
             });
         }),
       );
+      if (lefts.length && rights.length && !candidates.length)
+        failMessage = '시작이 끝보다 늦은 범위입니다: "' + originalToken + '"';
     } else if (rightStr === "") {
       // "6630~"처럼 물결 앞에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 마지막 시각(6시30분)을
       // "그 시각부터 마감까지" 열린 시작점으로 삼고, 그 앞의 시각들(6시)은 각각 개별 희망
@@ -571,10 +577,24 @@ export function parseTimeToken(token) {
 // 미리보기에서 버튼으로 고르게 하는 해석 수의 상한(UI 표현값). 더 많으면 버튼 대신 구분자(, ~ :)로 줄을 고치게 한다.
 export const MAX_TIME_CHOICES = 4;
 
+// point 스펙의 마크를 등록·표시할 구간들로 나눈다. 명시한 범위(range)는 시작~끝 한 구간, 숫자 나열은
+// groupConsecutiveMarks(정시끼리, "연속" 선택지는 continuous)로 묶는다.
+export function pointSpecGroups(spec) {
+  return spec.range
+    ? [spec.marks]
+    : groupConsecutiveMarks(spec.marks, spec.continuous);
+}
+
+function groupLabel(group) {
+  return group.length > 1
+    ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1])
+    : hourMarkLabel(group[0]);
+}
+
 // 해석 선택지 문구: 떨어진 시각은 각각 "시작", 이어진 정시는 "연속 가능 구간", 열린 범위는 "~마감"·"시작~".
 export function describeClockOption(spec) {
-  const groups = (marks, continuous) =>
-    groupConsecutiveMarks(marks, continuous).map((group) =>
+  const groups = (groupsOfMarks) =>
+    groupsOfMarks.map((group) =>
       group.length > 1
         ? hourMarkLabel(group[0]) +
           "~" +
@@ -582,13 +602,13 @@ export function describeClockOption(spec) {
           " 연속 가능 구간"
         : hourMarkLabel(group[0]) + " 시작",
     );
-  const extra = groups(spec.extraPoints || []);
+  const extra = groups(groupConsecutiveMarks(spec.extraPoints || []));
   let parts;
   if (spec.type === "openStart")
     parts = extra.concat([hourMarkLabel(spec.mark) + "~마감"]);
   else if (spec.type === "openEnd")
     parts = ["시작~" + hourMarkLabel(spec.mark)].concat(extra);
-  else parts = groups(spec.marks, spec.continuous).concat(extra);
+  else parts = groups(pointSpecGroups(spec)).concat(extra);
   return parts.join(" · ");
 }
 
@@ -983,8 +1003,8 @@ export function applyBulkImportPlan(plan) {
     function addRange(startSlot, endSlot) {
       addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
     }
-    function applyMarks(marks, continuous) {
-      groupConsecutiveMarks(marks, continuous).forEach((group) => {
+    function applyGroups(groups) {
+      groups.forEach((group) => {
         addRange(
           hourMarkToStartSlot(group[0]),
           hourMarkToStartSlot(group[group.length - 1]),
@@ -1000,14 +1020,14 @@ export function applyBulkImportPlan(plan) {
         locId = dayEntry.locationId;
         dayEntry.specs.forEach((spec) => {
           if (spec.type === "point") {
-            applyMarks(spec.marks, spec.continuous);
-            applyMarks(spec.extraPoints || []);
+            applyGroups(pointSpecGroups(spec));
+            applyGroups(groupConsecutiveMarks(spec.extraPoints || []));
           } else if (spec.type === "openStart") {
-            applyMarks(spec.extraPoints || []);
+            applyGroups(groupConsecutiveMarks(spec.extraPoints || []));
             addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
           } else if (spec.type === "openEnd") {
             addRange(0, hourMarkToStartSlot(spec.mark));
-            applyMarks(spec.extraPoints || []);
+            applyGroups(groupConsecutiveMarks(spec.extraPoints || []));
           }
         });
       });
@@ -1022,12 +1042,8 @@ export function applyBulkImportPlan(plan) {
 }
 
 // 마크 배열(연속이면 하나로 묶어)을 미리보기용 문구 조각들로 바꾼다.
-export function describeMarks(marks, continuous = false) {
-  return groupConsecutiveMarks(marks, continuous).map((group) =>
-    group.length > 1
-      ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1])
-      : hourMarkLabel(group[0]),
-  );
+export function describeMarks(marks) {
+  return groupConsecutiveMarks(marks).map(groupLabel);
 }
 
 // 파싱된 하루치 스케줄(day.specs)을 사람이 읽을 문구로 만든다 (미리보기 칩용).
@@ -1035,7 +1051,7 @@ export function describeDaySpecs(specs) {
   const parts = [];
   specs.forEach((spec) => {
     if (spec.type === "point") {
-      parts.push(...describeMarks(spec.marks, spec.continuous));
+      parts.push(...pointSpecGroups(spec).map(groupLabel));
       parts.push(...describeMarks(spec.extraPoints || []));
     } else if (spec.type === "openStart") {
       parts.push(...describeMarks(spec.extraPoints || []));

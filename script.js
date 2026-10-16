@@ -8799,7 +8799,10 @@
   function expandHourRange(leftMark, rightMark) {
     const leftHour24 = leftMark.hour % 12 + 12;
     const rightHour24 = rightMark.hour % 12 + 12;
-    if (rightHour24 < leftHour24) return null;
+    const leftAt = leftHour24 * 60 + leftMark.minute;
+    const rightAt = rightHour24 * 60 + rightMark.minute;
+    if (rightAt < leftAt) return null;
+    if (rightAt === leftAt) return [{ hour: leftMark.hour, minute: leftMark.minute }];
     const marks = [];
     for (let h24 = leftHour24; h24 <= rightHour24; h24++) {
       const hour = h24 === 12 ? 12 : h24 - 12;
@@ -8933,11 +8936,13 @@
             const marks = expandHourRange(l, r);
             if (marks)
               candidates.push({
-                spec: { type: "point", marks, continuous: true },
+                spec: { type: "point", marks, range: true },
                 unordered: false
               });
           })
         );
+        if (lefts.length && rights.length && !candidates.length)
+          failMessage = '시작이 끝보다 늦은 범위입니다: "' + originalToken + '"';
       } else if (rightStr === "") {
         ambiguousPart = leftStr;
         candidates = hourMarkReadings(leftStr).filter((marks) => marks.length > 0).map((marks) => ({
@@ -8979,17 +8984,23 @@
     return { ambiguous: true, token: ambiguousPart, warning, options };
   }
   var MAX_TIME_CHOICES = 4;
+  function pointSpecGroups(spec) {
+    return spec.range ? [spec.marks] : groupConsecutiveMarks(spec.marks, spec.continuous);
+  }
+  function groupLabel(group) {
+    return group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) : hourMarkLabel(group[0]);
+  }
   function describeClockOption(spec) {
-    const groups = (marks, continuous) => groupConsecutiveMarks(marks, continuous).map(
+    const groups = (groupsOfMarks) => groupsOfMarks.map(
       (group) => group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) + " 연속 가능 구간" : hourMarkLabel(group[0]) + " 시작"
     );
-    const extra = groups(spec.extraPoints || []);
+    const extra = groups(groupConsecutiveMarks(spec.extraPoints || []));
     let parts;
     if (spec.type === "openStart")
       parts = extra.concat([hourMarkLabel(spec.mark) + "~마감"]);
     else if (spec.type === "openEnd")
       parts = ["시작~" + hourMarkLabel(spec.mark)].concat(extra);
-    else parts = groups(spec.marks, spec.continuous).concat(extra);
+    else parts = groups(pointSpecGroups(spec)).concat(extra);
     return parts.join(" · ");
   }
   function existingLocationId(name) {
@@ -9279,8 +9290,8 @@
       function addRange(startSlot, endSlot) {
         addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
       }
-      function applyMarks(marks, continuous) {
-        groupConsecutiveMarks(marks, continuous).forEach((group) => {
+      function applyGroups(groups) {
+        groups.forEach((group) => {
           addRange(
             hourMarkToStartSlot(group[0]),
             hourMarkToStartSlot(group[group.length - 1])
@@ -9292,14 +9303,14 @@
         locId = dayEntry.locationId;
         dayEntry.specs.forEach((spec) => {
           if (spec.type === "point") {
-            applyMarks(spec.marks, spec.continuous);
-            applyMarks(spec.extraPoints || []);
+            applyGroups(pointSpecGroups(spec));
+            applyGroups(groupConsecutiveMarks(spec.extraPoints || []));
           } else if (spec.type === "openStart") {
-            applyMarks(spec.extraPoints || []);
+            applyGroups(groupConsecutiveMarks(spec.extraPoints || []));
             addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
           } else if (spec.type === "openEnd") {
             addRange(0, hourMarkToStartSlot(spec.mark));
-            applyMarks(spec.extraPoints || []);
+            applyGroups(groupConsecutiveMarks(spec.extraPoints || []));
           }
         });
       });
@@ -9312,16 +9323,14 @@
     });
     return report;
   }
-  function describeMarks(marks, continuous = false) {
-    return groupConsecutiveMarks(marks, continuous).map(
-      (group) => group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) : hourMarkLabel(group[0])
-    );
+  function describeMarks(marks) {
+    return groupConsecutiveMarks(marks).map(groupLabel);
   }
   function describeDaySpecs(specs) {
     const parts = [];
     specs.forEach((spec) => {
       if (spec.type === "point") {
-        parts.push(...describeMarks(spec.marks, spec.continuous));
+        parts.push(...pointSpecGroups(spec).map(groupLabel));
         parts.push(...describeMarks(spec.extraPoints || []));
       } else if (spec.type === "openStart") {
         parts.push(...describeMarks(spec.extraPoints || []));
