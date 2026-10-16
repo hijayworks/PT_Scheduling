@@ -8815,6 +8815,15 @@
     }
     return marks;
   }
+  function clockDigitReadings(digits) {
+    const hour = parseInt(digits.slice(0, -2), 10);
+    const minute = parseInt(digits.slice(-2), 10);
+    const time = hour >= 1 && hour <= 12 && minute < 60 && minute % SLOT_MIN === 0 ? { hour, minute } : null;
+    const marks = tokenizeHourDigits(digits);
+    const at = (m) => (m.hour % 12 + 12) * 60 + m.minute;
+    const increasing = marks && marks.every((m, i) => i === 0 || at(m) > at(marks[i - 1]));
+    return { time, hours: increasing ? marks : null };
+  }
   function parseTimeToken(token, single = false) {
     const originalToken = token;
     token = token.replace(/-/g, "~");
@@ -8823,13 +8832,6 @@
       (_, hour, minute) => hour + ":" + minute.padStart(2, "0")
     );
     token = token.replace(/(\d)시/g, "$1");
-    if (single && /^\d{3,4}$/.test(token)) {
-      const hour = parseInt(token.slice(0, -2), 10);
-      const minute = parseInt(token.slice(-2), 10);
-      if (hour < 1 || hour > 12 || minute >= 60 || minute % SLOT_MIN !== 0)
-        return { error: '시간 해석 실패: "' + originalToken + '"' };
-      return { type: "point", marks: [{ hour, minute }] };
-    }
     const LATE_MARK = { hour: 10, minute: 30 };
     let hasLateMark = false;
     if (token.endsWith("늦은시간")) {
@@ -8838,11 +8840,7 @@
     }
     function withLateMark(result) {
       if (!hasLateMark || result.error) return result;
-      if (result.type === "point")
-        result.marks = result.marks.concat([LATE_MARK]);
-      else if (result.type === "openStart" || result.type === "openEnd") {
-        result.extraPoints = (result.extraPoints || []).concat([LATE_MARK]);
-      }
+      result.extraPoints = (result.extraPoints || []).concat([LATE_MARK]);
       return result;
     }
     if (token === "") {
@@ -8908,16 +8906,38 @@
         warning
       });
     }
-    const marks = parseHourMarks(clean);
+    let marks;
+    if (/^\d{3,4}$/.test(clean)) {
+      const { time, hours } = clockDigitReadings(clean);
+      const sameReading = time && hours && hours.length === 1 && hours[0].hour === time.hour && hours[0].minute === time.minute;
+      if (time && hours && !sameReading)
+        return {
+          ambiguous: true,
+          token: clean,
+          warning,
+          options: [
+            { key: "time", spec: withLateMark({ type: "point", marks: [time] }) },
+            { key: "hours", spec: withLateMark({ type: "point", marks: hours }) }
+          ]
+        };
+      marks = time ? [time] : hours || (single ? null : tokenizeHourDigits(clean));
+    } else {
+      marks = parseHourMarks(clean);
+    }
     if (!marks)
       return { error: '시간 해석 실패: "' + originalToken + '"', warning };
     return withLateMark({ type: "point", marks, warning });
+  }
+  function describeClockOption(spec) {
+    return groupConsecutiveMarks(spec.marks).concat(groupConsecutiveMarks(spec.extraPoints || [])).map(
+      (group) => group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) + " 연속 가능 구간" : hourMarkLabel(group[0]) + " 시작"
+    ).join(" · ");
   }
   function existingLocationId(name) {
     const loc = findLocationByLooseName(name);
     return loc ? loc.id : null;
   }
-  function parseBulkImportLine(line, resolveLocation = existingLocationId, sectionLocationId = null) {
+  function parseBulkImportLine(line, resolveLocation = existingLocationId, sectionLocationId = null, resolutions = []) {
     const tokens = line.replace(/\//g, ",").replace(/(\d)\s*시\s*(\d{1,2})\s*분/g, "$1시$2분").trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) return null;
     const name = tokens[0];
@@ -8927,6 +8947,8 @@
       days: [],
       warnings: [],
       errors: [],
+      ambiguities: [],
+      // [{ token, options:[{ key, spec }], choice: key | null }]
       clearAll: false
     };
     if (tokens.length === 2 && /^x$/i.test(tokens[1])) {
@@ -8944,11 +8966,23 @@
         );
         return;
       }
-      const parsed = parseTimeToken(tok, single);
+      let parsed = parseTimeToken(tok, single);
       if (parsed.warning) result.warnings.push(parsed.warning);
       if (parsed.error) {
         result.errors.push(parsed.error);
         return;
+      }
+      if (parsed.ambiguous) {
+        const picked = parsed.options.find(
+          (o) => o.key === resolutions[result.ambiguities.length]
+        );
+        result.ambiguities.push({
+          token: parsed.token,
+          options: parsed.options,
+          choice: picked ? picked.key : null
+        });
+        if (!picked) return;
+        parsed = picked.spec;
       }
       currentDays.forEach((day) => {
         let dayEntry = result.days.find(
@@ -8999,9 +9033,34 @@
     return m ? m[1] : null;
   }
   function planBulkImport(text) {
-    const bare = (n) => n.replace(/점$/, "");
     const newLocations = [];
-    function resolveLocation(name) {
+    const resolveLocation = bulkLocationResolver(newLocations);
+    let sectionLocationId = null;
+    const rows = [];
+    text.split("\n").forEach((line, lineIndex) => {
+      const header = parseBulkSectionHeader(line);
+      if (header !== null) {
+        sectionLocationId = resolveLocation(header);
+        return;
+      }
+      const parsed = parseBulkImportLine(line, resolveLocation, sectionLocationId);
+      if (!parsed) return;
+      const firstLoc = parsed.days.find((d) => d.locationId);
+      rows.push({
+        parsed,
+        line,
+        lineIndex,
+        sectionLocationId,
+        choice: bulkMemberChoice(parsed.name),
+        newLocationId: sectionLocationId || firstLoc && firstLoc.locationId || (state.locations[0] ? state.locations[0].id : ""),
+        newCategory: "등록"
+      });
+    });
+    return { rows, newLocations };
+  }
+  function bulkLocationResolver(newLocations) {
+    const bare = (n) => n.replace(/점$/, "");
+    return (name) => {
       const existing = existingLocationId(name);
       if (existing) return existing;
       let pending = newLocations.find((l) => bare(l.name) === bare(name));
@@ -9013,27 +9072,38 @@
         newLocations.push(pending);
       }
       return pending.id;
-    }
-    let sectionLocationId = null;
-    const rows = [];
-    text.split("\n").forEach((line) => {
-      const header = parseBulkSectionHeader(line);
-      if (header !== null) {
-        sectionLocationId = resolveLocation(header);
-        return;
-      }
-      const parsed = parseBulkImportLine(line, resolveLocation, sectionLocationId);
-      if (!parsed) return;
-      const matches = findMembersByName(parsed.name);
-      const firstLoc = parsed.days.find((d) => d.locationId);
-      rows.push({
-        parsed,
-        choice: matches.length === 0 ? "__new__" : matches.length === 1 ? matches[0].id : "",
-        newLocationId: sectionLocationId || firstLoc && firstLoc.locationId || (state.locations[0] ? state.locations[0].id : ""),
-        newCategory: "등록"
-      });
-    });
-    return { rows, newLocations };
+    };
+  }
+  function bulkMemberChoice(name) {
+    const matches = findMembersByName(name);
+    if (matches.length === 0) return "__new__";
+    return matches.length === 1 ? matches[0].id : "";
+  }
+  function reparseBulkRow(plan, row, line, resolutions) {
+    if (parseBulkSectionHeader(line) !== null)
+      return { error: "지점 제목 줄은 '뒤로'에서 고쳐주세요." };
+    const parsed = parseBulkImportLine(
+      line,
+      bulkLocationResolver(plan.newLocations),
+      row.sectionLocationId,
+      resolutions
+    );
+    if (!parsed) return { error: "이름과 요일·시간을 적어주세요." };
+    if (parsed.name !== row.parsed.name) row.choice = bulkMemberChoice(parsed.name);
+    row.parsed = parsed;
+    row.line = line;
+    return {};
+  }
+  function chooseBulkAmbiguity(plan, row, index, key) {
+    const resolutions = row.parsed.ambiguities.map((a) => a.choice);
+    resolutions[index] = key;
+    return reparseBulkRow(plan, row, row.line, resolutions);
+  }
+  function editBulkImportRow(plan, row, line) {
+    return reparseBulkRow(plan, row, line, []);
+  }
+  function hasUnresolvedTime(row) {
+    return row.parsed.ambiguities.some((a) => !a.choice);
   }
   function createsNewMember(row) {
     return row.parsed.days.length > 0 || row.parsed.clearAll;
@@ -9044,6 +9114,11 @@
     if (unchosen.length)
       return {
         error: "같은 이름의 회원이 여러 명입니다. 미리보기에서 회원을 골라주세요: " + unchosen.map((r) => r.parsed.name).join(", ")
+      };
+    const unresolved = active.filter(hasUnresolvedTime);
+    if (unresolved.length)
+      return {
+        error: "시간 해석을 확인해야 하는 줄이 있습니다. 미리보기에서 해석을 고르거나 줄을 고치거나 건너뛰기로 바꿔주세요: " + unresolved.map((r) => r.parsed.name).join(", ")
       };
     const noLocation = active.filter(
       (r) => r.choice === "__new__" && createsNewMember(r) && !r.newLocationId
@@ -9144,6 +9219,7 @@
         dayEntry.specs.forEach((spec) => {
           if (spec.type === "point") {
             applyMarks(spec.marks);
+            applyMarks(spec.extraPoints || []);
           } else if (spec.type === "openStart") {
             applyMarks(spec.extraPoints || []);
             addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
@@ -9172,6 +9248,7 @@
     specs.forEach((spec) => {
       if (spec.type === "point") {
         parts.push(...describeMarks(spec.marks));
+        parts.push(...describeMarks(spec.extraPoints || []));
       } else if (spec.type === "openStart") {
         parts.push(...describeMarks(spec.extraPoints || []));
         parts.push(hourMarkLabel(spec.mark) + "~마감");
@@ -9282,6 +9359,9 @@
       rows.filter((r) => memberById(r.choice)).map((r) => r.choice)
     );
     const unchosen = rows.filter((r) => r.choice === "").length;
+    const unresolved = rows.filter(
+      (r) => r.choice !== "__skip__" && hasUnresolvedTime(r)
+    ).length;
     const skipped = rows.filter((r) => r.choice === "__skip__").length;
     const parts = [];
     if (bulkImportPlan.newLocations.length)
@@ -9291,6 +9371,7 @@
     parts.push("신규 회원 " + newNames.size + "명");
     parts.push("기존 회원 연결 " + linked.size + "명");
     if (unchosen) parts.push("동명이인 선택 필요 " + unchosen + "명");
+    if (unresolved) parts.push("해석 확인 필요 " + unresolved + "줄");
     parts.push("건너뛰기 " + skipped + "명");
     bulkImportPreviewSummaryEl.textContent = "";
     bulkImportPreviewSummaryEl.append(
@@ -9307,134 +9388,252 @@
     }
     bulkImportPlan = plan;
     bulkImportPreviewListEl.innerHTML = "";
-    plan.rows.forEach((row) => {
-      const parsed = row.parsed;
-      const matches = findMembersByName(parsed.name);
-      const rowEl = document.createElement("div");
-      rowEl.className = "bulk-preview-row";
-      const head = document.createElement("div");
-      head.className = "bulk-preview-row-head";
-      const nameEl = document.createElement("span");
-      nameEl.className = "bulk-preview-name";
-      nameEl.textContent = parsed.name;
-      head.appendChild(nameEl);
-      const select = document.createElement("select");
-      if (matches.length > 1) {
-        const pickOpt = document.createElement("option");
-        pickOpt.value = "";
-        pickOpt.textContent = "동명이인 — 회원 선택";
-        select.appendChild(pickOpt);
-      }
-      matches.forEach((m) => {
-        const opt = document.createElement("option");
-        opt.value = m.id;
-        const locNames = m.locationIds.map((id) => locationById(id)).filter(Boolean).map((l) => l.name).join("·");
-        opt.textContent = "기존 회원 연결 (" + (locNames || "지점 미지정") + " · " + (m.category || "구분 없음") + ")" + (matches.length > 1 ? " #" + m.id.slice(-4) : "");
-        select.appendChild(opt);
-      });
-      const newOpt = document.createElement("option");
-      newOpt.value = "__new__";
-      newOpt.textContent = "신규 회원";
-      select.appendChild(newOpt);
-      const skipOpt = document.createElement("option");
-      skipOpt.value = "__skip__";
-      skipOpt.textContent = "건너뛰기";
-      select.appendChild(skipOpt);
-      select.value = row.choice;
-      select.addEventListener("change", () => {
-        row.choice = select.value;
-        renderRowState();
-        renderBulkImportSummary();
-      });
-      const newFields = document.createElement("div");
-      newFields.className = "bulk-preview-new-fields";
-      const locSelect = document.createElement("select");
-      state.locations.map((l) => l.id).concat(plan.newLocations.map((l) => l.id)).forEach((locId) => {
-        const opt = document.createElement("option");
-        opt.value = locId;
-        opt.textContent = bulkLocationLabel(locId);
-        locSelect.appendChild(opt);
-      });
-      if (row.newLocationId) locSelect.value = row.newLocationId;
-      locSelect.addEventListener("change", () => {
-        row.newLocationId = locSelect.value;
-      });
-      const catSelect = document.createElement("select");
-      CATEGORY_OPTIONS.forEach((opt) => {
-        const optionEl = document.createElement("option");
-        optionEl.value = opt;
-        optionEl.textContent = opt;
-        catSelect.appendChild(optionEl);
-      });
-      catSelect.value = row.newCategory;
-      catSelect.addEventListener("change", () => {
-        row.newCategory = catSelect.value;
-      });
-      newFields.appendChild(locSelect);
-      newFields.appendChild(catSelect);
-      head.appendChild(select);
-      head.appendChild(newFields);
-      rowEl.appendChild(head);
-      const scheduleEl = document.createElement("div");
-      scheduleEl.className = "bulk-preview-schedule";
-      rowEl.appendChild(scheduleEl);
-      function renderSchedule() {
-        scheduleEl.innerHTML = "";
-        if (parsed.days.length > 0) {
-          parsed.days.forEach((dayEntry) => {
-            const chip2 = document.createElement("span");
-            chip2.className = "bulk-preview-day-chip";
-            const locName = bulkLocationLabel(dayEntry.locationId);
-            const dayEl = document.createElement("b");
-            dayEl.textContent = DAYS[dayEntry.day];
-            chip2.append(
-              dayEl,
-              " " + (locName ? "(" + locName + ") " : "") + describeDaySpecs(dayEntry.specs)
-            );
-            scheduleEl.appendChild(chip2);
-          });
-          return;
-        }
-        const chip = document.createElement("span");
-        chip.className = "bulk-preview-day-chip";
-        const existing = memberById(row.choice);
-        if (parsed.clearAll && existing) {
-          const count = state.requests.filter(
-            (r) => r.memberId === existing.id
-          ).length;
-          chip.classList.add("bulk-preview-day-chip-clear");
-          chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
-        } else if (parsed.clearAll && row.choice === "__new__") {
-          chip.textContent = "신청 시간 없이 회원만 등록";
-        } else {
-          chip.textContent = "등록할 시간 없음";
-        }
-        scheduleEl.appendChild(chip);
-      }
-      parsed.warnings.forEach((w) => {
-        const p = document.createElement("p");
-        p.className = "bulk-preview-note warning";
-        p.textContent = "⚠ " + w;
-        rowEl.appendChild(p);
-      });
-      parsed.errors.forEach((err) => {
-        const p = document.createElement("p");
-        p.className = "bulk-preview-note error";
-        p.textContent = "✕ " + err;
-        rowEl.appendChild(p);
-      });
-      function renderRowState() {
-        rowEl.classList.toggle("skip", row.choice === "__skip__");
-        select.classList.toggle("is-new-member", row.choice === "__new__");
-        newFields.hidden = row.choice !== "__new__";
-        renderSchedule();
-      }
-      renderRowState();
-      bulkImportPreviewListEl.appendChild(rowEl);
-    });
+    plan.rows.forEach(
+      (row) => bulkImportPreviewListEl.appendChild(renderBulkPreviewRow(row))
+    );
     renderBulkImportSummary();
     bulkImportStepInputEl.hidden = true;
     bulkImportStepPreviewEl.hidden = false;
+  }
+  function renderBulkPreviewRow(row) {
+    const plan = bulkImportPlan;
+    const parsed = row.parsed;
+    const matches = findMembersByName(parsed.name);
+    function rerender() {
+      rowEl.replaceWith(renderBulkPreviewRow(row));
+      renderBulkImportSummary();
+    }
+    const rowEl = document.createElement("div");
+    rowEl.className = "bulk-preview-row";
+    const head = document.createElement("div");
+    head.className = "bulk-preview-row-head";
+    const nameEl = document.createElement("span");
+    nameEl.className = "bulk-preview-name";
+    nameEl.textContent = parsed.name;
+    head.appendChild(nameEl);
+    const select = document.createElement("select");
+    if (matches.length > 1) {
+      const pickOpt = document.createElement("option");
+      pickOpt.value = "";
+      pickOpt.textContent = "동명이인 — 회원 선택";
+      select.appendChild(pickOpt);
+    }
+    matches.forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      const locNames = m.locationIds.map((id) => locationById(id)).filter(Boolean).map((l) => l.name).join("·");
+      opt.textContent = "기존 회원 연결 (" + (locNames || "지점 미지정") + " · " + (m.category || "구분 없음") + ")" + (matches.length > 1 ? " #" + m.id.slice(-4) : "");
+      select.appendChild(opt);
+    });
+    const newOpt = document.createElement("option");
+    newOpt.value = "__new__";
+    newOpt.textContent = "신규 회원";
+    select.appendChild(newOpt);
+    const skipOpt = document.createElement("option");
+    skipOpt.value = "__skip__";
+    skipOpt.textContent = "건너뛰기";
+    select.appendChild(skipOpt);
+    select.value = row.choice;
+    select.addEventListener("change", () => {
+      row.choice = select.value;
+      renderRowState();
+      renderBulkImportSummary();
+    });
+    const newFields = document.createElement("div");
+    newFields.className = "bulk-preview-new-fields";
+    const locSelect = document.createElement("select");
+    state.locations.map((l) => l.id).concat(plan.newLocations.map((l) => l.id)).forEach((locId) => {
+      const opt = document.createElement("option");
+      opt.value = locId;
+      opt.textContent = bulkLocationLabel(locId);
+      locSelect.appendChild(opt);
+    });
+    if (row.newLocationId) locSelect.value = row.newLocationId;
+    locSelect.addEventListener("change", () => {
+      row.newLocationId = locSelect.value;
+    });
+    const catSelect = document.createElement("select");
+    CATEGORY_OPTIONS.forEach((opt) => {
+      const optionEl = document.createElement("option");
+      optionEl.value = opt;
+      optionEl.textContent = opt;
+      catSelect.appendChild(optionEl);
+    });
+    catSelect.value = row.newCategory;
+    catSelect.addEventListener("change", () => {
+      row.newCategory = catSelect.value;
+    });
+    newFields.appendChild(locSelect);
+    newFields.appendChild(catSelect);
+    head.appendChild(select);
+    head.appendChild(newFields);
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "btn btn-ghost btn-small bulk-preview-edit-btn";
+    editBtn.textContent = "줄 수정";
+    head.appendChild(editBtn);
+    rowEl.appendChild(head);
+    const editor = document.createElement("div");
+    editor.className = "bulk-preview-editor";
+    editor.hidden = true;
+    const editInput = document.createElement("input");
+    editInput.type = "text";
+    editInput.className = "bulk-preview-edit-input";
+    editInput.setAttribute("aria-label", parsed.name + " 줄 수정");
+    const editApplyBtn = document.createElement("button");
+    editApplyBtn.type = "button";
+    editApplyBtn.className = "btn btn-primary btn-small";
+    editApplyBtn.textContent = "적용";
+    const editCancelBtn = document.createElement("button");
+    editCancelBtn.type = "button";
+    editCancelBtn.className = "btn btn-ghost btn-small";
+    editCancelBtn.textContent = "취소";
+    const editError = document.createElement("p");
+    editError.className = "bulk-preview-note error";
+    editError.hidden = true;
+    editor.append(editInput, editApplyBtn, editCancelBtn, editError);
+    rowEl.appendChild(editor);
+    editBtn.addEventListener("click", () => {
+      editInput.value = row.line.trim();
+      editError.hidden = true;
+      editor.hidden = false;
+      editInput.focus();
+    });
+    function applyEdit() {
+      const result = editBulkImportRow(plan, row, editInput.value);
+      if (result.error) {
+        editError.textContent = "✕ " + result.error;
+        editError.hidden = false;
+        return;
+      }
+      const lines = bulkImportTextareaEl.value.split("\n");
+      lines[row.lineIndex] = row.line;
+      bulkImportTextareaEl.value = lines.join("\n");
+      rerender();
+    }
+    editApplyBtn.addEventListener("click", applyEdit);
+    editCancelBtn.addEventListener("click", () => {
+      editor.hidden = true;
+    });
+    editInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") applyEdit();
+      else if (e.key === "Escape") {
+        e.stopPropagation();
+        editor.hidden = true;
+      }
+    });
+    parsed.ambiguities.forEach((amb, index) => {
+      const box = document.createElement("div");
+      box.className = "bulk-preview-ambiguity";
+      box.classList.toggle("resolved", !!amb.choice);
+      const title = document.createElement("p");
+      title.className = "bulk-preview-ambiguity-title";
+      title.append(
+        (amb.choice ? "✓ 해석 선택됨" : "⚠ 해석 확인 필요") + ": 원문 ",
+        highlightedRaw(parsed, index)
+      );
+      box.appendChild(title);
+      const options = document.createElement("div");
+      options.className = "bulk-preview-ambiguity-options";
+      amb.options.forEach((opt) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn btn-small bulk-preview-ambiguity-option";
+        btn.classList.toggle("selected", amb.choice === opt.key);
+        btn.setAttribute("aria-pressed", String(amb.choice === opt.key));
+        btn.dataset.key = opt.key;
+        btn.textContent = describeClockOption(opt.spec);
+        btn.addEventListener("click", () => {
+          chooseBulkAmbiguity(plan, row, index, opt.key);
+          rerender();
+        });
+        options.appendChild(btn);
+      });
+      box.appendChild(options);
+      rowEl.appendChild(box);
+    });
+    const scheduleEl = document.createElement("div");
+    scheduleEl.className = "bulk-preview-schedule";
+    rowEl.appendChild(scheduleEl);
+    function renderSchedule() {
+      scheduleEl.innerHTML = "";
+      if (parsed.days.length > 0) {
+        parsed.days.forEach((dayEntry) => {
+          const chip2 = document.createElement("span");
+          chip2.className = "bulk-preview-day-chip";
+          const locName = bulkLocationLabel(dayEntry.locationId);
+          const dayEl = document.createElement("b");
+          dayEl.textContent = DAYS[dayEntry.day];
+          chip2.append(
+            dayEl,
+            " " + (locName ? "(" + locName + ") " : "") + describeDaySpecs(dayEntry.specs)
+          );
+          scheduleEl.appendChild(chip2);
+        });
+        return;
+      }
+      const chip = document.createElement("span");
+      chip.className = "bulk-preview-day-chip";
+      const existing = memberById(row.choice);
+      if (parsed.clearAll && existing) {
+        const count = state.requests.filter(
+          (r) => r.memberId === existing.id
+        ).length;
+        chip.classList.add("bulk-preview-day-chip-clear");
+        chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
+      } else if (parsed.clearAll && row.choice === "__new__") {
+        chip.textContent = "신청 시간 없이 회원만 등록";
+      } else {
+        chip.textContent = "등록할 시간 없음";
+      }
+      scheduleEl.appendChild(chip);
+    }
+    parsed.warnings.forEach((w) => {
+      const p = document.createElement("p");
+      p.className = "bulk-preview-note warning";
+      p.textContent = "⚠ " + w;
+      rowEl.appendChild(p);
+    });
+    parsed.errors.forEach((err) => {
+      const p = document.createElement("p");
+      p.className = "bulk-preview-note error";
+      p.textContent = "✕ " + err;
+      rowEl.appendChild(p);
+    });
+    function renderRowState() {
+      rowEl.classList.toggle("skip", row.choice === "__skip__");
+      rowEl.classList.toggle(
+        "needs-review",
+        row.choice !== "__skip__" && hasUnresolvedTime(row)
+      );
+      select.classList.toggle("is-new-member", row.choice === "__new__");
+      newFields.hidden = row.choice !== "__new__";
+      renderSchedule();
+    }
+    renderRowState();
+    return rowEl;
+  }
+  function highlightedRaw(parsed, index) {
+    const token = parsed.ambiguities[index].token;
+    const nth = parsed.ambiguities.slice(0, index).filter((a) => a.token === token).length;
+    const found = [
+      ...parsed.raw.matchAll(new RegExp("(?<!\\d)" + token + "(?!\\d)", "g"))
+    ][nth];
+    const code = document.createElement("code");
+    const mark = document.createElement("mark");
+    mark.textContent = token;
+    if (!found) {
+      code.textContent = parsed.raw;
+      const span = document.createElement("span");
+      span.append(code, " 중 ", mark);
+      return span;
+    }
+    code.append(
+      parsed.raw.slice(0, found.index),
+      mark,
+      parsed.raw.slice(found.index + token.length)
+    );
+    return code;
   }
   bulkImportPreviewBtn.addEventListener("click", renderBulkImportPreview);
   bulkImportApplyBtn.addEventListener("click", () => {

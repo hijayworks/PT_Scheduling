@@ -346,13 +346,31 @@ export function expandHourRange(leftMark, rightMark) {
   return marks;
 }
 
+// 세·네 자리 숫자의 두 가지 읽기: 시+분 한 시각(time, 410 → 4:10)과 이어 쓴 정시(hours, 410 → 4시·10시).
+// 정시 읽기는 시각이 시간 순서대로 늘어날 때만 말이 되는 것으로 본다(1010 → 10시·10시, 1110 → 11시·10시는 아님).
+export function clockDigitReadings(digits) {
+  const hour = parseInt(digits.slice(0, -2), 10);
+  const minute = parseInt(digits.slice(-2), 10);
+  const time =
+    hour >= 1 && hour <= 12 && minute < 60 && minute % SLOT_MIN === 0
+      ? { hour, minute }
+      : null;
+  const marks = tokenizeHourDigits(digits);
+  const at = (m) => ((m.hour % 12) + 12) * 60 + m.minute;
+  const increasing =
+    marks && marks.every((m, i) => i === 0 || at(m) > at(marks[i - 1]));
+  return { time, hours: increasing ? marks : null };
+}
+
 // 시간 토큰 하나를 해석한다.
 //  - "8910" 같은 순수 숫자열 -> { type:"point", marks:[...] } (각각 독립된 희망 시작 시각)
 //  - "2~5" 처럼 물결 양쪽에 시각이 있으면 -> { type:"point", marks:[...] } ("2345"와 동일하게 확장)
 //  - "630~" -> { type:"openStart", mark:{...} } (그 시각부터 마감까지 전부 가능)
 //  - "~730" -> { type:"openEnd", mark:{...} } (마감 이전부터 그 시각까지 전부 가능)
-//  - single=true(쉼표로 나뉜 조각)이면 "410"·"1020"처럼 3~4자리 숫자를 "시+분" 한 시각으로 읽는다
-//    (쉼표 없이 "410"을 쓰면 기존처럼 4시·10시).
+//  - 세·네 자리 숫자는 clockDigitReadings의 두 읽기 중 말이 되는 쪽으로 읽는다(630 → 6:30, 1020 → 10:20,
+//    8910 → 8·9·10시). 둘 다 말이 되고 결과가 다르면(910, 410) 확정하지 않고
+//    { ambiguous:true, token, options:[{ key:"time"|"hours", spec }] }를 돌려준다 — 고르는 건 미리보기에서 한다.
+//    둘 다 안 되면 쉼표 조각(single)은 오류, 아니면 예전처럼 이어 쓴 정시로 읽는다("415" → 4·1·5시).
 export function parseTimeToken(token, single = false) {
   const originalToken = token;
   // "2-5"처럼 물결 대신 하이픈을 써도 "2~5"와 같게 본다.
@@ -365,16 +383,10 @@ export function parseTimeToken(token, single = false) {
   );
   // "2시"·"2시~5시"·"4시부터"처럼 숫자 뒤에 붙은 "시"는 떼고 숫자만으로 읽는다.
   token = token.replace(/(\d)시/g, "$1");
-  if (single && /^\d{3,4}$/.test(token)) {
-    const hour = parseInt(token.slice(0, -2), 10);
-    const minute = parseInt(token.slice(-2), 10);
-    if (hour < 1 || hour > 12 || minute >= 60 || minute % SLOT_MIN !== 0)
-      return { error: '시간 해석 실패: "' + originalToken + '"' };
-    return { type: "point", marks: [{ hour, minute }] };
-  }
   // "늦은시간"은 트레이너들이 관행적으로 쓰는 표현으로, 영업 마감 직전 시간대인
   // 오후 10시30분 시작을 뜻한다. "금910늦은시간"처럼 다른 시각 표기 뒤에 바로 붙어도
-  // 그 시각들에 더해 22:30을 별도의 희망 시작 시각으로 추가한다.
+  // 그 시각들에 더해 22:30을 별도의 희망 시작 시각으로 추가한다 — extraPoints에 따로 두어 앞 시각과
+  // 이어진 구간으로 묶이지 않게 한다("금9늦은시간"은 21:00~22:30이 아니라 21:00, 22:30).
   const LATE_MARK = { hour: 10, minute: 30 };
   let hasLateMark = false;
   if (token.endsWith("늦은시간")) {
@@ -383,11 +395,7 @@ export function parseTimeToken(token, single = false) {
   }
   function withLateMark(result) {
     if (!hasLateMark || result.error) return result;
-    if (result.type === "point")
-      result.marks = result.marks.concat([LATE_MARK]);
-    else if (result.type === "openStart" || result.type === "openEnd") {
-      result.extraPoints = (result.extraPoints || []).concat([LATE_MARK]);
-    }
+    result.extraPoints = (result.extraPoints || []).concat([LATE_MARK]);
     return result;
   }
   if (token === "") {
@@ -471,10 +479,47 @@ export function parseTimeToken(token, single = false) {
       warning,
     });
   }
-  const marks = parseHourMarks(clean);
+  let marks;
+  if (/^\d{3,4}$/.test(clean)) {
+    const { time, hours } = clockDigitReadings(clean);
+    const sameReading =
+      time &&
+      hours &&
+      hours.length === 1 &&
+      hours[0].hour === time.hour &&
+      hours[0].minute === time.minute;
+    if (time && hours && !sameReading)
+      return {
+        ambiguous: true,
+        token: clean,
+        warning,
+        options: [
+          { key: "time", spec: withLateMark({ type: "point", marks: [time] }) },
+          { key: "hours", spec: withLateMark({ type: "point", marks: hours }) },
+        ],
+      };
+    marks = time ? [time] : hours || (single ? null : tokenizeHourDigits(clean));
+  } else {
+    marks = parseHourMarks(clean);
+  }
   if (!marks)
     return { error: '시간 해석 실패: "' + originalToken + '"', warning };
   return withLateMark({ type: "point", marks, warning });
+}
+
+// 모호한 시간의 선택지 문구: 떨어진 시각은 각각 "시작", 이어진 정시는 "연속 가능 구간"으로 구분한다.
+export function describeClockOption(spec) {
+  return groupConsecutiveMarks(spec.marks)
+    .concat(groupConsecutiveMarks(spec.extraPoints || []))
+    .map((group) =>
+      group.length > 1
+        ? hourMarkLabel(group[0]) +
+          "~" +
+          hourMarkLabel(group[group.length - 1]) +
+          " 연속 가능 구간"
+        : hourMarkLabel(group[0]) + " 시작",
+    )
+    .join(" · ");
 }
 
 // 괄호 지점 표기를 지점 id로 바꾸는 기본 규칙: 등록된 지점만 찾고, 없으면 null(그 지점 시간은 오류로 건너뜀).
@@ -486,10 +531,13 @@ function existingLocationId(name) {
 
 // 한 줄("이름  요일 시간...")을 해석한다. sectionLocationId는 "[마포]" 같은 지점 제목 아래 줄의 기본
 // 지점이다 — 괄호 지점 표기가 없는 시간은 그 지점에서만 가능한 것으로 본다.
+// 모호한 시간(parseTimeToken의 ambiguous)은 ambiguities에 순서대로 모으고, resolutions[i]("time"|"hours")로
+// 고른 것만 등록한다 — 고르지 않은 모호한 시간은 days에 넣지 않는다.
 export function parseBulkImportLine(
   line,
   resolveLocation = existingLocationId,
   sectionLocationId = null,
+  resolutions = [],
 ) {
   // "4시 10분/4시20분": "/"는 쉼표처럼 시각을 나누고, 띄어 쓴 "시 분"은 한 토큰으로 붙인다.
   const tokens = line
@@ -506,6 +554,7 @@ export function parseBulkImportLine(
     days: [],
     warnings: [],
     errors: [],
+    ambiguities: [], // [{ token, options:[{ key, spec }], choice: key | null }]
     clearAll: false,
   };
 
@@ -532,11 +581,23 @@ export function parseBulkImportLine(
       );
       return;
     }
-    const parsed = parseTimeToken(tok, single);
+    let parsed = parseTimeToken(tok, single);
     if (parsed.warning) result.warnings.push(parsed.warning);
     if (parsed.error) {
       result.errors.push(parsed.error);
       return;
+    }
+    if (parsed.ambiguous) {
+      const picked = parsed.options.find(
+        (o) => o.key === resolutions[result.ambiguities.length],
+      );
+      result.ambiguities.push({
+        token: parsed.token,
+        options: parsed.options,
+        choice: picked ? picked.key : null,
+      });
+      if (!picked) return;
+      parsed = picked.spec;
     }
     currentDays.forEach((day) => {
       let dayEntry = result.days.find(
@@ -609,10 +670,42 @@ export function parseBulkSectionHeader(line) {
 //  - 회원은 이름으로 연결한다: 없으면 신규(구분 '등록'), 한 명이면 그 회원, 동명이인이면 고르기 전까지
 //    비워 둔다("") — 비어 있으면 적용이 막힌다.
 // rows: [{ parsed, choice: memberId | "__new__" | "__skip__" | "", newLocationId, newCategory }]
+// rows의 line·lineIndex·sectionLocationId는 미리보기에서 줄을 다시 해석할 때(editBulkImportRow) 쓴다.
 export function planBulkImport(text) {
-  const bare = (n) => n.replace(/점$/, "");
   const newLocations = [];
-  function resolveLocation(name) {
+  const resolveLocation = bulkLocationResolver(newLocations);
+  let sectionLocationId = null;
+  const rows = [];
+  text.split("\n").forEach((line, lineIndex) => {
+    const header = parseBulkSectionHeader(line);
+    if (header !== null) {
+      sectionLocationId = resolveLocation(header);
+      return;
+    }
+    const parsed = parseBulkImportLine(line, resolveLocation, sectionLocationId);
+    if (!parsed) return;
+    // 신규 회원의 기본 지점: 지점 제목 → 줄에 적힌 첫 지점 → 첫 등록 지점.
+    const firstLoc = parsed.days.find((d) => d.locationId);
+    rows.push({
+      parsed,
+      line,
+      lineIndex,
+      sectionLocationId,
+      choice: bulkMemberChoice(parsed.name),
+      newLocationId:
+        sectionLocationId ||
+        (firstLoc && firstLoc.locationId) ||
+        (state.locations[0] ? state.locations[0].id : ""),
+      newCategory: "등록",
+    });
+  });
+  return { rows, newLocations };
+}
+
+// 지점 이름 → id: 등록된 지점이면 그 id, 없으면 newLocations에 생성 예정으로 둔다(state는 바꾸지 않는다).
+function bulkLocationResolver(newLocations) {
+  const bare = (n) => n.replace(/점$/, "");
+  return (name) => {
     const existing = existingLocationId(name);
     if (existing) return existing;
     let pending = newLocations.find((l) => bare(l.name) === bare(name));
@@ -624,36 +717,48 @@ export function planBulkImport(text) {
       newLocations.push(pending);
     }
     return pending.id;
-  }
-  let sectionLocationId = null;
-  const rows = [];
-  text.split("\n").forEach((line) => {
-    const header = parseBulkSectionHeader(line);
-    if (header !== null) {
-      sectionLocationId = resolveLocation(header);
-      return;
-    }
-    const parsed = parseBulkImportLine(line, resolveLocation, sectionLocationId);
-    if (!parsed) return;
-    const matches = findMembersByName(parsed.name);
-    // 신규 회원의 기본 지점: 지점 제목 → 줄에 적힌 첫 지점 → 첫 등록 지점.
-    const firstLoc = parsed.days.find((d) => d.locationId);
-    rows.push({
-      parsed,
-      choice:
-        matches.length === 0
-          ? "__new__"
-          : matches.length === 1
-            ? matches[0].id
-            : "",
-      newLocationId:
-        sectionLocationId ||
-        (firstLoc && firstLoc.locationId) ||
-        (state.locations[0] ? state.locations[0].id : ""),
-      newCategory: "등록",
-    });
-  });
-  return { rows, newLocations };
+  };
+}
+
+function bulkMemberChoice(name) {
+  const matches = findMembersByName(name);
+  if (matches.length === 0) return "__new__";
+  return matches.length === 1 ? matches[0].id : "";
+}
+
+// 미리보기의 한 줄을 다시 해석한다(state는 그대로). 같은 지점 제목 아래 줄로 보고, 이름이 바뀌었을 때만
+// 회원 연결을 다시 정한다 — 이 줄의 신규 회원 지점·구분과 다른 줄의 선택은 건드리지 않는다.
+function reparseBulkRow(plan, row, line, resolutions) {
+  if (parseBulkSectionHeader(line) !== null)
+    return { error: "지점 제목 줄은 '뒤로'에서 고쳐주세요." };
+  const parsed = parseBulkImportLine(
+    line,
+    bulkLocationResolver(plan.newLocations),
+    row.sectionLocationId,
+    resolutions,
+  );
+  if (!parsed) return { error: "이름과 요일·시간을 적어주세요." };
+  if (parsed.name !== row.parsed.name) row.choice = bulkMemberChoice(parsed.name);
+  row.parsed = parsed;
+  row.line = line;
+  return {};
+}
+
+// 모호한 시간 index번째를 key("time"|"hours") 해석으로 고른다(다른 모호한 시간의 선택은 유지).
+export function chooseBulkAmbiguity(plan, row, index, key) {
+  const resolutions = row.parsed.ambiguities.map((a) => a.choice);
+  resolutions[index] = key;
+  return reparseBulkRow(plan, row, row.line, resolutions);
+}
+
+// 미리보기에서 고친 줄로 바꾼다. 고친 글에서 다시 모호한 시간은 처음부터 다시 고른다.
+export function editBulkImportRow(plan, row, line) {
+  return reparseBulkRow(plan, row, line, []);
+}
+
+// 해석을 고르지 않은 모호한 시간이 있는 줄인지.
+function hasUnresolvedTime(row) {
+  return row.parsed.ambiguities.some((a) => !a.choice);
 }
 
 // 신규 회원 줄이 실제로 회원을 만드는지: 시간이 있거나 "이름 x"(시간 없이 회원만 등록)일 때.
@@ -670,6 +775,13 @@ export function applyBulkImportPlan(plan) {
       error:
         "같은 이름의 회원이 여러 명입니다. 미리보기에서 회원을 골라주세요: " +
         unchosen.map((r) => r.parsed.name).join(", "),
+    };
+  const unresolved = active.filter(hasUnresolvedTime);
+  if (unresolved.length)
+    return {
+      error:
+        "시간 해석을 확인해야 하는 줄이 있습니다. 미리보기에서 해석을 고르거나 줄을 고치거나 건너뛰기로 바꿔주세요: " +
+        unresolved.map((r) => r.parsed.name).join(", "),
     };
   const noLocation = active.filter(
     (r) => r.choice === "__new__" && createsNewMember(r) && !r.newLocationId,
@@ -793,6 +905,7 @@ export function applyBulkImportPlan(plan) {
         dayEntry.specs.forEach((spec) => {
           if (spec.type === "point") {
             applyMarks(spec.marks);
+            applyMarks(spec.extraPoints || []);
           } else if (spec.type === "openStart") {
             applyMarks(spec.extraPoints || []);
             addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
@@ -827,6 +940,7 @@ export function describeDaySpecs(specs) {
   specs.forEach((spec) => {
     if (spec.type === "point") {
       parts.push(...describeMarks(spec.marks));
+      parts.push(...describeMarks(spec.extraPoints || []));
     } else if (spec.type === "openStart") {
       parts.push(...describeMarks(spec.extraPoints || []));
       parts.push(hourMarkLabel(spec.mark) + "~마감");
@@ -952,6 +1066,9 @@ function renderBulkImportSummary() {
     rows.filter((r) => memberById(r.choice)).map((r) => r.choice),
   );
   const unchosen = rows.filter((r) => r.choice === "").length;
+  const unresolved = rows.filter(
+    (r) => r.choice !== "__skip__" && hasUnresolvedTime(r),
+  ).length;
   const skipped = rows.filter((r) => r.choice === "__skip__").length;
   const parts = [];
   if (bulkImportPlan.newLocations.length)
@@ -962,6 +1079,7 @@ function renderBulkImportSummary() {
   parts.push("신규 회원 " + newNames.size + "명");
   parts.push("기존 회원 연결 " + linked.size + "명");
   if (unchosen) parts.push("동명이인 선택 필요 " + unchosen + "명");
+  if (unresolved) parts.push("해석 확인 필요 " + unresolved + "줄");
   parts.push("건너뛰기 " + skipped + "명");
   bulkImportPreviewSummaryEl.textContent = "";
   bulkImportPreviewSummaryEl.append(
@@ -979,161 +1097,289 @@ export function renderBulkImportPreview() {
   }
   bulkImportPlan = plan;
   bulkImportPreviewListEl.innerHTML = "";
-
-  plan.rows.forEach((row) => {
-    const parsed = row.parsed;
-    const matches = findMembersByName(parsed.name);
-
-    const rowEl = document.createElement("div");
-    rowEl.className = "bulk-preview-row";
-
-    const head = document.createElement("div");
-    head.className = "bulk-preview-row-head";
-
-    const nameEl = document.createElement("span");
-    nameEl.className = "bulk-preview-name";
-    nameEl.textContent = parsed.name;
-    head.appendChild(nameEl);
-
-    const select = document.createElement("select");
-    // 동명이인은 임의로 정하지 않는다 — 고르기 전에는 빈 값이라 적용이 막힌다.
-    if (matches.length > 1) {
-      const pickOpt = document.createElement("option");
-      pickOpt.value = "";
-      pickOpt.textContent = "동명이인 — 회원 선택";
-      select.appendChild(pickOpt);
-    }
-    matches.forEach((m) => {
-      const opt = document.createElement("option");
-      opt.value = m.id;
-      const locNames = m.locationIds
-        .map((id) => locationById(id))
-        .filter(Boolean)
-        .map((l) => l.name)
-        .join("·");
-      opt.textContent =
-        "기존 회원 연결 (" +
-        (locNames || "지점 미지정") +
-        " · " +
-        (m.category || "구분 없음") +
-        ")" +
-        (matches.length > 1 ? " #" + m.id.slice(-4) : "");
-      select.appendChild(opt);
-    });
-    const newOpt = document.createElement("option");
-    newOpt.value = "__new__";
-    newOpt.textContent = "신규 회원";
-    select.appendChild(newOpt);
-    const skipOpt = document.createElement("option");
-    skipOpt.value = "__skip__";
-    skipOpt.textContent = "건너뛰기";
-    select.appendChild(skipOpt);
-    select.value = row.choice;
-    select.addEventListener("change", () => {
-      row.choice = select.value;
-      renderRowState();
-      renderBulkImportSummary();
-    });
-    const newFields = document.createElement("div");
-    newFields.className = "bulk-preview-new-fields";
-    const locSelect = document.createElement("select");
-    state.locations
-      .map((l) => l.id)
-      .concat(plan.newLocations.map((l) => l.id))
-      .forEach((locId) => {
-        const opt = document.createElement("option");
-        opt.value = locId;
-        opt.textContent = bulkLocationLabel(locId);
-        locSelect.appendChild(opt);
-      });
-    if (row.newLocationId) locSelect.value = row.newLocationId;
-    locSelect.addEventListener("change", () => {
-      row.newLocationId = locSelect.value;
-    });
-    const catSelect = document.createElement("select");
-    CATEGORY_OPTIONS.forEach((opt) => {
-      const optionEl = document.createElement("option");
-      optionEl.value = opt;
-      optionEl.textContent = opt;
-      catSelect.appendChild(optionEl);
-    });
-    catSelect.value = row.newCategory;
-    catSelect.addEventListener("change", () => {
-      row.newCategory = catSelect.value;
-    });
-    newFields.appendChild(locSelect);
-    newFields.appendChild(catSelect);
-    head.appendChild(select);
-    head.appendChild(newFields);
-    rowEl.appendChild(head);
-
-    const scheduleEl = document.createElement("div");
-    scheduleEl.className = "bulk-preview-schedule";
-    rowEl.appendChild(scheduleEl);
-    function renderSchedule() {
-      scheduleEl.innerHTML = "";
-      if (parsed.days.length > 0) {
-        parsed.days.forEach((dayEntry) => {
-          const chip = document.createElement("span");
-          chip.className = "bulk-preview-day-chip";
-          const locName = bulkLocationLabel(dayEntry.locationId);
-          const dayEl = document.createElement("b");
-          dayEl.textContent = DAYS[dayEntry.day];
-          chip.append(
-            dayEl,
-            " " +
-              (locName ? "(" + locName + ") " : "") +
-              describeDaySpecs(dayEntry.specs),
-          );
-          scheduleEl.appendChild(chip);
-        });
-        return;
-      }
-      const chip = document.createElement("span");
-      chip.className = "bulk-preview-day-chip";
-      const existing = memberById(row.choice);
-      if (parsed.clearAll && existing) {
-        // 기존 회원의 "이름 x": 그 회원의 기존 신청 시간을 모두 지운다.
-        const count = state.requests.filter(
-          (r) => r.memberId === existing.id,
-        ).length;
-        chip.classList.add("bulk-preview-day-chip-clear");
-        chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
-      } else if (parsed.clearAll && row.choice === "__new__") {
-        chip.textContent = "신청 시간 없이 회원만 등록";
-      } else {
-        chip.textContent = "등록할 시간 없음";
-      }
-      scheduleEl.appendChild(chip);
-    }
-
-    parsed.warnings.forEach((w) => {
-      const p = document.createElement("p");
-      p.className = "bulk-preview-note warning";
-      p.textContent = "⚠ " + w;
-      rowEl.appendChild(p);
-    });
-    parsed.errors.forEach((err) => {
-      const p = document.createElement("p");
-      p.className = "bulk-preview-note error";
-      p.textContent = "✕ " + err;
-      rowEl.appendChild(p);
-    });
-
-    function renderRowState() {
-      rowEl.classList.toggle("skip", row.choice === "__skip__");
-      select.classList.toggle("is-new-member", row.choice === "__new__");
-      newFields.hidden = row.choice !== "__new__";
-      renderSchedule();
-    }
-    renderRowState();
-
-    bulkImportPreviewListEl.appendChild(rowEl);
-  });
+  plan.rows.forEach((row) =>
+    bulkImportPreviewListEl.appendChild(renderBulkPreviewRow(row)),
+  );
   renderBulkImportSummary();
 
   bulkImportStepInputEl.hidden = true;
   bulkImportStepPreviewEl.hidden = false;
+}
+
+// 미리보기 한 줄. 해석 선택·줄 수정은 그 줄만 다시 그린다 — 다른 줄의 선택은 bulkImportPlan에 그대로 있다.
+function renderBulkPreviewRow(row) {
+  const plan = bulkImportPlan;
+  const parsed = row.parsed;
+  const matches = findMembersByName(parsed.name);
+  function rerender() {
+    rowEl.replaceWith(renderBulkPreviewRow(row));
+    renderBulkImportSummary();
+  }
+
+  const rowEl = document.createElement("div");
+  rowEl.className = "bulk-preview-row";
+
+  const head = document.createElement("div");
+  head.className = "bulk-preview-row-head";
+
+  const nameEl = document.createElement("span");
+  nameEl.className = "bulk-preview-name";
+  nameEl.textContent = parsed.name;
+  head.appendChild(nameEl);
+
+  const select = document.createElement("select");
+  // 동명이인은 임의로 정하지 않는다 — 고르기 전에는 빈 값이라 적용이 막힌다.
+  if (matches.length > 1) {
+    const pickOpt = document.createElement("option");
+    pickOpt.value = "";
+    pickOpt.textContent = "동명이인 — 회원 선택";
+    select.appendChild(pickOpt);
+  }
+  matches.forEach((m) => {
+    const opt = document.createElement("option");
+    opt.value = m.id;
+    const locNames = m.locationIds
+      .map((id) => locationById(id))
+      .filter(Boolean)
+      .map((l) => l.name)
+      .join("·");
+    opt.textContent =
+      "기존 회원 연결 (" +
+      (locNames || "지점 미지정") +
+      " · " +
+      (m.category || "구분 없음") +
+      ")" +
+      (matches.length > 1 ? " #" + m.id.slice(-4) : "");
+    select.appendChild(opt);
+  });
+  const newOpt = document.createElement("option");
+  newOpt.value = "__new__";
+  newOpt.textContent = "신규 회원";
+  select.appendChild(newOpt);
+  const skipOpt = document.createElement("option");
+  skipOpt.value = "__skip__";
+  skipOpt.textContent = "건너뛰기";
+  select.appendChild(skipOpt);
+  select.value = row.choice;
+  select.addEventListener("change", () => {
+    row.choice = select.value;
+    renderRowState();
+    renderBulkImportSummary();
+  });
+  const newFields = document.createElement("div");
+  newFields.className = "bulk-preview-new-fields";
+  const locSelect = document.createElement("select");
+  state.locations
+    .map((l) => l.id)
+    .concat(plan.newLocations.map((l) => l.id))
+    .forEach((locId) => {
+      const opt = document.createElement("option");
+      opt.value = locId;
+      opt.textContent = bulkLocationLabel(locId);
+      locSelect.appendChild(opt);
+    });
+  if (row.newLocationId) locSelect.value = row.newLocationId;
+  locSelect.addEventListener("change", () => {
+    row.newLocationId = locSelect.value;
+  });
+  const catSelect = document.createElement("select");
+  CATEGORY_OPTIONS.forEach((opt) => {
+    const optionEl = document.createElement("option");
+    optionEl.value = opt;
+    optionEl.textContent = opt;
+    catSelect.appendChild(optionEl);
+  });
+  catSelect.value = row.newCategory;
+  catSelect.addEventListener("change", () => {
+    row.newCategory = catSelect.value;
+  });
+  newFields.appendChild(locSelect);
+  newFields.appendChild(catSelect);
+  head.appendChild(select);
+  head.appendChild(newFields);
+  const editBtn = document.createElement("button");
+  editBtn.type = "button";
+  editBtn.className = "btn btn-ghost btn-small bulk-preview-edit-btn";
+  editBtn.textContent = "줄 수정";
+  head.appendChild(editBtn);
+  rowEl.appendChild(head);
+
+  // 줄 수정: 적용하면 이 줄만 다시 해석하고(붙여넣은 글의 같은 줄도 바꿔 '뒤로'에서도 보이게), 취소하면 그대로 둔다.
+  const editor = document.createElement("div");
+  editor.className = "bulk-preview-editor";
+  editor.hidden = true;
+  const editInput = document.createElement("input");
+  editInput.type = "text";
+  editInput.className = "bulk-preview-edit-input";
+  editInput.setAttribute("aria-label", parsed.name + " 줄 수정");
+  const editApplyBtn = document.createElement("button");
+  editApplyBtn.type = "button";
+  editApplyBtn.className = "btn btn-primary btn-small";
+  editApplyBtn.textContent = "적용";
+  const editCancelBtn = document.createElement("button");
+  editCancelBtn.type = "button";
+  editCancelBtn.className = "btn btn-ghost btn-small";
+  editCancelBtn.textContent = "취소";
+  const editError = document.createElement("p");
+  editError.className = "bulk-preview-note error";
+  editError.hidden = true;
+  editor.append(editInput, editApplyBtn, editCancelBtn, editError);
+  rowEl.appendChild(editor);
+  editBtn.addEventListener("click", () => {
+    editInput.value = row.line.trim();
+    editError.hidden = true;
+    editor.hidden = false;
+    editInput.focus();
+  });
+  function applyEdit() {
+    const result = editBulkImportRow(plan, row, editInput.value);
+    if (result.error) {
+      editError.textContent = "✕ " + result.error;
+      editError.hidden = false;
+      return;
+    }
+    const lines = bulkImportTextareaEl.value.split("\n");
+    lines[row.lineIndex] = row.line;
+    bulkImportTextareaEl.value = lines.join("\n");
+    rerender();
+  }
+  editApplyBtn.addEventListener("click", applyEdit);
+  editCancelBtn.addEventListener("click", () => {
+    editor.hidden = true;
+  });
+  editInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") applyEdit();
+    else if (e.key === "Escape") {
+      e.stopPropagation();
+      editor.hidden = true;
+    }
+  });
+
+  // 모호한 시간: 원문에서 그 부분을 강조하고, 해석마다 버튼을 둔다(처음에는 아무것도 고르지 않음).
+  parsed.ambiguities.forEach((amb, index) => {
+    const box = document.createElement("div");
+    box.className = "bulk-preview-ambiguity";
+    box.classList.toggle("resolved", !!amb.choice);
+    const title = document.createElement("p");
+    title.className = "bulk-preview-ambiguity-title";
+    title.append(
+      (amb.choice ? "✓ 해석 선택됨" : "⚠ 해석 확인 필요") + ": 원문 ",
+      highlightedRaw(parsed, index),
+    );
+    box.appendChild(title);
+    const options = document.createElement("div");
+    options.className = "bulk-preview-ambiguity-options";
+    amb.options.forEach((opt) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn btn-small bulk-preview-ambiguity-option";
+      btn.classList.toggle("selected", amb.choice === opt.key);
+      btn.setAttribute("aria-pressed", String(amb.choice === opt.key));
+      btn.dataset.key = opt.key;
+      btn.textContent = describeClockOption(opt.spec);
+      btn.addEventListener("click", () => {
+        chooseBulkAmbiguity(plan, row, index, opt.key);
+        rerender();
+      });
+      options.appendChild(btn);
+    });
+    box.appendChild(options);
+    rowEl.appendChild(box);
+  });
+
+  const scheduleEl = document.createElement("div");
+  scheduleEl.className = "bulk-preview-schedule";
+  rowEl.appendChild(scheduleEl);
+  function renderSchedule() {
+    scheduleEl.innerHTML = "";
+    if (parsed.days.length > 0) {
+      parsed.days.forEach((dayEntry) => {
+        const chip = document.createElement("span");
+        chip.className = "bulk-preview-day-chip";
+        const locName = bulkLocationLabel(dayEntry.locationId);
+        const dayEl = document.createElement("b");
+        dayEl.textContent = DAYS[dayEntry.day];
+        chip.append(
+          dayEl,
+          " " +
+            (locName ? "(" + locName + ") " : "") +
+            describeDaySpecs(dayEntry.specs),
+        );
+        scheduleEl.appendChild(chip);
+      });
+      return;
+    }
+    const chip = document.createElement("span");
+    chip.className = "bulk-preview-day-chip";
+    const existing = memberById(row.choice);
+    if (parsed.clearAll && existing) {
+      // 기존 회원의 "이름 x": 그 회원의 기존 신청 시간을 모두 지운다.
+      const count = state.requests.filter(
+        (r) => r.memberId === existing.id,
+      ).length;
+      chip.classList.add("bulk-preview-day-chip-clear");
+      chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
+    } else if (parsed.clearAll && row.choice === "__new__") {
+      chip.textContent = "신청 시간 없이 회원만 등록";
+    } else {
+      chip.textContent = "등록할 시간 없음";
+    }
+    scheduleEl.appendChild(chip);
+  }
+
+  parsed.warnings.forEach((w) => {
+    const p = document.createElement("p");
+    p.className = "bulk-preview-note warning";
+    p.textContent = "⚠ " + w;
+    rowEl.appendChild(p);
+  });
+  parsed.errors.forEach((err) => {
+    const p = document.createElement("p");
+    p.className = "bulk-preview-note error";
+    p.textContent = "✕ " + err;
+    rowEl.appendChild(p);
+  });
+
+  function renderRowState() {
+    rowEl.classList.toggle("skip", row.choice === "__skip__");
+    rowEl.classList.toggle(
+      "needs-review",
+      row.choice !== "__skip__" && hasUnresolvedTime(row),
+    );
+    select.classList.toggle("is-new-member", row.choice === "__new__");
+    newFields.hidden = row.choice !== "__new__";
+    renderSchedule();
+  }
+  renderRowState();
+
+  return rowEl;
+}
+
+// 원문에서 index번째 모호한 시간을 <mark>로 강조한다. 같은 숫자가 여러 번 나오면 앞의 모호한 시간 수만큼 건너뛴다.
+// ("9시10"처럼 원문과 숫자 모양이 달라 찾지 못하면 원문 뒤에 그 숫자를 따로 보여 준다.)
+function highlightedRaw(parsed, index) {
+  const token = parsed.ambiguities[index].token;
+  const nth = parsed.ambiguities
+    .slice(0, index)
+    .filter((a) => a.token === token).length;
+  const found = [
+    ...parsed.raw.matchAll(new RegExp("(?<!\\d)" + token + "(?!\\d)", "g")),
+  ][nth];
+  const code = document.createElement("code");
+  const mark = document.createElement("mark");
+  mark.textContent = token;
+  if (!found) {
+    code.textContent = parsed.raw;
+    const span = document.createElement("span");
+    span.append(code, " 중 ", mark);
+    return span;
+  }
+  code.append(
+    parsed.raw.slice(0, found.index),
+    mark,
+    parsed.raw.slice(found.index + token.length),
+  );
+  return code;
 }
 
 bulkImportPreviewBtn.addEventListener("click", renderBulkImportPreview);
