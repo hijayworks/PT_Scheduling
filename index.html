@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'sha256-UP0QZg7irvSMvOBz9mH2PIIE28+57UiavRfeVea0l3g='; img-src 'self' data: blob:; font-src 'self'; connect-src 'none'; worker-src blob:; object-src 'none'; base-uri 'none';" />
 <title>수업 스케줄 자동 생성기</title>
-<link rel="stylesheet" href="style.css?v=2ff8c22f" />
+<link rel="stylesheet" href="style.css?v=38b870a4" />
 </head>
 <body>
 
@@ -375,7 +375,7 @@
           <li>숫자를 이어 쓰면 각각 정시입니다. 연달아 이어지는 시각(5678)은 그 사이 언제든 시작 가능한 구간(17:00~20:00)으로, 떨어진 시각(57)은 각각(17:00, 19:00) 등록됩니다.</li>
           <li>시 뒤에 30·40·50을 붙이면 분입니다. (예: 730 → 19:30, 640 → 18:40)</li>
           <li>쉼표(,)나 슬래시(/)로 시각을 나눌 수 있습니다. (예: 목2,420 → 14:00, 16:20)</li>
-          <li>세·네 자리 숫자는 시+분(420 → 16:20)과 이어 쓴 정시(8910 → 20:00~22:00) 중 말이 되는 쪽으로 읽습니다. 410·910처럼 둘 다 되면 미리보기에서 해석을 고르거나 줄을 고쳐야 등록됩니다. 9:10·9시10분(시+분)이나 9~10(구간)처럼 쓰면 확인 없이 등록됩니다.</li>
+          <li>세·네 자리 숫자는 시+분(420 → 16:20)이나 이어 쓴 정시(8910 → 20:00~22:00)로 읽습니다. 410·910·1110처럼 두 가지로 읽히거나 415(16:00, 13:00, 17:00)처럼 시각이 순서대로 늘지 않으면, 미리보기에서 해석을 고르거나 줄을 고쳐야 등록됩니다. 범위·부터·이후·까지(910~, 910이후)도 같습니다. 9:10·9시10분(시+분)이나 9~10(구간)처럼 쓰면 확인 없이 등록됩니다.</li>
           <li>"시"·"분"을 써도 되고, 사이를 띄어 써도 됩니다. 분은 10분 단위만 가능합니다. (예: 월 4시 10분/4시20분 → 16:10, 16:20)</li>
           <li>"늦은시간"은 22:30입니다. 다른 시각 뒤에 붙이면 22:30이 추가됩니다. (예: 화늦은시간 → 22:30)</li>
         </ul>
@@ -500,6 +500,6 @@
 <script src="vendor/html2canvas.min.js"></script>
 <!-- script.js / style.css의 ?v= 값은 scripts/bump-cache-version.js가 파일 해시로 자동 갱신합니다
      (git pre-commit 훅에서 자동 실행됨). 손으로 바꾸지 마세요. -->
-<script src="script.js?v=65789c43"></script>
+<script src="script.js?v=faabd61a"></script>
 </body>
 </html>

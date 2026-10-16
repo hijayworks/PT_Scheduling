@@ -8815,16 +8815,28 @@
     }
     return marks;
   }
-  function clockDigitReadings(digits) {
-    const hour = parseInt(digits.slice(0, -2), 10);
-    const minute = parseInt(digits.slice(-2), 10);
-    const time = hour >= 1 && hour <= 12 && minute < 60 && minute % SLOT_MIN === 0 ? { hour, minute } : null;
-    const marks = tokenizeHourDigits(digits);
-    const at = (m) => (m.hour % 12 + 12) * 60 + m.minute;
-    const increasing = marks && marks.every((m, i) => i === 0 || at(m) > at(marks[i - 1]));
-    return { time, hours: increasing ? marks : null };
+  function hourMarkReadings(s) {
+    if (s.includes(":")) {
+      const marks = parseHourMarks(s);
+      return marks ? [marks] : [];
+    }
+    const readings = [];
+    if (/^\d{3,4}$/.test(s)) {
+      const hour = parseInt(s.slice(0, -2), 10);
+      const minute = parseInt(s.slice(-2), 10);
+      if (hour >= 1 && hour <= 12 && minute < 60 && minute % SLOT_MIN === 0)
+        readings.push([{ hour, minute }]);
+    }
+    const hours = tokenizeHourDigits(s);
+    const same = (a, b) => a.length === b.length && a.every((m, i) => m.hour === b[i].hour && m.minute === b[i].minute);
+    if (hours && !readings.some((r) => same(r, hours))) readings.push(hours);
+    return readings;
   }
-  function parseTimeToken(token, single = false) {
+  function marksInTimeOrder(marks) {
+    const at = (m) => (m.hour % 12 + 12) * 60 + m.minute;
+    return marks.every((m, i) => i === 0 || at(m) > at(marks[i - 1]));
+  }
+  function parseTimeToken(token) {
     const originalToken = token;
     token = token.replace(/-/g, "~");
     token = token.replace(
@@ -8863,75 +8875,71 @@
     const tildeCount = (clean.match(/~/g) || []).length;
     if (tildeCount > 1)
       return { error: '알 수 없는 시간 표기: "' + originalToken + '"', warning };
+    let candidates;
+    let ambiguousPart = clean;
+    let failMessage = '시간 해석 실패: "' + originalToken + '"';
     if (tildeCount === 1) {
       const [leftStr, rightStr] = clean.split("~");
+      failMessage = '구간 표기 해석 실패: "' + originalToken + '"';
       if (leftStr !== "" && rightStr !== "") {
-        const leftMarks = parseHourMarks(leftStr);
-        const rightMarks = parseHourMarks(rightStr);
-        if (!leftMarks || leftMarks.length !== 1 || !rightMarks || rightMarks.length !== 1) {
-          return {
-            error: '구간 표기 해석 실패: "' + originalToken + '"',
-            warning
-          };
-        }
-        const marks3 = expandHourRange(leftMarks[0], rightMarks[0]);
-        if (!marks3)
-          return {
-            error: '구간 표기 해석 실패: "' + originalToken + '"',
-            warning
-          };
-        return withLateMark({ type: "point", marks: marks3, warning });
+        const ends = (str) => hourMarkReadings(str).filter((m) => m.length === 1);
+        const lefts = ends(leftStr);
+        const rights = ends(rightStr);
+        ambiguousPart = lefts.length > 1 ? leftStr : rightStr;
+        candidates = [];
+        lefts.forEach(
+          ([l]) => rights.forEach(([r]) => {
+            const marks = expandHourRange(l, r);
+            if (marks)
+              candidates.push({ spec: { type: "point", marks }, unordered: false });
+          })
+        );
+      } else if (rightStr === "") {
+        ambiguousPart = leftStr;
+        candidates = hourMarkReadings(leftStr).filter((marks) => marks.length > 0).map((marks) => ({
+          spec: {
+            type: "openStart",
+            mark: marks[marks.length - 1],
+            extraPoints: marks.slice(0, -1)
+          },
+          unordered: !marksInTimeOrder(marks)
+        }));
+      } else {
+        ambiguousPart = rightStr;
+        candidates = hourMarkReadings(rightStr).filter((marks) => marks.length > 0).map((marks) => ({
+          spec: { type: "openEnd", mark: marks[0], extraPoints: marks.slice(1) },
+          unordered: !marksInTimeOrder(marks)
+        }));
       }
-      if (rightStr === "") {
-        const marks3 = parseHourMarks(leftStr);
-        if (!marks3 || marks3.length === 0)
-          return {
-            error: '구간 표기 해석 실패: "' + originalToken + '"',
-            warning
-          };
-        return withLateMark({
-          type: "openStart",
-          mark: marks3[marks3.length - 1],
-          extraPoints: marks3.slice(0, -1),
-          warning
-        });
-      }
-      const marks2 = parseHourMarks(rightStr);
-      if (!marks2 || marks2.length === 0)
-        return { error: '구간 표기 해석 실패: "' + originalToken + '"', warning };
-      return withLateMark({
-        type: "openEnd",
-        mark: marks2[0],
-        extraPoints: marks2.slice(1),
-        warning
-      });
-    }
-    let marks;
-    if (/^\d{3,4}$/.test(clean)) {
-      const { time, hours } = clockDigitReadings(clean);
-      const sameReading = time && hours && hours.length === 1 && hours[0].hour === time.hour && hours[0].minute === time.minute;
-      if (time && hours && !sameReading)
-        return {
-          ambiguous: true,
-          token: clean,
-          warning,
-          options: [
-            { key: "time", spec: withLateMark({ type: "point", marks: [time] }) },
-            { key: "hours", spec: withLateMark({ type: "point", marks: hours }) }
-          ]
-        };
-      marks = time ? [time] : hours || (single ? null : tokenizeHourDigits(clean));
     } else {
-      marks = parseHourMarks(clean);
+      candidates = hourMarkReadings(clean).map((marks) => ({
+        spec: { type: "point", marks },
+        unordered: !marksInTimeOrder(marks)
+      }));
     }
-    if (!marks)
-      return { error: '시간 해석 실패: "' + originalToken + '"', warning };
-    return withLateMark({ type: "point", marks, warning });
+    const options = [];
+    candidates.forEach(({ spec, unordered }) => {
+      withLateMark(spec);
+      const key = describeClockOption(spec);
+      if (!options.some((o) => o.key === key)) options.push({ key, spec, unordered });
+    });
+    if (options.length === 0) return { error: failMessage, warning };
+    if (options.length === 1 && !options[0].unordered)
+      return Object.assign(options[0].spec, { warning });
+    return { ambiguous: true, token: ambiguousPart, warning, options };
   }
   function describeClockOption(spec) {
-    return groupConsecutiveMarks(spec.marks).concat(groupConsecutiveMarks(spec.extraPoints || [])).map(
+    const groups = (marks) => groupConsecutiveMarks(marks).map(
       (group) => group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) + " 연속 가능 구간" : hourMarkLabel(group[0]) + " 시작"
-    ).join(" · ");
+    );
+    const extra = groups(spec.extraPoints || []);
+    let parts;
+    if (spec.type === "openStart")
+      parts = extra.concat([hourMarkLabel(spec.mark) + "~마감"]);
+    else if (spec.type === "openEnd")
+      parts = ["시작~" + hourMarkLabel(spec.mark)].concat(extra);
+    else parts = groups(spec.marks).concat(extra);
+    return parts.join(" · ");
   }
   function existingLocationId(name) {
     const loc = findLocationByLooseName(name);
@@ -8948,7 +8956,9 @@
       warnings: [],
       errors: [],
       ambiguities: [],
-      // [{ token, options:[{ key, spec }], choice: key | null }]
+      // [{ token, options:[{ key, spec, unordered }], choice: key | null }]
+      locationIds: [],
+      // 괄호로 적은 지점(시간 해석과 무관, 신규 회원 기본 지점 추론용)
       clearAll: false
     };
     if (tokens.length === 2 && /^x$/i.test(tokens[1])) {
@@ -8958,7 +8968,7 @@
     let currentDays = null;
     let currentLocationId = sectionLocationId;
     let currentLocationUnknown = false;
-    function applyTimeToken(tok, single) {
+    function applyTimeToken(tok) {
       if (currentLocationUnknown) return;
       if (!currentDays) {
         result.errors.push(
@@ -8966,7 +8976,7 @@
         );
         return;
       }
-      let parsed = parseTimeToken(tok, single);
+      let parsed = parseTimeToken(tok);
       if (parsed.warning) result.warnings.push(parsed.warning);
       if (parsed.error) {
         result.errors.push(parsed.error);
@@ -9001,6 +9011,8 @@
         const locId = resolveLocation(locMatch[1].trim());
         currentLocationId = locId;
         currentLocationUnknown = !locId;
+        if (locId && !result.locationIds.includes(locId))
+          result.locationIds.push(locId);
         if (!locId)
           result.errors.push(
             '등록되지 않은 지점이라 그 지점의 시간은 건너뜁니다: "' + locMatch[1] + '"'
@@ -9017,7 +9029,7 @@
             tok = tok.slice(dayPrefixMatch[0].length);
             if (tok === "") return;
           }
-          applyTimeToken(tok, pieces.length > 1);
+          applyTimeToken(tok);
         });
       });
     });
@@ -9045,14 +9057,13 @@
       }
       const parsed = parseBulkImportLine(line, resolveLocation, sectionLocationId);
       if (!parsed) return;
-      const firstLoc = parsed.days.find((d) => d.locationId);
       rows.push({
         parsed,
         line,
         lineIndex,
         sectionLocationId,
         choice: bulkMemberChoice(parsed.name),
-        newLocationId: sectionLocationId || firstLoc && firstLoc.locationId || (state.locations[0] ? state.locations[0].id : ""),
+        newLocationId: defaultNewLocationId(parsed, sectionLocationId),
         newCategory: "등록"
       });
     });
@@ -9074,6 +9085,9 @@
       return pending.id;
     };
   }
+  function defaultNewLocationId(parsed, sectionLocationId) {
+    return sectionLocationId || parsed.locationIds[0] || (state.locations[0] ? state.locations[0].id : "");
+  }
   function bulkMemberChoice(name) {
     const matches = findMembersByName(name);
     if (matches.length === 0) return "__new__";
@@ -9090,6 +9104,8 @@
     );
     if (!parsed) return { error: "이름과 요일·시간을 적어주세요." };
     if (parsed.name !== row.parsed.name) row.choice = bulkMemberChoice(parsed.name);
+    if (!row.newLocationId)
+      row.newLocationId = defaultNewLocationId(parsed, row.sectionLocationId);
     row.parsed = parsed;
     row.line = line;
     return {};
@@ -9109,6 +9125,13 @@
     return row.parsed.days.length > 0 || row.parsed.clearAll;
   }
   function applyBulkImportPlan(plan) {
+    const editing = plan.rows.filter(
+      (r) => r.draftLine !== void 0 && r.draftLine.trim() !== r.line.trim()
+    );
+    if (editing.length)
+      return {
+        error: "고치는 중인 줄이 있습니다. 그 줄의 '적용'(고친 내용 반영) 또는 '취소'를 먼저 눌러주세요: " + editing.map((r) => r.parsed.name).join(", ")
+      };
     const active = plan.rows.filter((r) => r.choice !== "__skip__");
     const unchosen = active.filter((r) => r.choice === "");
     if (unchosen.length)
@@ -9442,13 +9465,19 @@
     const newFields = document.createElement("div");
     newFields.className = "bulk-preview-new-fields";
     const locSelect = document.createElement("select");
+    if (!row.newLocationId) {
+      const pickOpt = document.createElement("option");
+      pickOpt.value = "";
+      pickOpt.textContent = "지점 선택";
+      locSelect.appendChild(pickOpt);
+    }
     state.locations.map((l) => l.id).concat(plan.newLocations.map((l) => l.id)).forEach((locId) => {
       const opt = document.createElement("option");
       opt.value = locId;
       opt.textContent = bulkLocationLabel(locId);
       locSelect.appendChild(opt);
     });
-    if (row.newLocationId) locSelect.value = row.newLocationId;
+    locSelect.value = row.newLocationId;
     locSelect.addEventListener("change", () => {
       row.newLocationId = locSelect.value;
     });
@@ -9493,11 +9522,23 @@
     editError.hidden = true;
     editor.append(editInput, editApplyBtn, editCancelBtn, editError);
     rowEl.appendChild(editor);
+    function closeEditor() {
+      delete row.draftLine;
+      editor.hidden = true;
+    }
+    if (row.draftLine !== void 0) {
+      editInput.value = row.draftLine;
+      editor.hidden = false;
+    }
     editBtn.addEventListener("click", () => {
-      editInput.value = row.line.trim();
+      if (row.draftLine === void 0) row.draftLine = row.line.trim();
+      editInput.value = row.draftLine;
       editError.hidden = true;
       editor.hidden = false;
       editInput.focus();
+    });
+    editInput.addEventListener("input", () => {
+      row.draftLine = editInput.value;
     });
     function applyEdit() {
       const result = editBulkImportRow(plan, row, editInput.value);
@@ -9509,17 +9550,16 @@
       const lines = bulkImportTextareaEl.value.split("\n");
       lines[row.lineIndex] = row.line;
       bulkImportTextareaEl.value = lines.join("\n");
+      delete row.draftLine;
       rerender();
     }
     editApplyBtn.addEventListener("click", applyEdit);
-    editCancelBtn.addEventListener("click", () => {
-      editor.hidden = true;
-    });
+    editCancelBtn.addEventListener("click", closeEditor);
     editInput.addEventListener("keydown", (e) => {
       if (e.key === "Enter") applyEdit();
       else if (e.key === "Escape") {
         e.stopPropagation();
-        editor.hidden = true;
+        closeEditor();
       }
     });
     parsed.ambiguities.forEach((amb, index) => {
@@ -9533,6 +9573,12 @@
         highlightedRaw(parsed, index)
       );
       box.appendChild(title);
+      if (amb.options.some((o) => o.unordered)) {
+        const hint = document.createElement("p");
+        hint.className = "bulk-preview-ambiguity-hint";
+        hint.textContent = "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '줄 수정'으로 고쳐주세요.";
+        box.appendChild(hint);
+      }
       const options = document.createElement("div");
       options.className = "bulk-preview-ambiguity-options";
       amb.options.forEach((opt) => {
@@ -9542,7 +9588,7 @@
         btn.classList.toggle("selected", amb.choice === opt.key);
         btn.setAttribute("aria-pressed", String(amb.choice === opt.key));
         btn.dataset.key = opt.key;
-        btn.textContent = describeClockOption(opt.spec);
+        btn.textContent = opt.key + (opt.unordered ? " (시간순 아님)" : "");
         btn.addEventListener("click", () => {
           chooseBulkAmbiguity(plan, row, index, opt.key);
           rerender();
@@ -9583,6 +9629,8 @@
         chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
       } else if (parsed.clearAll && row.choice === "__new__") {
         chip.textContent = "신청 시간 없이 회원만 등록";
+      } else if (hasUnresolvedTime(row)) {
+        chip.textContent = "해석을 고르면 등록할 시간이 표시됩니다";
       } else {
         chip.textContent = "등록할 시간 없음";
       }
@@ -9640,6 +9688,10 @@
     const report = applyBulkImportPlan(bulkImportPlan);
     if (report.error) {
       alert(report.error);
+      const openEditor = bulkImportPreviewListEl.querySelector(
+        ".bulk-preview-editor:not([hidden]) input"
+      );
+      if (openEditor) openEditor.focus();
       return;
     }
     saveState();

@@ -346,20 +346,35 @@ export function expandHourRange(leftMark, rightMark) {
   return marks;
 }
 
-// 세·네 자리 숫자의 두 가지 읽기: 시+분 한 시각(time, 410 → 4:10)과 이어 쓴 정시(hours, 410 → 4시·10시).
-// 정시 읽기는 시각이 시간 순서대로 늘어날 때만 말이 되는 것으로 본다(1010 → 10시·10시, 1110 → 11시·10시는 아님).
-export function clockDigitReadings(digits) {
-  const hour = parseInt(digits.slice(0, -2), 10);
-  const minute = parseInt(digits.slice(-2), 10);
-  const time =
-    hour >= 1 && hour <= 12 && minute < 60 && minute % SLOT_MIN === 0
-      ? { hour, minute }
-      : null;
-  const marks = tokenizeHourDigits(digits);
+// 숫자 묶음 하나(물결 앞뒤 한쪽 등)의 해석 후보 목록. 표기 규칙은 두 가지다:
+//  - 시+분: 세·네 자리 숫자(410 → 4:10). "4:10"처럼 콜론이 있으면 그 한 시각뿐이다.
+//  - 이어 쓴 정시: tokenizeHourDigits(410 → 4시·10시, 730 → 7:30, 8910 → 8·9·10시).
+// 결과가 같은 후보는 하나로 합친다. 시간순이 아니거나 같은 시각이 반복되는 후보도 버리지 않는다
+// (marksInTimeOrder로 따로 표시해 확인을 받는다 — "1110"을 23:10으로만 읽으면 23:00·22:00을 잃는다).
+export function hourMarkReadings(s) {
+  if (s.includes(":")) {
+    const marks = parseHourMarks(s);
+    return marks ? [marks] : [];
+  }
+  const readings = [];
+  if (/^\d{3,4}$/.test(s)) {
+    const hour = parseInt(s.slice(0, -2), 10);
+    const minute = parseInt(s.slice(-2), 10);
+    if (hour >= 1 && hour <= 12 && minute < 60 && minute % SLOT_MIN === 0)
+      readings.push([{ hour, minute }]);
+  }
+  const hours = tokenizeHourDigits(s);
+  const same = (a, b) =>
+    a.length === b.length &&
+    a.every((m, i) => m.hour === b[i].hour && m.minute === b[i].minute);
+  if (hours && !readings.some((r) => same(r, hours))) readings.push(hours);
+  return readings;
+}
+
+// 적은 순서대로 시각이 늘어나는지(같은 시각 반복·뒤로 가는 시각이 없는지).
+export function marksInTimeOrder(marks) {
   const at = (m) => ((m.hour % 12) + 12) * 60 + m.minute;
-  const increasing =
-    marks && marks.every((m, i) => i === 0 || at(m) > at(marks[i - 1]));
-  return { time, hours: increasing ? marks : null };
+  return marks.every((m, i) => i === 0 || at(m) > at(marks[i - 1]));
 }
 
 // 시간 토큰 하나를 해석한다.
@@ -367,11 +382,11 @@ export function clockDigitReadings(digits) {
 //  - "2~5" 처럼 물결 양쪽에 시각이 있으면 -> { type:"point", marks:[...] } ("2345"와 동일하게 확장)
 //  - "630~" -> { type:"openStart", mark:{...} } (그 시각부터 마감까지 전부 가능)
 //  - "~730" -> { type:"openEnd", mark:{...} } (마감 이전부터 그 시각까지 전부 가능)
-//  - 세·네 자리 숫자는 clockDigitReadings의 두 읽기 중 말이 되는 쪽으로 읽는다(630 → 6:30, 1020 → 10:20,
-//    8910 → 8·9·10시). 둘 다 말이 되고 결과가 다르면(910, 410) 확정하지 않고
-//    { ambiguous:true, token, options:[{ key:"time"|"hours", spec }] }를 돌려준다 — 고르는 건 미리보기에서 한다.
-//    둘 다 안 되면 쉼표 조각(single)은 오류, 아니면 예전처럼 이어 쓴 정시로 읽는다("415" → 4·1·5시).
-export function parseTimeToken(token, single = false) {
+// 단독 숫자·범위·부터·이후·까지 모두 숫자 묶음을 hourMarkReadings로 읽어 후보 스펙을 만든다. 후보가 하나이고
+// 시간순이면 그 스펙을 돌려주고, 후보가 여럿이거나(910 → 21:10 / 21:00~22:00) 시간순이 아니면(415 → 4·1·5시)
+// 확정하지 않고 { ambiguous:true, token, options:[{ key, spec, unordered }] }를 돌려준다 — 고르는 건 미리보기에서
+// 한다. key는 선택지 문구(describeClockOption)라 같은 글을 다시 해석해도 같다.
+export function parseTimeToken(token) {
   const originalToken = token;
   // "2-5"처럼 물결 대신 하이픈을 써도 "2~5"와 같게 본다.
   token = token.replace(/-/g, "~");
@@ -425,101 +440,91 @@ export function parseTimeToken(token, single = false) {
   const tildeCount = (clean.match(/~/g) || []).length;
   if (tildeCount > 1)
     return { error: '알 수 없는 시간 표기: "' + originalToken + '"', warning };
+  // 후보: [{ spec, unordered }], ambiguousPart: 확인이 필요할 때 원문에서 강조할 숫자 묶음.
+  let candidates;
+  let ambiguousPart = clean;
+  let failMessage = '시간 해석 실패: "' + originalToken + '"';
   if (tildeCount === 1) {
     const [leftStr, rightStr] = clean.split("~");
+    failMessage = '구간 표기 해석 실패: "' + originalToken + '"';
     if (leftStr !== "" && rightStr !== "") {
-      const leftMarks = parseHourMarks(leftStr);
-      const rightMarks = parseHourMarks(rightStr);
-      if (
-        !leftMarks ||
-        leftMarks.length !== 1 ||
-        !rightMarks ||
-        rightMarks.length !== 1
-      ) {
-        return {
-          error: '구간 표기 해석 실패: "' + originalToken + '"',
-          warning,
-        };
-      }
-      const marks = expandHourRange(leftMarks[0], rightMarks[0]);
-      if (!marks)
-        return {
-          error: '구간 표기 해석 실패: "' + originalToken + '"',
-          warning,
-        };
-      return withLateMark({ type: "point", marks, warning });
-    }
-    if (rightStr === "") {
+      // 범위 양 끝은 한 시각이어야 한다("410~6"은 4:10~6시만 된다).
+      const ends = (str) => hourMarkReadings(str).filter((m) => m.length === 1);
+      const lefts = ends(leftStr);
+      const rights = ends(rightStr);
+      ambiguousPart = lefts.length > 1 ? leftStr : rightStr;
+      candidates = [];
+      lefts.forEach(([l]) =>
+        rights.forEach(([r]) => {
+          const marks = expandHourRange(l, r);
+          if (marks)
+            candidates.push({ spec: { type: "point", marks }, unordered: false });
+        }),
+      );
+    } else if (rightStr === "") {
       // "6630~"처럼 물결 앞에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 마지막 시각(6시30분)을
       // "그 시각부터 마감까지" 열린 시작점으로 삼고, 그 앞의 시각들(6시)은 각각 개별 희망
       // 시작 시각으로 남긴다.
-      const marks = parseHourMarks(leftStr);
-      if (!marks || marks.length === 0)
-        return {
-          error: '구간 표기 해석 실패: "' + originalToken + '"',
-          warning,
-        };
-      return withLateMark({
-        type: "openStart",
-        mark: marks[marks.length - 1],
-        extraPoints: marks.slice(0, -1),
-        warning,
-      });
+      ambiguousPart = leftStr;
+      candidates = hourMarkReadings(leftStr)
+        .filter((marks) => marks.length > 0)
+        .map((marks) => ({
+          spec: {
+            type: "openStart",
+            mark: marks[marks.length - 1],
+            extraPoints: marks.slice(0, -1),
+          },
+          unordered: !marksInTimeOrder(marks),
+        }));
+    } else {
+      // "~458"처럼 물결 뒤에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 첫 시각(4시)을
+      // "마감 이전부터 그 시각까지" 열린 끝점으로 삼고, 그 뒤의 시각들(5시, 8시)은 각각
+      // 개별 희망 시작 시각으로 남긴다.
+      ambiguousPart = rightStr;
+      candidates = hourMarkReadings(rightStr)
+        .filter((marks) => marks.length > 0)
+        .map((marks) => ({
+          spec: { type: "openEnd", mark: marks[0], extraPoints: marks.slice(1) },
+          unordered: !marksInTimeOrder(marks),
+        }));
     }
-    // "~458"처럼 물결 뒤에 시각이 여러 개 이어져 있으면, 물결에 맞닿은 첫 시각(4시)을
-    // "마감 이전부터 그 시각까지" 열린 끝점으로 삼고, 그 뒤의 시각들(5시, 8시)은 각각
-    // 개별 희망 시작 시각으로 남긴다.
-    const marks = parseHourMarks(rightStr);
-    if (!marks || marks.length === 0)
-      return { error: '구간 표기 해석 실패: "' + originalToken + '"', warning };
-    return withLateMark({
-      type: "openEnd",
-      mark: marks[0],
-      extraPoints: marks.slice(1),
-      warning,
-    });
-  }
-  let marks;
-  if (/^\d{3,4}$/.test(clean)) {
-    const { time, hours } = clockDigitReadings(clean);
-    const sameReading =
-      time &&
-      hours &&
-      hours.length === 1 &&
-      hours[0].hour === time.hour &&
-      hours[0].minute === time.minute;
-    if (time && hours && !sameReading)
-      return {
-        ambiguous: true,
-        token: clean,
-        warning,
-        options: [
-          { key: "time", spec: withLateMark({ type: "point", marks: [time] }) },
-          { key: "hours", spec: withLateMark({ type: "point", marks: hours }) },
-        ],
-      };
-    marks = time ? [time] : hours || (single ? null : tokenizeHourDigits(clean));
   } else {
-    marks = parseHourMarks(clean);
+    candidates = hourMarkReadings(clean).map((marks) => ({
+      spec: { type: "point", marks },
+      unordered: !marksInTimeOrder(marks),
+    }));
   }
-  if (!marks)
-    return { error: '시간 해석 실패: "' + originalToken + '"', warning };
-  return withLateMark({ type: "point", marks, warning });
+  const options = [];
+  candidates.forEach(({ spec, unordered }) => {
+    withLateMark(spec);
+    const key = describeClockOption(spec);
+    if (!options.some((o) => o.key === key)) options.push({ key, spec, unordered });
+  });
+  if (options.length === 0) return { error: failMessage, warning };
+  if (options.length === 1 && !options[0].unordered)
+    return Object.assign(options[0].spec, { warning });
+  return { ambiguous: true, token: ambiguousPart, warning, options };
 }
 
-// 모호한 시간의 선택지 문구: 떨어진 시각은 각각 "시작", 이어진 정시는 "연속 가능 구간"으로 구분한다.
+// 해석 선택지 문구: 떨어진 시각은 각각 "시작", 이어진 정시는 "연속 가능 구간", 열린 범위는 "~마감"·"시작~".
 export function describeClockOption(spec) {
-  return groupConsecutiveMarks(spec.marks)
-    .concat(groupConsecutiveMarks(spec.extraPoints || []))
-    .map((group) =>
+  const groups = (marks) =>
+    groupConsecutiveMarks(marks).map((group) =>
       group.length > 1
         ? hourMarkLabel(group[0]) +
           "~" +
           hourMarkLabel(group[group.length - 1]) +
           " 연속 가능 구간"
         : hourMarkLabel(group[0]) + " 시작",
-    )
-    .join(" · ");
+    );
+  const extra = groups(spec.extraPoints || []);
+  let parts;
+  if (spec.type === "openStart")
+    parts = extra.concat([hourMarkLabel(spec.mark) + "~마감"]);
+  else if (spec.type === "openEnd")
+    parts = ["시작~" + hourMarkLabel(spec.mark)].concat(extra);
+  else parts = groups(spec.marks).concat(extra);
+  return parts.join(" · ");
 }
 
 // 괄호 지점 표기를 지점 id로 바꾸는 기본 규칙: 등록된 지점만 찾고, 없으면 null(그 지점 시간은 오류로 건너뜀).
@@ -554,7 +559,8 @@ export function parseBulkImportLine(
     days: [],
     warnings: [],
     errors: [],
-    ambiguities: [], // [{ token, options:[{ key, spec }], choice: key | null }]
+    ambiguities: [], // [{ token, options:[{ key, spec, unordered }], choice: key | null }]
+    locationIds: [], // 괄호로 적은 지점(시간 해석과 무관, 신규 회원 기본 지점 추론용)
     clearAll: false,
   };
 
@@ -573,7 +579,7 @@ export function parseBulkImportLine(
   let currentLocationId = sectionLocationId;
   let currentLocationUnknown = false;
 
-  function applyTimeToken(tok, single) {
+  function applyTimeToken(tok) {
     if (currentLocationUnknown) return;
     if (!currentDays) {
       result.errors.push(
@@ -581,7 +587,7 @@ export function parseBulkImportLine(
       );
       return;
     }
-    let parsed = parseTimeToken(tok, single);
+    let parsed = parseTimeToken(tok);
     if (parsed.warning) result.warnings.push(parsed.warning);
     if (parsed.error) {
       result.errors.push(parsed.error);
@@ -611,7 +617,7 @@ export function parseBulkImportLine(
     });
   }
 
-  // "목2,410,420"처럼 쉼표로 나뉜 조각은 각각 하나의 시각(2시, 4시10분, 4시20분)으로 본다.
+  // "목2,420,430"처럼 쉼표로 나뉜 조각은 각각 따로 해석한다(2시, 4시20분, 4시30분).
   // "화7수목금78910"처럼 띄어쓰기 없이 요일이 다시 나오면 그 자리에서 새 요일 묶음으로 끊는다.
   tokens.slice(1).forEach((spaceTok) => {
     const locMatch = spaceTok.match(/^[(（]([^)）]+)[)）]/);
@@ -619,6 +625,8 @@ export function parseBulkImportLine(
       const locId = resolveLocation(locMatch[1].trim());
       currentLocationId = locId;
       currentLocationUnknown = !locId;
+      if (locId && !result.locationIds.includes(locId))
+        result.locationIds.push(locId);
       if (!locId)
         result.errors.push(
           '등록되지 않은 지점이라 그 지점의 시간은 건너뜁니다: "' +
@@ -639,7 +647,7 @@ export function parseBulkImportLine(
             tok = tok.slice(dayPrefixMatch[0].length);
             if (tok === "") return;
           }
-          applyTimeToken(tok, pieces.length > 1);
+          applyTimeToken(tok);
         });
     });
   });
@@ -669,7 +677,8 @@ export function parseBulkSectionHeader(line) {
 //    지점 이름(여의도점 등)과 같으면 기본 표기로 만들어 기본 색·기본 이동 시간을 그대로 받는다.
 //  - 회원은 이름으로 연결한다: 없으면 신규(구분 '등록'), 한 명이면 그 회원, 동명이인이면 고르기 전까지
 //    비워 둔다("") — 비어 있으면 적용이 막힌다.
-// rows: [{ parsed, choice: memberId | "__new__" | "__skip__" | "", newLocationId, newCategory }]
+// rows: [{ parsed, choice: memberId | "__new__" | "__skip__" | "", newLocationId, newCategory, draftLine? }]
+//  draftLine: 미리보기에서 고치는 중인(아직 적용·취소하지 않은) 줄 글 — 있으면 적용이 막힌다.
 // rows의 line·lineIndex·sectionLocationId는 미리보기에서 줄을 다시 해석할 때(editBulkImportRow) 쓴다.
 export function planBulkImport(text) {
   const newLocations = [];
@@ -684,18 +693,13 @@ export function planBulkImport(text) {
     }
     const parsed = parseBulkImportLine(line, resolveLocation, sectionLocationId);
     if (!parsed) return;
-    // 신규 회원의 기본 지점: 지점 제목 → 줄에 적힌 첫 지점 → 첫 등록 지점.
-    const firstLoc = parsed.days.find((d) => d.locationId);
     rows.push({
       parsed,
       line,
       lineIndex,
       sectionLocationId,
       choice: bulkMemberChoice(parsed.name),
-      newLocationId:
-        sectionLocationId ||
-        (firstLoc && firstLoc.locationId) ||
-        (state.locations[0] ? state.locations[0].id : ""),
+      newLocationId: defaultNewLocationId(parsed, sectionLocationId),
       newCategory: "등록",
     });
   });
@@ -720,6 +724,15 @@ function bulkLocationResolver(newLocations) {
   };
 }
 
+// 신규 회원의 기본 지점: 지점 제목 → 줄에 괄호로 적은 첫 지점(시간 해석 확인 전이어도) → 첫 등록 지점.
+function defaultNewLocationId(parsed, sectionLocationId) {
+  return (
+    sectionLocationId ||
+    parsed.locationIds[0] ||
+    (state.locations[0] ? state.locations[0].id : "")
+  );
+}
+
 function bulkMemberChoice(name) {
   const matches = findMembersByName(name);
   if (matches.length === 0) return "__new__";
@@ -727,7 +740,8 @@ function bulkMemberChoice(name) {
 }
 
 // 미리보기의 한 줄을 다시 해석한다(state는 그대로). 같은 지점 제목 아래 줄로 보고, 이름이 바뀌었을 때만
-// 회원 연결을 다시 정한다 — 이 줄의 신규 회원 지점·구분과 다른 줄의 선택은 건드리지 않는다.
+// 회원 연결을 다시 정한다. 신규 회원 지점은 아직 정해지지 않았을 때만 다시 추론하고(사용자가 고른 지점은
+// 유지), 구분과 다른 줄의 선택은 건드리지 않는다.
 function reparseBulkRow(plan, row, line, resolutions) {
   if (parseBulkSectionHeader(line) !== null)
     return { error: "지점 제목 줄은 '뒤로'에서 고쳐주세요." };
@@ -739,6 +753,8 @@ function reparseBulkRow(plan, row, line, resolutions) {
   );
   if (!parsed) return { error: "이름과 요일·시간을 적어주세요." };
   if (parsed.name !== row.parsed.name) row.choice = bulkMemberChoice(parsed.name);
+  if (!row.newLocationId)
+    row.newLocationId = defaultNewLocationId(parsed, row.sectionLocationId);
   row.parsed = parsed;
   row.line = line;
   return {};
@@ -768,6 +784,16 @@ function createsNewMember(row) {
 
 // 계획을 state에 반영한다(저장·화면 갱신은 호출하는 쪽). 막혀야 하는 경우 아무것도 바꾸지 않고 { error }.
 export function applyBulkImportPlan(plan) {
+  // 미리보기에서 고치던 글(draftLine)을 적용·취소하지 않았으면, 고치기 전 내용이 등록되지 않게 막는다.
+  const editing = plan.rows.filter(
+    (r) => r.draftLine !== undefined && r.draftLine.trim() !== r.line.trim(),
+  );
+  if (editing.length)
+    return {
+      error:
+        "고치는 중인 줄이 있습니다. 그 줄의 '적용'(고친 내용 반영) 또는 '취소'를 먼저 눌러주세요: " +
+        editing.map((r) => r.parsed.name).join(", "),
+    };
   const active = plan.rows.filter((r) => r.choice !== "__skip__");
   const unchosen = active.filter((r) => r.choice === "");
   if (unchosen.length)
@@ -1169,6 +1195,13 @@ function renderBulkPreviewRow(row) {
   const newFields = document.createElement("div");
   newFields.className = "bulk-preview-new-fields";
   const locSelect = document.createElement("select");
+  // 지점을 정할 수 없으면(지점이 하나도 없고 줄에도 없음) 첫 지점이 골라진 것처럼 보이지 않게 빈 선택을 둔다.
+  if (!row.newLocationId) {
+    const pickOpt = document.createElement("option");
+    pickOpt.value = "";
+    pickOpt.textContent = "지점 선택";
+    locSelect.appendChild(pickOpt);
+  }
   state.locations
     .map((l) => l.id)
     .concat(plan.newLocations.map((l) => l.id))
@@ -1178,7 +1211,7 @@ function renderBulkPreviewRow(row) {
       opt.textContent = bulkLocationLabel(locId);
       locSelect.appendChild(opt);
     });
-  if (row.newLocationId) locSelect.value = row.newLocationId;
+  locSelect.value = row.newLocationId;
   locSelect.addEventListener("change", () => {
     row.newLocationId = locSelect.value;
   });
@@ -1225,11 +1258,25 @@ function renderBulkPreviewRow(row) {
   editError.hidden = true;
   editor.append(editInput, editApplyBtn, editCancelBtn, editError);
   rowEl.appendChild(editor);
+  // 고치는 중인 글은 row.draftLine에 둔다 — 적용·취소 전에는 일괄 등록이 막히고(applyBulkImportPlan),
+  // 해석 선택 등으로 이 줄을 다시 그려도 편집창이 그대로 남는다.
+  function closeEditor() {
+    delete row.draftLine;
+    editor.hidden = true;
+  }
+  if (row.draftLine !== undefined) {
+    editInput.value = row.draftLine;
+    editor.hidden = false;
+  }
   editBtn.addEventListener("click", () => {
-    editInput.value = row.line.trim();
+    if (row.draftLine === undefined) row.draftLine = row.line.trim();
+    editInput.value = row.draftLine;
     editError.hidden = true;
     editor.hidden = false;
     editInput.focus();
+  });
+  editInput.addEventListener("input", () => {
+    row.draftLine = editInput.value;
   });
   function applyEdit() {
     const result = editBulkImportRow(plan, row, editInput.value);
@@ -1241,17 +1288,16 @@ function renderBulkPreviewRow(row) {
     const lines = bulkImportTextareaEl.value.split("\n");
     lines[row.lineIndex] = row.line;
     bulkImportTextareaEl.value = lines.join("\n");
+    delete row.draftLine;
     rerender();
   }
   editApplyBtn.addEventListener("click", applyEdit);
-  editCancelBtn.addEventListener("click", () => {
-    editor.hidden = true;
-  });
+  editCancelBtn.addEventListener("click", closeEditor);
   editInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter") applyEdit();
     else if (e.key === "Escape") {
       e.stopPropagation();
-      editor.hidden = true;
+      closeEditor();
     }
   });
 
@@ -1267,6 +1313,13 @@ function renderBulkPreviewRow(row) {
       highlightedRaw(parsed, index),
     );
     box.appendChild(title);
+    if (amb.options.some((o) => o.unordered)) {
+      const hint = document.createElement("p");
+      hint.className = "bulk-preview-ambiguity-hint";
+      hint.textContent =
+        "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '줄 수정'으로 고쳐주세요.";
+      box.appendChild(hint);
+    }
     const options = document.createElement("div");
     options.className = "bulk-preview-ambiguity-options";
     amb.options.forEach((opt) => {
@@ -1276,7 +1329,7 @@ function renderBulkPreviewRow(row) {
       btn.classList.toggle("selected", amb.choice === opt.key);
       btn.setAttribute("aria-pressed", String(amb.choice === opt.key));
       btn.dataset.key = opt.key;
-      btn.textContent = describeClockOption(opt.spec);
+      btn.textContent = opt.key + (opt.unordered ? " (시간순 아님)" : "");
       btn.addEventListener("click", () => {
         chooseBulkAmbiguity(plan, row, index, opt.key);
         rerender();
@@ -1321,6 +1374,8 @@ function renderBulkPreviewRow(row) {
       chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
     } else if (parsed.clearAll && row.choice === "__new__") {
       chip.textContent = "신청 시간 없이 회원만 등록";
+    } else if (hasUnresolvedTime(row)) {
+      chip.textContent = "해석을 고르면 등록할 시간이 표시됩니다";
     } else {
       chip.textContent = "등록할 시간 없음";
     }
@@ -1388,6 +1443,11 @@ bulkImportApplyBtn.addEventListener("click", () => {
   const report = applyBulkImportPlan(bulkImportPlan);
   if (report.error) {
     alert(report.error);
+    // 고치는 중인 줄 때문에 막혔으면 그 편집창으로 데려간다.
+    const openEditor = bulkImportPreviewListEl.querySelector(
+      ".bulk-preview-editor:not([hidden]) input",
+    );
+    if (openEditor) openEditor.focus();
     return;
   }
   saveState();

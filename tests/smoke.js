@@ -55,7 +55,7 @@ const SECTIONS = {
   "previous-compat": "직전 버전(schemaVersion 2) 이관·지점 색상·백업",
   "candidate-display": "대표 후보 비교표·미배정 1명 추가 후보·지점 색·시간 표시·추가 탐색 중 후보 유지",
   "bulk-import": "지점 제목 붙여넣기(빈 상태 지점·회원 생성·미리보기/취소 무변경·재등록·기존 회원 x·새로고침·백업 복원)",
-  "bulk-ambiguity": "붙여넣기 모호한 시간(해석 확인 표시·적용 차단·해석 선택·줄 수정/취소·건너뛰기·다른 줄 선택 유지·무변경)",
+  "bulk-ambiguity": "붙여넣기 모호한 시간(해석 확인 표시·적용 차단·해석 선택·줄 수정/취소·수정 중 적용 차단·건너뛰기·다른 줄 선택 유지·1110 확인·빈 상태 괄호 지점·무변경)",
   file: "file:// 저장·새로고침·브라우저 재실행",
 };
 const onlyArg = process.argv.indexOf("--only");
@@ -1009,6 +1009,12 @@ async function checkBulkImportAmbiguity(browser, site, failures) {
     await page.click("#bulkImportPreviewBtn");
     await page.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
   };
+  // 대화상자 없이 끝나야 하는 동작: 핸들러를 동작 뒤 바로 떼어 다음 대화상자와 겹치지 않게 한다.
+  const expectNoDialog = async (pg, label, action) => {
+    const onDialog = (d) => { assert(false, label + ": " + d.message()); d.accept(); };
+    pg.on("dialog", onDialog);
+    try { await action(); } finally { pg.off("dialog", onDialog); }
+  };
   const editLine = async (line, apply = true) => {
     await row("이예림").locator(".bulk-preview-edit-btn").click();
     await row("이예림").locator(".bulk-preview-edit-input").fill(line);
@@ -1075,15 +1081,74 @@ async function checkBulkImportAmbiguity(browser, site, failures) {
     await row("이예림").locator(".bulk-preview-row-head > select").selectOption("__skip__");
     summary = await page.locator("#bulkImportPreviewSummary").innerText();
     assert(!summary.includes("해석 확인 필요") && (await page.locator(".bulk-preview-row.needs-review").count()) === 0, "건너뛴 줄은 해석 확인 대상이 아님: " + summary);
-    page.once("dialog", (d) => { assert(false, "건너뛰기 뒤 적용이 막힘: " + d.message()); d.accept(); });
-    await page.click("#bulkImportApplyBtn");
+    await expectNoDialog(page, "건너뛰기 뒤 적용이 막힘", () => page.click("#bulkImportApplyBtn"));
     const saved = await readState(page);
     const created = saved.members.find((m) => m.name === "신규회원");
     assert(created && created.category === "상담" && json(created.locationIds) === json(["M"]), "신규회원 등록: " + json(created));
     assert(saved.requests.some((r) => r.memberId === "K" && r.day === 0), "김기존 신청이 등록되지 않음");
     assert(json(saved.requests.filter((r) => r.memberId === "L").map((r) => [r.day, r.startSlot])) === json([[0, 30]]), "건너뛴 이예림의 기존 신청이 바뀜");
+
+    // 줄을 고치는 중(적용·취소 전)에 일괄 등록을 누르면 고치기 전 내용(17:00)을 저장하지 않고 막는다.
+    const beforeEdit = data(saved);
+    const kimRow = () => row("김기존");
+    await page.click("#bulkImportOpenBtn");
+    if (await page.locator("#bulkImportConfirmOverlay.open").count()) await page.click("#bulkImportJustAddBtn");
+    await page.fill("#bulkImportTextarea", "김기존 월5\n신규회원 월1110");
+    await page.click("#bulkImportPreviewBtn");
+    await page.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
+    // 시간순이 아닌 정시 나열(23:00·22:00)도 버리지 않고 23:10과 함께 확인을 요구한다.
+    assert(json(await options("신규회원").allTextContents()) === json(["23:10 시작", "23:00 시작 · 22:00 시작 (시간순 아님)"]), "1110 해석 선택지: " + json(await options("신규회원").allTextContents()));
+    await row("신규회원").locator(".bulk-preview-row-head > select").selectOption("__skip__");
+    await kimRow().locator(".bulk-preview-edit-btn").click();
+    await kimRow().locator(".bulk-preview-edit-input").fill("김기존 월910");
+    alertMessage = "";
+    page.once("dialog", (d) => { alertMessage = d.message(); d.accept(); });
+    await page.click("#bulkImportApplyBtn");
+    assert(alertMessage.includes("적용") && alertMessage.includes("취소") && alertMessage.includes("김기존"), "줄 수정 중 적용 차단 안내: " + alertMessage);
+    assert(data(await readState(page)) === beforeEdit, "줄 수정 중 일괄 등록이 데이터를 바꿈");
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.classList.contains("bulk-preview-edit-input")), "막힌 뒤 고치는 중인 줄로 이동하지 않음");
+    // 다른 줄을 다시 그려도(건너뛰기 해제·재선택) 고치던 글은 남아 있다.
+    assert((await kimRow().locator(".bulk-preview-edit-input").inputValue()) === "김기존 월910", "고치던 글이 사라짐");
+    await kimRow().locator(".bulk-preview-editor button", { hasText: "취소" }).click();
+    await expectNoDialog(page, "취소 뒤 적용이 막힘", () => page.click("#bulkImportApplyBtn"));
+    const kimSaved = (await readState(page)).requests.filter((r) => r.memberId === "K").map((r) => r.day + ":" + r.startSlot);
+    assert(json(kimSaved) === json(["0:30"]), "취소 뒤 원래 줄(월5)로 등록되지 않음: " + json(kimSaved));
   } finally {
     await page.close();
+  }
+
+  // 지점·회원이 없는 상태: 괄호 지점(강남)이 신규 회원 지점이 되고, 해석을 고른 뒤에도 그대로 등록된다.
+  // 지점을 정할 수 없는 줄은 "지점 선택"으로 비워 두고, 사용자가 고른 지점은 다른 줄의 해석 선택 뒤에도 유지된다.
+  const empty = { ...seed, locations: [], members: [], requests: [] };
+  const page2 = await browser.newPage();
+  page2.on("pageerror", (err) => assert(false, "페이지 런타임 에러(빈 상태): " + err.message));
+  const row2 = (name) => page2.locator(".bulk-preview-row", { has: page2.locator(".bulk-preview-name", { hasText: new RegExp("^" + name + "$") }) });
+  try {
+    await openWithSeed(page2, empty, site);
+    await page2.click('.nav-item[data-page="memberSchedule"]');
+    await page2.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    await page2.click("#bulkImportOpenBtn");
+    await page2.waitForSelector("#bulkImportOverlay.open", { timeout: 5000 });
+    await page2.fill("#bulkImportTextarea", "홍길동 (강남)월910\n김철수 월5");
+    await page2.click("#bulkImportPreviewBtn");
+    await page2.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
+    const locOf = (name) => row2(name).locator(".bulk-preview-new-fields select").nth(0);
+    const selectedText = (name) => locOf(name).evaluate((el) => el.options[el.selectedIndex].textContent);
+    assert((await selectedText("홍길동")) === "강남·새 지점" && (await locOf("홍길동").inputValue()) !== "", "홍길동 기본 지점이 강남이 아님: " + (await selectedText("홍길동")));
+    assert((await selectedText("김철수")) === "지점 선택" && (await locOf("김철수").inputValue()) === "", "지점을 정할 수 없는 줄은 비워 둬야 함: " + (await selectedText("김철수")));
+    await locOf("김철수").selectOption({ label: "강남·새 지점" });
+    await row2("홍길동").locator(".bulk-preview-ambiguity-option", { hasText: "21:10 시작" }).click();
+    assert((await selectedText("홍길동")) === "강남·새 지점" && (await selectedText("김철수")) === "강남·새 지점", "해석 선택 뒤 지점 선택이 바뀜");
+    await expectNoDialog(page2, "빈 상태 해석 선택 뒤 적용이 막힘", () => page2.click("#bulkImportApplyBtn"));
+    const st = await readState(page2);
+    const gangnam = st.locations.find((l) => l.name === "강남");
+    assert(gangnam && st.locations.length === 1, "강남 지점 생성: " + json(st.locations));
+    const hong = st.members.find((m) => m.name === "홍길동");
+    const kim = st.members.find((m) => m.name === "김철수");
+    assert(hong && kim && json(hong.locationIds) === json([gangnam.id]) && json(kim.locationIds) === json([gangnam.id]), "신규 회원 지점: " + json(st.members));
+    assert(json(st.requests.filter((r) => r.memberId === hong.id).map((r) => [r.day, r.startSlot])) === json([[0, (21 * 60 + 10 - 720) / 10]]), "홍길동 21:10 신청: " + json(st.requests));
+  } finally {
+    await page2.close();
   }
 }
 
