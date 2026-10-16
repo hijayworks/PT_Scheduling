@@ -55,6 +55,7 @@ const SECTIONS = {
   "previous-compat": "직전 버전(schemaVersion 2) 이관·지점 색상·백업",
   "candidate-display": "대표 후보 비교표·미배정 1명 추가 후보·지점 색·시간 표시·추가 탐색 중 후보 유지",
   "bulk-import": "지점 제목 붙여넣기(빈 상태 지점·회원 생성·미리보기/취소 무변경·재등록·기존 회원 x·새로고침·백업 복원)",
+  "bulk-ambiguity": "붙여넣기 모호한 시간(해석 확인 표시·적용 차단·해석 선택·줄 수정/취소·수정 중 적용 차단·건너뛰기·다른 줄 선택 유지·1110 확인·빈 상태 괄호 지점·무변경)",
   file: "file:// 저장·새로고침·브라우저 재실행",
 };
 const onlyArg = process.argv.indexOf("--only");
@@ -973,6 +974,187 @@ async function checkNoConsecutiveSetting(browser, site, failures) {
   }
 }
 
+// 붙여넣기의 모호한 시간(910 = 21:10 또는 21:00~22:00): 확인 전에는 등록이 막히고, 해석 선택·줄 수정은
+// 그 줄만 바꾸며(다른 줄의 회원 연결·지점·구분 유지), 미리보기·수정·취소만으로는 저장 데이터가 바뀌지 않는다.
+async function checkBulkImportAmbiguity(browser, site, failures) {
+  const assert = (cond, msg) => { if (!cond) failures.push("[모호한 시간 붙여넣기] " + msg); };
+  const json = (v) => JSON.stringify(v);
+  const text = "[마포]\n김기존 월5\n신규회원 화6\n이예림 화수금910,1030";
+  const seed = {
+    locations: [{ id: "M", name: "마포점" }, { id: "Y", name: "여의도점" }],
+    travelTimes: {},
+    members: [
+      { id: "K", name: "김기존", locationIds: ["Y"], category: "등록", memo: "" },
+      { id: "L", name: "이예림", locationIds: ["M"], category: "등록", memo: "" },
+    ],
+    requests: [{ id: "r1", memberId: "L", day: 0, startSlot: 30, duration: 60 }],
+    onceLimitedMemberIds3: [],
+    excludedMemberIds3: [],
+    availableCells: [],
+    currentPage: "schedule3",
+    startMinBase: 720,
+  };
+  const data = (s) => json({ locations: s.locations, members: s.members, requests: s.requests, travelTimes: s.travelTimes });
+  const page = await browser.newPage();
+  page.on("pageerror", (err) => assert(false, "페이지 런타임 에러: " + err.message));
+  const row = (name) => page.locator(".bulk-preview-row", { has: page.locator(".bulk-preview-name", { hasText: new RegExp("^" + name + "$") }) });
+  const options = (name) => row(name).locator(".bulk-preview-ambiguity-option");
+  const chips = (name) => row(name).locator(".bulk-preview-day-chip").allTextContents();
+  const newFields = () => row("신규회원").locator(".bulk-preview-new-fields select");
+  const openAndPreview = async () => {
+    await page.click("#bulkImportOpenBtn");
+    if (await page.locator("#bulkImportConfirmOverlay.open").count()) await page.click("#bulkImportJustAddBtn");
+    await page.waitForSelector("#bulkImportOverlay.open", { timeout: 5000 });
+    await page.fill("#bulkImportTextarea", text);
+    await page.click("#bulkImportPreviewBtn");
+    await page.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
+  };
+  // 대화상자 없이 끝나야 하는 동작: 핸들러를 동작 뒤 바로 떼어 다음 대화상자와 겹치지 않게 한다.
+  const expectNoDialog = async (pg, label, action) => {
+    const onDialog = (d) => { assert(false, label + ": " + d.message()); d.accept(); };
+    pg.on("dialog", onDialog);
+    try { await action(); } finally { pg.off("dialog", onDialog); }
+  };
+  const editLine = async (line, apply = true) => {
+    await row("이예림").locator(".bulk-preview-edit-btn").click();
+    await row("이예림").locator(".bulk-preview-edit-input").fill(line);
+    await row("이예림").locator(".bulk-preview-editor button", { hasText: apply ? "적용" : "취소" }).click();
+  };
+  try {
+    await openWithSeed(page, seed, site);
+    const before = data(await readState(page));
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+
+    // 표시: 모호한 줄만 강조하고 원문의 문제 부분(910)을 표시하며, 해석은 처음에 고르지 않는다.
+    await openAndPreview();
+    let summary = await page.locator("#bulkImportPreviewSummary").innerText();
+    assert(summary.includes("해석 확인 필요 1줄"), "요약에 해석 확인 필요가 없음: " + summary);
+    assert((await page.locator(".bulk-preview-row.needs-review").count()) === 1 && (await row("이예림").getAttribute("class")).includes("needs-review"), "이예림 줄만 해석 확인 필요로 강조해야 함");
+    assert((await row("이예림").locator(".bulk-preview-ambiguity-title code").innerText()) === "이예림 화수금910,1030" && (await row("이예림").locator("mark").innerText()) === "910", "원문·문제 부분 강조");
+    assert(json(await options("이예림").allTextContents()) === json(["21:10 시작", "21:00~22:00 연속 가능 구간"]), "해석 선택지: " + json(await options("이예림").allTextContents()));
+    assert(json(await options("이예림").evaluateAll((els) => els.map((e) => e.getAttribute("aria-pressed")))) === json(["false", "false"]), "처음에는 어떤 해석도 고르지 않아야 함");
+    assert(json(await chips("이예림")) === json(["화 (마포점) 22:30", "수 (마포점) 22:30", "금 (마포점) 22:30"]), "확인 전 미리보기 칩: " + json(await chips("이예림")));
+
+    // 다른 줄 선택을 바꿔 둔다 — 아래 해석 선택·줄 수정 뒤에도 남아 있어야 한다.
+    await newFields().nth(0).selectOption("Y");
+    await newFields().nth(1).selectOption("상담");
+
+    // 확인 전에는 일괄 등록이 막힌다.
+    let alertMessage = "";
+    page.once("dialog", (d) => { alertMessage = d.message(); d.accept(); });
+    await page.click("#bulkImportApplyBtn");
+    assert(alertMessage.includes("시간 해석") && alertMessage.includes("이예림"), "적용 차단 안내: " + alertMessage);
+    assert(await page.locator("#bulkImportOverlay.open").count(), "막힌 적용 뒤에도 미리보기가 열려 있어야 함");
+
+    // 해석 선택 → 즉시 갱신, 다른 줄 선택 유지.
+    await options("이예림").nth(0).click();
+    assert((await options("이예림").nth(0).getAttribute("aria-pressed")) === "true" && !(await row("이예림").getAttribute("class")).includes("needs-review"), "해석 선택이 반영되지 않음");
+    assert(json(await chips("이예림")) === json(["화 (마포점) 21:10, 22:30", "수 (마포점) 21:10, 22:30", "금 (마포점) 21:10, 22:30"]), "해석 선택 뒤 칩: " + json(await chips("이예림")));
+    summary = await page.locator("#bulkImportPreviewSummary").innerText();
+    assert(!summary.includes("해석 확인 필요"), "해석 선택 뒤 요약: " + summary);
+    assert(json([await newFields().nth(0).inputValue(), await newFields().nth(1).inputValue()]) === json(["Y", "상담"]), "해석 선택 뒤 다른 줄의 지점·구분이 바뀜");
+
+    // 줄 수정 취소는 아무것도 바꾸지 않고, 적용은 다시 해석한다(다시 모호하면 선택 초기화).
+    await editLine("이예림 화410", false);
+    assert(json(await chips("이예림")).includes("21:10, 22:30"), "줄 수정 취소 뒤 해석이 바뀜");
+    await editLine("이예림 화410");
+    assert(json(await options("이예림").allTextContents()) === json(["16:10 시작", "16:00 시작 · 22:00 시작"]), "수정한 줄의 해석 선택지: " + json(await options("이예림").allTextContents()));
+    assert((await page.inputValue("#bulkImportTextarea")).split("\n")[3] === "이예림 화410", "수정한 줄이 붙여넣은 글에 반영되지 않음");
+    await editLine("이예림 화수금9:10,1030");
+    assert((await row("이예림").locator(".bulk-preview-ambiguity").count()) === 0, "명확한 표기는 다시 확인을 요구하지 않아야 함");
+    assert(json(await chips("이예림")) === json(["화 (마포점) 21:10, 22:30", "수 (마포점) 21:10, 22:30", "금 (마포점) 21:10, 22:30"]), "명확한 표기 칩: " + json(await chips("이예림")));
+    assert((await row("이예림").locator(".bulk-preview-row-head > select").inputValue()) === "L" && (await row("김기존").locator(".bulk-preview-row-head > select").inputValue()) === "K", "줄 수정 뒤 회원 연결이 바뀜");
+    assert(json([await newFields().nth(0).inputValue(), await newFields().nth(1).inputValue()]) === json(["Y", "상담"]), "줄 수정 뒤 다른 줄의 지점·구분이 바뀜");
+
+    // 여기까지(미리보기·막힌 적용·해석 선택·줄 수정/취소) 저장 데이터는 그대로이고, 모달을 닫아도 그대로다.
+    assert(data(await readState(page)) === before, "미리보기·수정 중 저장 데이터가 바뀜");
+    await page.click("#bulkImportCloseBtn");
+    await reloadChecked(page, "모호한 시간 붙여넣기 취소 뒤 새로고침", failures);
+    assert(data(await readState(page)) === before, "취소·새로고침 뒤 저장 데이터가 바뀜");
+
+    // 모호한 줄을 건너뛰기로 고르면 나머지 줄만 등록한다(건너뛴 회원의 기존 신청은 그대로).
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    await openAndPreview();
+    await newFields().nth(1).selectOption("상담");
+    await row("이예림").locator(".bulk-preview-row-head > select").selectOption("__skip__");
+    summary = await page.locator("#bulkImportPreviewSummary").innerText();
+    assert(!summary.includes("해석 확인 필요") && (await page.locator(".bulk-preview-row.needs-review").count()) === 0, "건너뛴 줄은 해석 확인 대상이 아님: " + summary);
+    await expectNoDialog(page, "건너뛰기 뒤 적용이 막힘", () => page.click("#bulkImportApplyBtn"));
+    const saved = await readState(page);
+    const created = saved.members.find((m) => m.name === "신규회원");
+    assert(created && created.category === "상담" && json(created.locationIds) === json(["M"]), "신규회원 등록: " + json(created));
+    assert(saved.requests.some((r) => r.memberId === "K" && r.day === 0), "김기존 신청이 등록되지 않음");
+    assert(json(saved.requests.filter((r) => r.memberId === "L").map((r) => [r.day, r.startSlot])) === json([[0, 30]]), "건너뛴 이예림의 기존 신청이 바뀜");
+
+    // 줄을 고치는 중(적용·취소 전)에 일괄 등록을 누르면 고치기 전 내용(17:00)을 저장하지 않고 막는다.
+    const beforeEdit = data(saved);
+    const kimRow = () => row("김기존");
+    await page.click("#bulkImportOpenBtn");
+    if (await page.locator("#bulkImportConfirmOverlay.open").count()) await page.click("#bulkImportJustAddBtn");
+    await page.fill("#bulkImportTextarea", "김기존 월5\n신규회원 월1110\n많은회원 월1112");
+    await page.click("#bulkImportPreviewBtn");
+    await page.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
+    // 시간순이 아닌 정시 나열(23:00·22:00)도 버리지 않고 23:10과 함께 확인을 요구한다.
+    assert(json(await options("신규회원").allTextContents()) === json(["23:10 시작", "23:00 시작 · 22:00 시작 (시간순 아님)", "13:00 시작 · 13:00 시작 · 22:00 시작 (시간순 아님)"]), "1110 해석 선택지: " + json(await options("신규회원").allTextContents()));
+    // 해석이 MAX_TIME_CHOICES(4)보다 많으면 버튼 없이 구분자로 고치라고 안내한다.
+    assert((await options("많은회원").count()) === 0 && (await row("많은회원").locator(".bulk-preview-ambiguity-hint").innerText()).includes("고를 수 없습니다"), "선택지가 많은 줄 안내");
+    await row("신규회원").locator(".bulk-preview-row-head > select").selectOption("__skip__");
+    await row("많은회원").locator(".bulk-preview-row-head > select").selectOption("__skip__");
+    await kimRow().locator(".bulk-preview-edit-btn").click();
+    await kimRow().locator(".bulk-preview-edit-input").fill("김기존 월910");
+    alertMessage = "";
+    page.once("dialog", (d) => { alertMessage = d.message(); d.accept(); });
+    await page.click("#bulkImportApplyBtn");
+    assert(alertMessage.includes("적용") && alertMessage.includes("취소") && alertMessage.includes("김기존"), "줄 수정 중 적용 차단 안내: " + alertMessage);
+    assert(data(await readState(page)) === beforeEdit, "줄 수정 중 일괄 등록이 데이터를 바꿈");
+    assert(await page.evaluate(() => document.activeElement && document.activeElement.classList.contains("bulk-preview-edit-input")), "막힌 뒤 고치는 중인 줄로 이동하지 않음");
+    // 다른 줄을 다시 그려도(건너뛰기 해제·재선택) 고치던 글은 남아 있다.
+    assert((await kimRow().locator(".bulk-preview-edit-input").inputValue()) === "김기존 월910", "고치던 글이 사라짐");
+    await kimRow().locator(".bulk-preview-editor button", { hasText: "취소" }).click();
+    await expectNoDialog(page, "취소 뒤 적용이 막힘", () => page.click("#bulkImportApplyBtn"));
+    const kimSaved = (await readState(page)).requests.filter((r) => r.memberId === "K").map((r) => r.day + ":" + r.startSlot);
+    assert(json(kimSaved) === json(["0:30"]), "취소 뒤 원래 줄(월5)로 등록되지 않음: " + json(kimSaved));
+  } finally {
+    await page.close();
+  }
+
+  // 지점·회원이 없는 상태: 괄호 지점(강남)이 신규 회원 지점이 되고, 해석을 고른 뒤에도 그대로 등록된다.
+  // 지점을 정할 수 없는 줄은 "지점 선택"으로 비워 두고, 사용자가 고른 지점은 다른 줄의 해석 선택 뒤에도 유지된다.
+  const empty = { ...seed, locations: [], members: [], requests: [] };
+  const page2 = await browser.newPage();
+  page2.on("pageerror", (err) => assert(false, "페이지 런타임 에러(빈 상태): " + err.message));
+  const row2 = (name) => page2.locator(".bulk-preview-row", { has: page2.locator(".bulk-preview-name", { hasText: new RegExp("^" + name + "$") }) });
+  try {
+    await openWithSeed(page2, empty, site);
+    await page2.click('.nav-item[data-page="memberSchedule"]');
+    await page2.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    await page2.click("#bulkImportOpenBtn");
+    await page2.waitForSelector("#bulkImportOverlay.open", { timeout: 5000 });
+    await page2.fill("#bulkImportTextarea", "홍길동 (강남)월910\n김철수 월5");
+    await page2.click("#bulkImportPreviewBtn");
+    await page2.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
+    const locOf = (name) => row2(name).locator(".bulk-preview-new-fields select").nth(0);
+    const selectedText = (name) => locOf(name).evaluate((el) => el.options[el.selectedIndex].textContent);
+    assert((await selectedText("홍길동")) === "강남·새 지점" && (await locOf("홍길동").inputValue()) !== "", "홍길동 기본 지점이 강남이 아님: " + (await selectedText("홍길동")));
+    assert((await selectedText("김철수")) === "지점 선택" && (await locOf("김철수").inputValue()) === "", "지점을 정할 수 없는 줄은 비워 둬야 함: " + (await selectedText("김철수")));
+    await locOf("김철수").selectOption({ label: "강남·새 지점" });
+    await row2("홍길동").locator(".bulk-preview-ambiguity-option", { hasText: "21:10 시작" }).click();
+    assert((await selectedText("홍길동")) === "강남·새 지점" && (await selectedText("김철수")) === "강남·새 지점", "해석 선택 뒤 지점 선택이 바뀜");
+    await expectNoDialog(page2, "빈 상태 해석 선택 뒤 적용이 막힘", () => page2.click("#bulkImportApplyBtn"));
+    const st = await readState(page2);
+    const gangnam = st.locations.find((l) => l.name === "강남");
+    assert(gangnam && st.locations.length === 1, "강남 지점 생성: " + json(st.locations));
+    const hong = st.members.find((m) => m.name === "홍길동");
+    const kim = st.members.find((m) => m.name === "김철수");
+    assert(hong && kim && json(hong.locationIds) === json([gangnam.id]) && json(kim.locationIds) === json([gangnam.id]), "신규 회원 지점: " + json(st.members));
+    assert(json(st.requests.filter((r) => r.memberId === hong.id).map((r) => [r.day, r.startSlot])) === json([[0, (21 * 60 + 10 - 720) / 10]]), "홍길동 21:10 신청: " + json(st.requests));
+  } finally {
+    await page2.close();
+  }
+}
+
 // 지점 제목이 있는 붙여넣기(사용자 예시 원문)를 지점·회원이 하나도 없는 상태에서 등록한다.
 async function checkBulkImportSections(browser, site, failures) {
   const assert = (cond, msg) => { if (!cond) failures.push("[지점 제목 붙여넣기] " + msg); };
@@ -1002,6 +1184,11 @@ async function checkBulkImportSections(browser, site, failures) {
     await page.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
     return page.locator("#bulkImportPreviewSummary").innerText();
   };
+  // 원문의 반시각이 섞인 두 줄은 해석 확인 대상이다 — 예전 해석(연속 구간)을 고른다(unit FIXTURE_PICKS와 같음).
+  const resolveFixture = async () => {
+    await row("최진택").locator(".bulk-preview-ambiguity-option", { hasText: /^17:00 시작 · 17:30~18:00 연속 가능 구간$/ }).click();
+    await row("황민지").locator(".bulk-preview-ambiguity-option", { hasText: /^18:30~20:00 연속 가능 구간$/ }).click();
+  };
   try {
     await openWithSeed(page, seed, site);
     const empty = await readState(page);
@@ -1010,7 +1197,7 @@ async function checkBulkImportSections(browser, site, failures) {
 
     // 미리보기: 생성 예정 지점·회원과 시간별 지점을 보여 주고, 취소하면 아무것도 바뀌지 않는다.
     let summary = await openAndPreview(text);
-    assert(summary.includes("생성 예정 지점 여의도점·상암점·마포점") && summary.includes("신규 회원 22명") && summary.includes("기존 회원 연결 0명"), "미리보기 요약: " + summary);
+    assert(summary.includes("생성 예정 지점 여의도점·상암점·마포점") && summary.includes("신규 회원 22명") && summary.includes("기존 회원 연결 0명") && summary.includes("해석 확인 필요 2줄"), "미리보기 요약: " + summary);
     const hurChips = await row("허종원").locator(".bulk-preview-day-chip").allTextContents();
     assert(
       json(hurChips.slice(0, 2)) === json(["월 (여의도점·새 지점) 18:00", "월 (마포점·새 지점) 20:00~22:00"]) && hurChips.length === 8,
@@ -1029,6 +1216,7 @@ async function checkBulkImportSections(browser, site, failures) {
     await page.click('.nav-item[data-page="memberSchedule"]');
     await openAndPreview(text);
     await row("진애화").locator(".bulk-preview-new-fields select").nth(1).selectOption("상담");
+    await resolveFixture();
     await page.click("#bulkImportApplyBtn");
     let saved = await readState(page);
     assert(json(saved.locations.map((l) => l.name)) === json(["여의도점", "상암점", "마포점"]) && new Set(saved.locations.map((l) => l.color)).size === 3, "생성된 지점: " + json(saved.locations));
@@ -1048,6 +1236,7 @@ async function checkBulkImportSections(browser, site, failures) {
     await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
     summary = await openAndPreview(text);
     assert(!summary.includes("생성 예정 지점") && summary.includes("신규 회원 0명") && summary.includes("기존 회원 연결 22명"), "재등록 미리보기: " + summary);
+    await resolveFixture();
     await page.click("#bulkImportApplyBtn");
     saved = await readState(page);
     const shape = (s) => json({
@@ -1558,6 +1747,7 @@ async function main() {
     if (want("previous-compat")) await checkPreviousCompat(browser, site, failures);
     if (want("candidate-display")) await checkCandidateDisplay(browser, site, failures);
     if (want("bulk-import")) await checkBulkImportSections(browser, site, failures);
+    if (want("bulk-ambiguity")) await checkBulkImportAmbiguity(browser, site, failures);
 
     if (want("file")) {
       // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
