@@ -1081,6 +1081,178 @@ test("일괄 등록: (지점) 표기", () => {
   assertEqual(unknown.days, []);
   assert(unknown.errors.length === 1, "등록되지 않은 지점은 오류로 알리고 그 시간은 건너뜀");
 });
+/* ---------------- 붙여넣기 일괄 등록: 지점 제목·지점/회원 생성 ---------------- */
+// 사용자가 보낸 예시 원문(지점 제목 3개·회원 22명·x 3명·시간별 지점 1명)을 그대로 쓴다.
+const BULK_SECTIONS_TEXT = require("fs").readFileSync(
+  path.join(__dirname, "fixtures", "bulk-import-sections.txt"),
+  "utf8",
+);
+function resetBulkState() {
+  lib.state.locations = [];
+  lib.state.members = [];
+  lib.state.requests = [];
+  lib.state.travelTimes = {};
+}
+function bulkDataSnapshot() {
+  const { locations, members, requests, travelTimes } = lib.state;
+  return JSON.stringify({ locations, members, requests, travelTimes });
+}
+// id와 무관한 비교용 요약: 회원(이름·지점·구분)과 신청(회원·요일·시각·실제 허용 지점).
+function bulkNormalized() {
+  const locName = (id) => (lib.state.locations.find((l) => l.id === id) || {}).name;
+  const memberName = (id) => lib.state.members.find((m) => m.id === id).name;
+  return {
+    locations: lib.state.locations.map((l) => l.name),
+    members: lib.state.members
+      .map((m) => m.name + "|" + m.locationIds.map(locName).join(",") + "|" + m.category)
+      .sort(),
+    requests: lib.state.requests
+      .map((r) =>
+        [memberName(r.memberId), r.day, lib.slotLabel(r.startSlot), lib.candidateLocationsForRequest(r).map(locName).join(",")].join("|"),
+      )
+      .sort(),
+    travelPairs: Object.keys(lib.state.travelTimes).length,
+  };
+}
+function bulkMember(name) {
+  const found = lib.state.members.filter((m) => m.name === name);
+  assertEqual(found.length, 1, name + " 회원 수");
+  return found[0];
+}
+function applyBulkText(text) {
+  const report = lib.applyBulkImportPlan(lib.planBulkImport(text));
+  assert(!report.error, "적용이 막힘: " + report.error);
+  return report;
+}
+
+test("지점 제목 붙여넣기: 빈 상태에서 지점 3개·회원 22명을 만든다", () => {
+  resetBulkState();
+  applyBulkText(BULK_SECTIONS_TEXT);
+  assertEqual(lib.state.locations.map((l) => l.name), ["여의도점", "상암점", "마포점"]);
+  // 신규 지점 색은 6색 팔레트에서 서로 다르게 자동 배정된다.
+  assertEqual(lib.state.locations.map((l) => l.color), lib.LOCATION_PALETTE.slice(0, 3).map((p) => p.color));
+  const [Y, S, M] = lib.state.locations;
+  [[Y, S], [Y, M], [S, M]].forEach(([a, b]) =>
+    assertEqual(lib.state.travelTimes[lib.pairKey(a.id, b.id)], lib.defaultTravelMinutesFor(a.name, b.name), a.name + "-" + b.name),
+  );
+  assertEqual(lib.state.members.length, 22);
+  assert(lib.state.members.every((m) => m.category === "등록"), "신규 회원 기본 구분은 등록");
+  const atLoc = (loc) => lib.state.members.filter((m) => m.locationIds.length === 1 && m.locationIds[0] === loc.id).length;
+  assertEqual([atLoc(Y), atLoc(S), atLoc(M)], [6, 6, 10], "지점 제목별 회원 수");
+});
+test("지점 제목 붙여넣기: x인 신규 회원은 회원으로 남고 신청은 없다", () => {
+  resetBulkState();
+  applyBulkText(BULK_SECTIONS_TEXT);
+  const M = lib.state.locations.find((l) => l.name === "마포점");
+  ["최문열", "박다정", "김수연"].forEach((name) => {
+    const m = bulkMember(name);
+    assertEqual(m.locationIds, [M.id], name + " 지점");
+    assertEqual(lib.state.requests.filter((r) => r.memberId === m.id).length, 0, name + " 신청");
+  });
+});
+test("지점 제목 붙여넣기: 빈 줄 뒤의 한지원도 마포 소속이고 마포에서만 신청된다", () => {
+  resetBulkState();
+  applyBulkText(BULK_SECTIONS_TEXT);
+  const M = lib.state.locations.find((l) => l.name === "마포점");
+  const han = bulkMember("한지원");
+  assertEqual(han.locationIds, [M.id]);
+  const reqs = lib.state.requests.filter((r) => r.memberId === han.id);
+  assert(reqs.length > 0 && reqs.every((r) => lib.candidateLocationsForRequest(r).join() === M.id), "한지원 신청 지점");
+  assertEqual([...new Set(reqs.map((r) => r.day))], [1, 4]);
+  assertEqual([...new Set(reqs.map((r) => lib.slotLabel(r.startSlot)))].sort()[0], "15:00");
+});
+test("시간별 지점 지정은 그 시간에만 그 지점으로 신청되고 범위가 넓어지지 않는다", () => {
+  resetBulkState();
+  applyBulkText(BULK_SECTIONS_TEXT);
+  const loc = (name) => lib.state.locations.find((l) => l.name === name).id;
+  const hur = bulkMember("허종원");
+  assertEqual(hur.locationIds, [loc("마포점")]);
+  const reqs = lib.state.requests.filter((r) => r.memberId === hur.id);
+  const expected = [];
+  [0, 1, 2, 3].forEach((day) => {
+    expected.push(day + " 18:00 " + loc("여의도점"));
+    for (let min = 20 * 60; min <= 22 * 60; min += 10)
+      expected.push(day + " " + lib.minutesLabel(min) + " " + loc("마포점"));
+  });
+  assertEqual(
+    reqs.map((r) => r.day + " " + lib.slotLabel(r.startSlot) + " " + lib.candidateLocationsForRequest(r).join(",")).sort(),
+    expected.sort(),
+  );
+});
+test("붙여넣기 미리보기(계획)만으로는 데이터가 바뀌지 않는다", () => {
+  resetBulkState();
+  const before = bulkDataSnapshot();
+  const plan = lib.planBulkImport(BULK_SECTIONS_TEXT);
+  assertEqual(plan.newLocations.map((l) => l.name), ["여의도점", "상암점", "마포점"]);
+  assertEqual(plan.rows.length, 22);
+  assert(plan.rows.every((r) => r.choice === "__new__"), "빈 상태에서는 모두 신규 회원");
+  assertEqual(bulkDataSnapshot(), before);
+});
+test("같은 붙여넣기를 다시 등록해도 지점·회원·신청이 중복되지 않는다", () => {
+  resetBulkState();
+  applyBulkText(BULK_SECTIONS_TEXT);
+  const first = bulkNormalized();
+  const plan = lib.planBulkImport(BULK_SECTIONS_TEXT);
+  assertEqual(plan.newLocations, [], "기존 지점에 연결");
+  assert(plan.rows.every((r) => lib.state.members.some((m) => m.id === r.choice)), "모두 기존 회원에 연결");
+  const report = lib.applyBulkImportPlan(plan);
+  assertEqual([report.createdLocations.length, report.createdCount], [0, 0]);
+  assertEqual(bulkNormalized(), first);
+});
+test("붙여넣기는 '여의도'·'여의도점'을 같은 지점으로 연결하고 기존 이동시간을 보존한다", () => {
+  resetBulkState();
+  const Y = lib.addLocation("여의도점");
+  const M = lib.addLocation("마포");
+  lib.state.travelTimes[lib.pairKey(Y.id, M.id)] = 7;
+  applyBulkText("[여의도]\n가회원 월5\n(마포점)\n[마포점]\n나회원 화6\n[상암]\n다회원 수7");
+  assertEqual(lib.state.locations.map((l) => l.name), ["여의도점", "마포", "상암점"]);
+  assertEqual(lib.state.travelTimes[lib.pairKey(Y.id, M.id)], 7, "기존 이동시간");
+  assertEqual(Object.keys(lib.state.travelTimes).length, 3);
+  assertEqual(bulkMember("나회원").locationIds, [M.id]);
+});
+test("기존 회원의 x는 기존 신청만 비우고 지점·구분은 덮어쓰지 않는다", () => {
+  lib.state.locations = bulkLocations();
+  lib.state.travelTimes = {};
+  lib.state.members = [{ id: "H", name: "홍길동", locationIds: ["Y"], category: "체험", memo: "" }];
+  lib.state.requests = [{ id: "r1", memberId: "H", day: 0, startSlot: 30, duration: 60 }];
+  const plan = lib.planBulkImport("[마포]\n홍길동 x");
+  assertEqual(plan.rows[0].choice, "H", "기존 회원에 연결");
+  const report = lib.applyBulkImportPlan(plan);
+  assertEqual(report.clearedNames, ["홍길동"]);
+  assertEqual(report.createdLocations, [], "x만 있는 기존 회원 때문에 지점을 만들지 않는다");
+  assertEqual(lib.state.requests, []);
+  assertEqual(lib.state.members, [{ id: "H", name: "홍길동", locationIds: ["Y"], category: "체험", memo: "" }]);
+});
+test("동명이인은 고르기 전까지 적용하지 않는다", () => {
+  lib.state.locations = bulkLocations();
+  lib.state.travelTimes = {};
+  lib.state.members = [
+    { id: "H1", name: "홍길동", locationIds: ["Y"], category: "등록", memo: "" },
+    { id: "H2", name: "홍길동", locationIds: ["M"], category: "등록", memo: "" },
+  ];
+  lib.state.requests = [];
+  const before = bulkDataSnapshot();
+  const plan = lib.planBulkImport("[강남]\n홍길동 월5");
+  assertEqual(plan.rows[0].choice, "");
+  assert(lib.applyBulkImportPlan(plan).error.includes("홍길동"), "선택 요구 오류");
+  assertEqual(bulkDataSnapshot(), before, "막힌 적용은 아무것도 바꾸지 않는다(지점 생성 포함)");
+  plan.rows[0].choice = "H2";
+  assert(!lib.applyBulkImportPlan(plan).error);
+  assertEqual(lib.state.requests.map((r) => r.memberId), ["H2"]);
+});
+test("지점 제목이 없는 기존 일괄 등록 형식은 회원 기본 지점 전체로 신청한다", () => {
+  lib.state.locations = bulkLocations();
+  lib.state.travelTimes = {};
+  lib.state.members = [{ id: "H", name: "홍길동", locationIds: ["Y", "M"], category: "등록", memo: "" }];
+  lib.state.requests = [];
+  applyBulkText("홍길동 월5 (마포)화6");
+  assertEqual(
+    lib.state.requests.map((r) => r.day + " " + lib.slotLabel(r.startSlot) + " " + lib.candidateLocationsForRequest(r).join(",")),
+    ["0 17:00 Y,M", "1 18:00 M"],
+  );
+  assert(!("excludedLocationIds" in lib.state.requests[0]), "지점 표기 없는 신청은 예전 형태 그대로");
+});
+
 // index.html 안내 문구가 실제 정책과 어긋나지 않게 한다(예전 "5678 → 각각 정시" 안내는 실제
 // 동작인 17:00~20:00 연속 구간과 달랐다).
 const indexHtml = require("fs").readFileSync(path.join(__dirname, "..", "index.html"), "utf8");

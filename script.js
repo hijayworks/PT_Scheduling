@@ -554,6 +554,19 @@
       currentStep: parsed.currentStep
     };
   }
+  function addLocation(name, color, id = uid("loc")) {
+    const loc = { id, name, color };
+    state.locations.push(loc);
+    fillLocationColors(state.locations);
+    state.locations.forEach((other) => {
+      if (other.id !== loc.id)
+        state.travelTimes[pairKey(loc.id, other.id)] = defaultTravelMinutesFor(
+          loc.name,
+          other.name
+        );
+    });
+    return loc;
+  }
   function fillLocationColors(locations) {
     const valid = (c) => LOCATION_PALETTE.some((p) => p.color === c);
     const used = new Set(locations.map((l) => l.color).filter(valid));
@@ -662,20 +675,7 @@
       }
     }
     if (!hadSavedState && state.locations.length === 0) {
-      state.locations = DEFAULT_LOCATION_NAMES.map((name) => ({
-        id: uid("loc"),
-        name,
-        color: DEFAULT_LOCATION_COLORS[name]
-      }));
-      for (let i = 0; i < state.locations.length; i++) {
-        for (let j = i + 1; j < state.locations.length; j++) {
-          const locA = state.locations[i], locB = state.locations[j];
-          state.travelTimes[pairKey(locA.id, locB.id)] = defaultTravelMinutesFor(
-            locA.name,
-            locB.name
-          );
-        }
-      }
+      DEFAULT_LOCATION_NAMES.forEach((name) => addLocation(name));
     }
     if (!hadSavedState && runtime.availableCells.size === 0) {
       DEFAULT_BUSINESS_DAY_INDICES.forEach((di) => {
@@ -8913,7 +8913,11 @@
       return { error: '시간 해석 실패: "' + originalToken + '"', warning };
     return withLateMark({ type: "point", marks, warning });
   }
-  function parseBulkImportLine(line) {
+  function existingLocationId(name) {
+    const loc = findLocationByLooseName(name);
+    return loc ? loc.id : null;
+  }
+  function parseBulkImportLine(line, resolveLocation = existingLocationId, sectionLocationId = null) {
     const tokens = line.replace(/\//g, ",").replace(/(\d)\s*시\s*(\d{1,2})\s*분/g, "$1시$2분").trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) return null;
     const name = tokens[0];
@@ -8930,7 +8934,7 @@
       return result;
     }
     let currentDays = null;
-    let currentLocationId = null;
+    let currentLocationId = sectionLocationId;
     let currentLocationUnknown = false;
     function applyTimeToken(tok, single) {
       if (currentLocationUnknown) return;
@@ -8960,10 +8964,10 @@
     tokens.slice(1).forEach((spaceTok) => {
       const locMatch = spaceTok.match(/^[(（]([^)）]+)[)）]/);
       if (locMatch) {
-        const loc = findLocationByLooseName(locMatch[1].trim());
-        currentLocationId = loc ? loc.id : null;
-        currentLocationUnknown = !loc;
-        if (!loc)
+        const locId = resolveLocation(locMatch[1].trim());
+        currentLocationId = locId;
+        currentLocationUnknown = !locId;
+        if (!locId)
           result.errors.push(
             '등록되지 않은 지점이라 그 지점의 시간은 건너뜁니다: "' + locMatch[1] + '"'
           );
@@ -8990,8 +8994,173 @@
     const bare = (n) => n.replace(/점$/, "");
     return state.locations.find((l) => l.name === name) || state.locations.find((l) => bare(l.name) === bare(name));
   }
-  function parseBulkImportText(text) {
-    return text.split("\n").map(parseBulkImportLine).filter(Boolean);
+  function parseBulkSectionHeader(line) {
+    const m = line.trim().match(/^[[［]\s*([^\]］]+?)\s*[\]］]$/);
+    return m ? m[1] : null;
+  }
+  function planBulkImport(text) {
+    const bare = (n) => n.replace(/점$/, "");
+    const newLocations = [];
+    function resolveLocation(name) {
+      const existing = existingLocationId(name);
+      if (existing) return existing;
+      let pending = newLocations.find((l) => bare(l.name) === bare(name));
+      if (!pending) {
+        const defaultName = DEFAULT_LOCATION_NAMES.find(
+          (n) => bare(n) === bare(name)
+        );
+        pending = { id: uid("loc"), name: defaultName || name };
+        newLocations.push(pending);
+      }
+      return pending.id;
+    }
+    let sectionLocationId = null;
+    const rows = [];
+    text.split("\n").forEach((line) => {
+      const header = parseBulkSectionHeader(line);
+      if (header !== null) {
+        sectionLocationId = resolveLocation(header);
+        return;
+      }
+      const parsed = parseBulkImportLine(line, resolveLocation, sectionLocationId);
+      if (!parsed) return;
+      const matches = findMembersByName(parsed.name);
+      const firstLoc = parsed.days.find((d) => d.locationId);
+      rows.push({
+        parsed,
+        choice: matches.length === 0 ? "__new__" : matches.length === 1 ? matches[0].id : "",
+        newLocationId: sectionLocationId || firstLoc && firstLoc.locationId || (state.locations[0] ? state.locations[0].id : ""),
+        newCategory: "등록"
+      });
+    });
+    return { rows, newLocations };
+  }
+  function createsNewMember(row) {
+    return row.parsed.days.length > 0 || row.parsed.clearAll;
+  }
+  function applyBulkImportPlan(plan) {
+    const active = plan.rows.filter((r) => r.choice !== "__skip__");
+    const unchosen = active.filter((r) => r.choice === "");
+    if (unchosen.length)
+      return {
+        error: "같은 이름의 회원이 여러 명입니다. 미리보기에서 회원을 골라주세요: " + unchosen.map((r) => r.parsed.name).join(", ")
+      };
+    const noLocation = active.filter(
+      (r) => r.choice === "__new__" && createsNewMember(r) && !r.newLocationId
+    );
+    if (noLocation.length)
+      return {
+        error: "신규 회원의 지점을 정할 수 없습니다. 지점 제목([지점])을 붙이거나 설정에서 지점을 먼저 등록해주세요: " + noLocation.map((r) => r.parsed.name).join(", ")
+      };
+    const usedLocationIds = /* @__PURE__ */ new Set();
+    active.forEach((r) => {
+      if (r.choice === "__new__" && createsNewMember(r))
+        usedLocationIds.add(r.newLocationId);
+      r.parsed.days.forEach((d) => usedLocationIds.add(d.locationId));
+    });
+    const createdLocations = plan.newLocations.filter((l) => usedLocationIds.has(l.id)).map((l) => addLocation(l.name, void 0, l.id));
+    const report = {
+      createdLocations,
+      createdCount: 0,
+      appliedCount: 0,
+      zeroFitNames: [],
+      // 파싱은 됐지만 마감 시간 등으로 실제 등록된 시간이 하나도 없는 회원
+      emptyRowNames: [],
+      // 신규 회원인데 등록할 시간이 없어 건너뛴 줄
+      clearedNames: [],
+      // 기존 회원이고 "이름 x"로 명시 지정해 기존 스케줄을 모두 지운 회원
+      unparsedSkippedNames: []
+      // 기존 회원인데 오타 등으로 파싱이 안 돼(명시적 x가 아님) 건드리지 않고 건너뛴 줄
+    };
+    const entriesByMemberKey = /* @__PURE__ */ new Map();
+    active.forEach((row) => {
+      let member, isNew = false, key;
+      if (row.choice === "__new__") {
+        if (!createsNewMember(row)) {
+          report.emptyRowNames.push(row.parsed.name);
+          return;
+        }
+        key = "new:" + row.parsed.name;
+        member = entriesByMemberKey.has(key) ? entriesByMemberKey.get(key).member : {
+          id: uid("m"),
+          name: row.parsed.name,
+          locationIds: [row.newLocationId],
+          category: row.newCategory,
+          memo: ""
+        };
+        isNew = true;
+      } else {
+        member = memberById(row.choice);
+        if (!member) return;
+        key = member.id;
+      }
+      if (!entriesByMemberKey.has(key)) {
+        entriesByMemberKey.set(key, {
+          member,
+          isNew,
+          days: /* @__PURE__ */ new Map(),
+          explicitClear: false
+        });
+      }
+      const entry = entriesByMemberKey.get(key);
+      if (row.parsed.clearAll) entry.explicitClear = true;
+      row.parsed.days.forEach((dayEntry) => {
+        const dayKey = dayEntry.day + "|" + (dayEntry.locationId || "");
+        if (!entry.days.has(dayKey))
+          entry.days.set(dayKey, {
+            day: dayEntry.day,
+            locationId: dayEntry.locationId,
+            specs: []
+          });
+        entry.days.get(dayKey).specs.push(...dayEntry.specs);
+      });
+    });
+    entriesByMemberKey.forEach((entry) => {
+      const member = entry.member;
+      if (entry.isNew) {
+        state.members.unshift(member);
+        report.createdCount++;
+      } else if (entry.days.size === 0 && !entry.explicitClear) {
+        report.unparsedSkippedNames.push(member.name);
+        return;
+      }
+      state.requests = state.requests.filter((r) => r.memberId !== member.id);
+      let addedForMember = 0;
+      let day, locId;
+      function addRange(startSlot, endSlot) {
+        addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
+      }
+      function applyMarks(marks) {
+        groupConsecutiveMarks(marks).forEach((group) => {
+          addRange(
+            hourMarkToStartSlot(group[0]),
+            hourMarkToStartSlot(group[group.length - 1])
+          );
+        });
+      }
+      [...entry.days.values()].sort((a, b) => !!a.locationId - !!b.locationId).forEach((dayEntry) => {
+        day = dayEntry.day;
+        locId = dayEntry.locationId;
+        dayEntry.specs.forEach((spec) => {
+          if (spec.type === "point") {
+            applyMarks(spec.marks);
+          } else if (spec.type === "openStart") {
+            applyMarks(spec.extraPoints || []);
+            addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
+          } else if (spec.type === "openEnd") {
+            addRange(0, hourMarkToStartSlot(spec.mark));
+            applyMarks(spec.extraPoints || []);
+          }
+        });
+      });
+      report.appliedCount++;
+      if (entry.days.size === 0) {
+        if (!entry.isNew) report.clearedNames.push(member.name);
+      } else if (addedForMember === 0) {
+        report.zeroFitNames.push(member.name);
+      }
+    });
+    return report;
   }
   function describeMarks(marks) {
     return groupConsecutiveMarks(marks).map(
@@ -9052,7 +9221,7 @@
   var bulkImportPreviewListEl = document.getElementById(
     "bulkImportPreviewList"
   );
-  var bulkImportRows = [];
+  var bulkImportPlan = { rows: [], newLocations: [] };
   function openBulkImportModal() {
     bulkImportTextareaEl.value = "";
     bulkImportStepInputEl.hidden = false;
@@ -9098,25 +9267,47 @@
     bulkImportStepInputEl.hidden = false;
     bulkImportStepPreviewEl.hidden = true;
   });
+  function bulkLocationLabel(locId) {
+    const loc = locationById(locId);
+    if (loc) return loc.name;
+    const pending = bulkImportPlan.newLocations.find((l) => l.id === locId);
+    return pending ? pending.name + "·새 지점" : "";
+  }
+  function renderBulkImportSummary() {
+    const rows = bulkImportPlan.rows;
+    const newNames = new Set(
+      rows.filter((r) => r.choice === "__new__" && createsNewMember(r)).map((r) => r.parsed.name)
+    );
+    const linked = new Set(
+      rows.filter((r) => memberById(r.choice)).map((r) => r.choice)
+    );
+    const unchosen = rows.filter((r) => r.choice === "").length;
+    const skipped = rows.filter((r) => r.choice === "__skip__").length;
+    const parts = [];
+    if (bulkImportPlan.newLocations.length)
+      parts.push(
+        "생성 예정 지점 " + bulkImportPlan.newLocations.map((l) => l.name).join("·")
+      );
+    parts.push("신규 회원 " + newNames.size + "명");
+    parts.push("기존 회원 연결 " + linked.size + "명");
+    if (unchosen) parts.push("동명이인 선택 필요 " + unchosen + "명");
+    parts.push("건너뛰기 " + skipped + "명");
+    bulkImportPreviewSummaryEl.textContent = "";
+    bulkImportPreviewSummaryEl.append(
+      parts.join(" · "),
+      document.createElement("br"),
+      "적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다. '일괄 등록'을 누르기 전에는 아무것도 바뀌지 않습니다."
+    );
+  }
   function renderBulkImportPreview() {
-    const lines = parseBulkImportText(bulkImportTextareaEl.value);
-    if (lines.length === 0) {
+    const plan = planBulkImport(bulkImportTextareaEl.value);
+    if (plan.rows.length === 0) {
       alert("붙여넣은 내용이 없습니다.");
       return;
     }
-    bulkImportRows = lines.map((parsed) => {
-      const matches = findMembersByName(parsed.name);
-      const firstLoc = parsed.days.find((d) => d.locationId);
-      return {
-        parsed,
-        choice: matches.length >= 1 ? matches[0].id : "__new__",
-        newLocationId: firstLoc ? firstLoc.locationId : state.locations[0] ? state.locations[0].id : "",
-        newCategory: "등록"
-      };
-    });
+    bulkImportPlan = plan;
     bulkImportPreviewListEl.innerHTML = "";
-    let willApply = 0, willCreate = 0, willSkip = 0;
-    bulkImportRows.forEach((row) => {
+    plan.rows.forEach((row) => {
       const parsed = row.parsed;
       const matches = findMembersByName(parsed.name);
       const rowEl = document.createElement("div");
@@ -9128,11 +9319,17 @@
       nameEl.textContent = parsed.name;
       head.appendChild(nameEl);
       const select = document.createElement("select");
+      if (matches.length > 1) {
+        const pickOpt = document.createElement("option");
+        pickOpt.value = "";
+        pickOpt.textContent = "동명이인 — 회원 선택";
+        select.appendChild(pickOpt);
+      }
       matches.forEach((m) => {
         const opt = document.createElement("option");
         opt.value = m.id;
         const locNames = m.locationIds.map((id) => locationById(id)).filter(Boolean).map((l) => l.name).join("·");
-        opt.textContent = "기존 회원 (" + (locNames || "지점 미지정") + ")" + (matches.length > 1 ? " #" + m.id.slice(-4) : "");
+        opt.textContent = "기존 회원 연결 (" + (locNames || "지점 미지정") + " · " + (m.category || "구분 없음") + ")" + (matches.length > 1 ? " #" + m.id.slice(-4) : "");
         select.appendChild(opt);
       });
       const newOpt = document.createElement("option");
@@ -9144,19 +9341,18 @@
       skipOpt.textContent = "건너뛰기";
       select.appendChild(skipOpt);
       select.value = row.choice;
-      select.classList.toggle("is-new-member", select.value === "__new__");
       select.addEventListener("change", () => {
         row.choice = select.value;
-        select.classList.toggle("is-new-member", select.value === "__new__");
         renderRowState();
+        renderBulkImportSummary();
       });
       const newFields = document.createElement("div");
       newFields.className = "bulk-preview-new-fields";
       const locSelect = document.createElement("select");
-      state.locations.forEach((loc) => {
+      state.locations.map((l) => l.id).concat(plan.newLocations.map((l) => l.id)).forEach((locId) => {
         const opt = document.createElement("option");
-        opt.value = loc.id;
-        opt.textContent = loc.name;
+        opt.value = locId;
+        opt.textContent = bulkLocationLabel(locId);
         locSelect.appendChild(opt);
       });
       if (row.newLocationId) locSelect.value = row.newLocationId;
@@ -9181,31 +9377,40 @@
       rowEl.appendChild(head);
       const scheduleEl = document.createElement("div");
       scheduleEl.className = "bulk-preview-schedule";
-      if (parsed.days.length > 0) {
-        parsed.days.forEach((dayEntry) => {
-          const chip = document.createElement("span");
-          chip.className = "bulk-preview-day-chip";
-          const loc = locationById(dayEntry.locationId);
-          const dayEl = document.createElement("b");
-          dayEl.textContent = DAYS[dayEntry.day];
-          chip.append(
-            dayEl,
-            " " + (loc ? "(" + loc.name + ") " : "") + describeDaySpecs(dayEntry.specs)
-          );
-          scheduleEl.appendChild(chip);
-        });
-      } else if (parsed.clearAll) {
-        const chip = document.createElement("span");
-        chip.className = "bulk-preview-day-chip bulk-preview-day-chip-clear";
-        chip.textContent = "기존 가능 시간 전체 삭제";
-        scheduleEl.appendChild(chip);
-      } else {
+      rowEl.appendChild(scheduleEl);
+      function renderSchedule() {
+        scheduleEl.innerHTML = "";
+        if (parsed.days.length > 0) {
+          parsed.days.forEach((dayEntry) => {
+            const chip2 = document.createElement("span");
+            chip2.className = "bulk-preview-day-chip";
+            const locName = bulkLocationLabel(dayEntry.locationId);
+            const dayEl = document.createElement("b");
+            dayEl.textContent = DAYS[dayEntry.day];
+            chip2.append(
+              dayEl,
+              " " + (locName ? "(" + locName + ") " : "") + describeDaySpecs(dayEntry.specs)
+            );
+            scheduleEl.appendChild(chip2);
+          });
+          return;
+        }
         const chip = document.createElement("span");
         chip.className = "bulk-preview-day-chip";
-        chip.textContent = "등록할 시간 없음";
+        const existing = memberById(row.choice);
+        if (parsed.clearAll && existing) {
+          const count = state.requests.filter(
+            (r) => r.memberId === existing.id
+          ).length;
+          chip.classList.add("bulk-preview-day-chip-clear");
+          chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
+        } else if (parsed.clearAll && row.choice === "__new__") {
+          chip.textContent = "신청 시간 없이 회원만 등록";
+        } else {
+          chip.textContent = "등록할 시간 없음";
+        }
         scheduleEl.appendChild(chip);
       }
-      rowEl.appendChild(scheduleEl);
       parsed.warnings.forEach((w) => {
         const p = document.createElement("p");
         p.className = "bulk-preview-note warning";
@@ -9220,124 +9425,45 @@
       });
       function renderRowState() {
         rowEl.classList.toggle("skip", row.choice === "__skip__");
+        select.classList.toggle("is-new-member", row.choice === "__new__");
         newFields.hidden = row.choice !== "__new__";
+        renderSchedule();
       }
       renderRowState();
       bulkImportPreviewListEl.appendChild(rowEl);
-      if (row.choice === "__skip__") willSkip++;
-      else if (row.choice === "__new__") willCreate++;
-      else willApply++;
     });
-    bulkImportPreviewSummaryEl.innerHTML = "기존 회원 적용 " + willApply + "명 · 신규 등록 " + willCreate + "명 · 건너뛰기 " + willSkip + "명<br>적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다.";
+    renderBulkImportSummary();
     bulkImportStepInputEl.hidden = true;
     bulkImportStepPreviewEl.hidden = false;
   }
   bulkImportPreviewBtn.addEventListener("click", renderBulkImportPreview);
   bulkImportApplyBtn.addEventListener("click", () => {
-    if (state.locations.length === 0) {
-      alert("설정 페이지에서 지점을 먼저 등록해주세요.");
+    const report = applyBulkImportPlan(bulkImportPlan);
+    if (report.error) {
+      alert(report.error);
       return;
     }
-    let createdCount = 0;
-    const zeroFitNames = [];
-    const emptyRowNames = [];
-    const clearedNames = [];
-    const unparsedSkippedNames = [];
-    const entriesByMemberKey = /* @__PURE__ */ new Map();
-    bulkImportRows.forEach((row) => {
-      if (row.choice === "__skip__") return;
-      let member, isNew = false;
-      if (row.choice === "__new__") {
-        if (row.parsed.days.length === 0) {
-          emptyRowNames.push(row.parsed.name);
-          return;
-        }
-        if (!row.newLocationId) return;
-        member = {
-          id: uid("m"),
-          name: row.parsed.name,
-          locationIds: [row.newLocationId],
-          category: row.newCategory,
-          memo: ""
-        };
-        isNew = true;
-      } else {
-        member = memberById(row.choice);
-        if (!member) return;
-      }
-      if (!entriesByMemberKey.has(member.id)) {
-        entriesByMemberKey.set(member.id, {
-          member,
-          isNew,
-          days: /* @__PURE__ */ new Map(),
-          explicitClear: false
-        });
-      }
-      const entry = entriesByMemberKey.get(member.id);
-      if (row.parsed.clearAll) entry.explicitClear = true;
-      row.parsed.days.forEach((dayEntry) => {
-        const key = dayEntry.day + "|" + (dayEntry.locationId || "");
-        if (!entry.days.has(key))
-          entry.days.set(key, {
-            day: dayEntry.day,
-            locationId: dayEntry.locationId,
-            specs: []
-          });
-        entry.days.get(key).specs.push(...dayEntry.specs);
-      });
-    });
-    let appliedCount = 0;
-    entriesByMemberKey.forEach((entry) => {
-      const member = entry.member;
-      if (entry.isNew) {
-        state.members.unshift(member);
-        createdCount++;
-      } else if (entry.days.size === 0 && !entry.explicitClear) {
-        unparsedSkippedNames.push(member.name);
-        return;
-      }
-      state.requests = state.requests.filter((r) => r.memberId !== member.id);
-      let addedForMember = 0;
-      let day, locId;
-      function addRange(startSlot, endSlot) {
-        addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
-      }
-      function applyMarks(marks) {
-        groupConsecutiveMarks(marks).forEach((group) => {
-          addRange(
-            hourMarkToStartSlot(group[0]),
-            hourMarkToStartSlot(group[group.length - 1])
-          );
-        });
-      }
-      [...entry.days.values()].sort((a, b) => !!a.locationId - !!b.locationId).forEach((dayEntry) => {
-        day = dayEntry.day;
-        locId = dayEntry.locationId;
-        dayEntry.specs.forEach((spec) => {
-          if (spec.type === "point") {
-            applyMarks(spec.marks);
-          } else if (spec.type === "openStart") {
-            applyMarks(spec.extraPoints || []);
-            addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
-          } else if (spec.type === "openEnd") {
-            addRange(0, hourMarkToStartSlot(spec.mark));
-            applyMarks(spec.extraPoints || []);
-          }
-        });
-      });
-      appliedCount++;
-      if (entry.days.size === 0) {
-        if (!entry.isNew) clearedNames.push(member.name);
-      } else if (addedForMember === 0) {
-        zeroFitNames.push(member.name);
-      }
-    });
     saveState();
+    if (report.createdLocations.length) {
+      renderLocationList();
+      renderTravelMatrix();
+      populateMemberLocationSelect();
+    }
     renderMemberTable();
     renderRequestList();
     closeBulkImportModal();
+    const {
+      zeroFitNames,
+      emptyRowNames,
+      clearedNames,
+      unparsedSkippedNames
+    } = report;
     const notes = [];
-    if (createdCount) notes.push("신규 " + createdCount + "명");
+    if (report.createdLocations.length)
+      notes.push(
+        "지점 " + report.createdLocations.map((l) => l.name).join("·") + " 생성"
+      );
+    if (report.createdCount) notes.push("신규 " + report.createdCount + "명");
     if (zeroFitNames.length)
       notes.push(
         zeroFitNames.join(", ") + "은(는) 마감 시간 등으로 등록된 시간이 없습니다"
@@ -9356,7 +9482,7 @@
       );
     const suffix = notes.length ? " (" + notes.join(" · ") + ")" : "";
     showToast(
-      appliedCount + "명 스케줄 등록 완료" + suffix,
+      report.appliedCount + "명 스케줄 등록 완료" + suffix,
       zeroFitNames.length || emptyRowNames.length || clearedNames.length || unparsedSkippedNames.length ? "info" : "success"
     );
   });
@@ -12465,14 +12591,8 @@
       return;
     }
     setLocationHint("");
-    const loc = { id: uid("loc"), name, color: newLocationColor };
+    addLocation(name, newLocationColor);
     newLocationColor = null;
-    state.locations.push(loc);
-    state.locations.forEach((other) => {
-      if (other.id !== loc.id) {
-        state.travelTimes[pairKey(loc.id, other.id)] = DEFAULT_TRAVEL_MIN;
-      }
-    });
     locationNameInput.value = "";
     locationNameInput.focus();
     renderLocationList();

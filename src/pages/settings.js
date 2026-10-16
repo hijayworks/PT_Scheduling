@@ -3,13 +3,12 @@ import {
   SLOT_MIN,
   SLOT_COUNT,
   START_MIN,
-  DEFAULT_TRAVEL_MIN,
   DEFAULT_BUSINESS_START_SLOT,
   DEFAULT_BUSINESS_END_SLOT,
   LOCATION_PALETTE,
 } from "../constants.js";
-import { cellKey, minutesLabel, uid, showToast } from "../utils.js";
-import { state, runtime, saveState } from "../state.js";
+import { cellKey, minutesLabel, showToast } from "../utils.js";
+import { state, runtime, saveState, addLocation } from "../state.js";
 import {
   locationColorClass,
   pairKey,
@@ -362,15 +361,8 @@ locationForm.addEventListener("submit", (e) => {
     return;
   }
   setLocationHint("");
-  const loc = { id: uid("loc"), name, color: newLocationColor };
+  addLocation(name, newLocationColor);
   newLocationColor = null; // 다음 지점은 다시 쓰이지 않은 첫 색부터
-  state.locations.push(loc);
-  // seed travel time with existing locations so nothing is silently 0.
-  state.locations.forEach((other) => {
-    if (other.id !== loc.id) {
-      state.travelTimes[pairKey(loc.id, other.id)] = DEFAULT_TRAVEL_MIN;
-    }
-  });
   locationNameInput.value = "";
   locationNameInput.focus();
   renderLocationList();

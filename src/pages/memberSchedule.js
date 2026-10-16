@@ -8,6 +8,7 @@ import {
   START_MIN,
   BREAK_MIN,
   CATEGORY_OPTIONS,
+  DEFAULT_LOCATION_NAMES,
 } from "../constants.js";
 import {
   minutesLabel,
@@ -17,7 +18,7 @@ import {
   showToast,
   fillTimeSelect,
 } from "../utils.js";
-import { state, runtime, saveState } from "../state.js";
+import { state, runtime, saveState, addLocation } from "../state.js";
 import {
   memberById,
   locationById,
@@ -26,7 +27,11 @@ import {
   sessionDurationFor,
 } from "../domain.js";
 import { renderGrid } from "../grid.js";
-import { businessHoursGridRange } from "./settings.js";
+import {
+  businessHoursGridRange,
+  renderLocationList,
+  renderTravelMatrix,
+} from "./settings.js";
 import {
   renderSchedule3Result,
   onceLimit3Widget,
@@ -472,8 +477,20 @@ export function parseTimeToken(token, single = false) {
   return withLateMark({ type: "point", marks, warning });
 }
 
-// 한 줄("이름  요일 시간...")을 해석한다.
-export function parseBulkImportLine(line) {
+// 괄호 지점 표기를 지점 id로 바꾸는 기본 규칙: 등록된 지점만 찾고, 없으면 null(그 지점 시간은 오류로 건너뜀).
+// 붙여넣기 미리보기(planBulkImport)는 없는 지점을 생성 예정으로 잡는 규칙을 넘긴다.
+function existingLocationId(name) {
+  const loc = findLocationByLooseName(name);
+  return loc ? loc.id : null;
+}
+
+// 한 줄("이름  요일 시간...")을 해석한다. sectionLocationId는 "[마포]" 같은 지점 제목 아래 줄의 기본
+// 지점이다 — 괄호 지점 표기가 없는 시간은 그 지점에서만 가능한 것으로 본다.
+export function parseBulkImportLine(
+  line,
+  resolveLocation = existingLocationId,
+  sectionLocationId = null,
+) {
   // "4시 10분/4시20분": "/"는 쉼표처럼 시각을 나누고, 띄어 쓴 "시 분"은 한 토큰으로 붙인다.
   const tokens = line
     .replace(/\//g, ",")
@@ -502,8 +519,9 @@ export function parseBulkImportLine(line) {
 
   let currentDays = null;
   // "(마포)월5678 화89 (여의도)월89"처럼 괄호로 지점을 적으면, 다음 지점 표기 전까지의 시간은
-  // 그 지점에서만 가능한 것으로 등록한다. 지점 표기가 없으면 회원의 기본 지점 전체(null).
-  let currentLocationId = null;
+  // 그 지점에서만 가능한 것으로 등록한다. 지점 표기가 없으면 지점 제목의 지점, 제목도 없으면 회원의
+  // 기본 지점 전체(null).
+  let currentLocationId = sectionLocationId;
   let currentLocationUnknown = false;
 
   function applyTimeToken(tok, single) {
@@ -537,10 +555,10 @@ export function parseBulkImportLine(line) {
   tokens.slice(1).forEach((spaceTok) => {
     const locMatch = spaceTok.match(/^[(（]([^)）]+)[)）]/);
     if (locMatch) {
-      const loc = findLocationByLooseName(locMatch[1].trim());
-      currentLocationId = loc ? loc.id : null;
-      currentLocationUnknown = !loc;
-      if (!loc)
+      const locId = resolveLocation(locMatch[1].trim());
+      currentLocationId = locId;
+      currentLocationUnknown = !locId;
+      if (!locId)
         result.errors.push(
           '등록되지 않은 지점이라 그 지점의 시간은 건너뜁니다: "' +
             locMatch[1] +
@@ -577,8 +595,221 @@ export function findLocationByLooseName(name) {
   );
 }
 
-export function parseBulkImportText(text) {
-  return text.split("\n").map(parseBulkImportLine).filter(Boolean);
+// "[여의도]"처럼 대괄호로만 된 줄은 지점 제목이다. 지점 이름(앞뒤 공백 제거) 또는 null.
+export function parseBulkSectionHeader(line) {
+  const m = line.trim().match(/^[[［]\s*([^\]］]+?)\s*[\]］]$/);
+  return m ? m[1] : null;
+}
+
+// 붙여넣은 글 전체를 등록 계획으로 바꾼다. state는 바꾸지 않는다 — 없는 지점은 id만 미리 정해
+// newLocations에 생성 예정으로 두고, 실제 생성·변경은 applyBulkImportPlan(‘일괄 등록’)에서만 한다.
+//  - 지점 제목("[마포]")은 다음 제목 전까지 아래 줄의 기본 지점이다. 빈 줄은 구간을 끝내지 않는다.
+//  - 지점 이름은 "여의도"·"여의도점"을 같은 지점으로 본다(findLocationByLooseName). 새로 만들 때 기본
+//    지점 이름(여의도점 등)과 같으면 기본 표기로 만들어 기본 색·기본 이동 시간을 그대로 받는다.
+//  - 회원은 이름으로 연결한다: 없으면 신규(구분 '등록'), 한 명이면 그 회원, 동명이인이면 고르기 전까지
+//    비워 둔다("") — 비어 있으면 적용이 막힌다.
+// rows: [{ parsed, choice: memberId | "__new__" | "__skip__" | "", newLocationId, newCategory }]
+export function planBulkImport(text) {
+  const bare = (n) => n.replace(/점$/, "");
+  const newLocations = [];
+  function resolveLocation(name) {
+    const existing = existingLocationId(name);
+    if (existing) return existing;
+    let pending = newLocations.find((l) => bare(l.name) === bare(name));
+    if (!pending) {
+      const defaultName = DEFAULT_LOCATION_NAMES.find(
+        (n) => bare(n) === bare(name),
+      );
+      pending = { id: uid("loc"), name: defaultName || name };
+      newLocations.push(pending);
+    }
+    return pending.id;
+  }
+  let sectionLocationId = null;
+  const rows = [];
+  text.split("\n").forEach((line) => {
+    const header = parseBulkSectionHeader(line);
+    if (header !== null) {
+      sectionLocationId = resolveLocation(header);
+      return;
+    }
+    const parsed = parseBulkImportLine(line, resolveLocation, sectionLocationId);
+    if (!parsed) return;
+    const matches = findMembersByName(parsed.name);
+    // 신규 회원의 기본 지점: 지점 제목 → 줄에 적힌 첫 지점 → 첫 등록 지점.
+    const firstLoc = parsed.days.find((d) => d.locationId);
+    rows.push({
+      parsed,
+      choice:
+        matches.length === 0
+          ? "__new__"
+          : matches.length === 1
+            ? matches[0].id
+            : "",
+      newLocationId:
+        sectionLocationId ||
+        (firstLoc && firstLoc.locationId) ||
+        (state.locations[0] ? state.locations[0].id : ""),
+      newCategory: "등록",
+    });
+  });
+  return { rows, newLocations };
+}
+
+// 신규 회원 줄이 실제로 회원을 만드는지: 시간이 있거나 "이름 x"(시간 없이 회원만 등록)일 때.
+function createsNewMember(row) {
+  return row.parsed.days.length > 0 || row.parsed.clearAll;
+}
+
+// 계획을 state에 반영한다(저장·화면 갱신은 호출하는 쪽). 막혀야 하는 경우 아무것도 바꾸지 않고 { error }.
+export function applyBulkImportPlan(plan) {
+  const active = plan.rows.filter((r) => r.choice !== "__skip__");
+  const unchosen = active.filter((r) => r.choice === "");
+  if (unchosen.length)
+    return {
+      error:
+        "같은 이름의 회원이 여러 명입니다. 미리보기에서 회원을 골라주세요: " +
+        unchosen.map((r) => r.parsed.name).join(", "),
+    };
+  const noLocation = active.filter(
+    (r) => r.choice === "__new__" && createsNewMember(r) && !r.newLocationId,
+  );
+  if (noLocation.length)
+    return {
+      error:
+        "신규 회원의 지점을 정할 수 없습니다. 지점 제목([지점])을 붙이거나 설정에서 지점을 먼저 등록해주세요: " +
+        noLocation.map((r) => r.parsed.name).join(", "),
+    };
+
+  // 생성 예정 지점 중 적용할 줄이 실제로 쓰는 것만 만든다(건너뛴 줄에만 나온 지점은 만들지 않는다).
+  const usedLocationIds = new Set();
+  active.forEach((r) => {
+    if (r.choice === "__new__" && createsNewMember(r))
+      usedLocationIds.add(r.newLocationId);
+    r.parsed.days.forEach((d) => usedLocationIds.add(d.locationId));
+  });
+  const createdLocations = plan.newLocations
+    .filter((l) => usedLocationIds.has(l.id))
+    .map((l) => addLocation(l.name, undefined, l.id));
+
+  const report = {
+    createdLocations,
+    createdCount: 0,
+    appliedCount: 0,
+    zeroFitNames: [], // 파싱은 됐지만 마감 시간 등으로 실제 등록된 시간이 하나도 없는 회원
+    emptyRowNames: [], // 신규 회원인데 등록할 시간이 없어 건너뛴 줄
+    clearedNames: [], // 기존 회원이고 "이름 x"로 명시 지정해 기존 스케줄을 모두 지운 회원
+    unparsedSkippedNames: [], // 기존 회원인데 오타 등으로 파싱이 안 돼(명시적 x가 아님) 건드리지 않고 건너뛴 줄
+  };
+
+  // 같은 회원을 가리키는 여러 줄(이름을 여러 줄로 나눠 붙여넣은 경우 등)이 서로의 스케줄을
+  // 덮어쓰지 않도록, 적용 대상 회원별로 파싱된 스케줄을 먼저 합친 뒤 회원당 한 번만 교체한다.
+  // 신규 회원은 이름으로 묶는다 — 같은 이름의 신규 줄이 여러 개여도 회원은 한 명만 만든다.
+  const entriesByMemberKey = new Map(); // memberId | "new:이름" -> { member, isNew, days: Map<"day|locId", {day, locationId, specs[]}> }
+  active.forEach((row) => {
+    let member,
+      isNew = false,
+      key;
+    if (row.choice === "__new__") {
+      // 신규 회원은 등록할 시간도 "이름 x"도 없으면 만들 이유가 없으니 건너뛴다.
+      if (!createsNewMember(row)) {
+        report.emptyRowNames.push(row.parsed.name);
+        return;
+      }
+      key = "new:" + row.parsed.name;
+      member = entriesByMemberKey.has(key)
+        ? entriesByMemberKey.get(key).member
+        : {
+            id: uid("m"),
+            name: row.parsed.name,
+            locationIds: [row.newLocationId],
+            category: row.newCategory,
+            memo: "",
+          };
+      isNew = true;
+    } else {
+      // 기존 회원은 "등록할 시간 없음"도 유효한 지정이다 — 아래에서 기존 스케줄을 모두 지운다.
+      // 기존 회원의 지점·구분은 바꾸지 않는다.
+      member = memberById(row.choice);
+      if (!member) return;
+      key = member.id;
+    }
+    if (!entriesByMemberKey.has(key)) {
+      entriesByMemberKey.set(key, {
+        member,
+        isNew,
+        days: new Map(),
+        explicitClear: false,
+      });
+    }
+    const entry = entriesByMemberKey.get(key);
+    if (row.parsed.clearAll) entry.explicitClear = true;
+    row.parsed.days.forEach((dayEntry) => {
+      const dayKey = dayEntry.day + "|" + (dayEntry.locationId || "");
+      if (!entry.days.has(dayKey))
+        entry.days.set(dayKey, {
+          day: dayEntry.day,
+          locationId: dayEntry.locationId,
+          specs: [],
+        });
+      entry.days.get(dayKey).specs.push(...dayEntry.specs);
+    });
+  });
+
+  entriesByMemberKey.forEach((entry) => {
+    const member = entry.member;
+    if (entry.isNew) {
+      state.members.unshift(member);
+      report.createdCount++;
+    } else if (entry.days.size === 0 && !entry.explicitClear) {
+      // 기존 회원인데 파싱된 시간이 하나도 없고 "이름 x"로 명시 지정한 것도 아니면(오타·빈
+      // 시간 표기 등), 실수로 기존 스케줄을 지우는 일을 막기 위해 이 회원은 아예 건드리지
+      // 않고 건너뛴다.
+      report.unparsedSkippedNames.push(member.name);
+      return;
+    }
+    state.requests = state.requests.filter((r) => r.memberId !== member.id);
+    let addedForMember = 0;
+    // 연속된 매시 마크(예: 3,4,5시)는 그 사이 전부를 하나의 이어진 희망 구간으로 등록한다.
+    let day, locId;
+    function addRange(startSlot, endSlot) {
+      addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
+    }
+    function applyMarks(marks) {
+      groupConsecutiveMarks(marks).forEach((group) => {
+        addRange(
+          hourMarkToStartSlot(group[0]),
+          hourMarkToStartSlot(group[group.length - 1]),
+        );
+      });
+    }
+    // 지점 표기 없는 시간을 먼저 넣는다 — addDesiredRange는 이미 있는 신청에 지점을 더하기만
+    // 하므로, "(여의도)월89" 줄 뒤에 "월5678" 줄이 오면 월 8시가 여의도 전용으로 남는다.
+    [...entry.days.values()]
+      .sort((a, b) => !!a.locationId - !!b.locationId)
+      .forEach((dayEntry) => {
+        day = dayEntry.day;
+        locId = dayEntry.locationId;
+        dayEntry.specs.forEach((spec) => {
+          if (spec.type === "point") {
+            applyMarks(spec.marks);
+          } else if (spec.type === "openStart") {
+            applyMarks(spec.extraPoints || []);
+            addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
+          } else if (spec.type === "openEnd") {
+            addRange(0, hourMarkToStartSlot(spec.mark));
+            applyMarks(spec.extraPoints || []);
+          }
+        });
+      });
+    report.appliedCount++;
+    if (entry.days.size === 0) {
+      if (!entry.isNew) report.clearedNames.push(member.name);
+    } else if (addedForMember === 0) {
+      report.zeroFitNames.push(member.name);
+    }
+  });
+  return report;
 }
 
 // 마크 배열(연속이면 하나로 묶어)을 미리보기용 문구 조각들로 바꾼다.
@@ -650,8 +881,8 @@ export const bulkImportPreviewListEl = document.getElementById(
   "bulkImportPreviewList",
 );
 
-// { parsed, choice: memberId | "__new__" | "__skip__", newLocationId, newCategory }
-export let bulkImportRows = [];
+// 미리보기에서 만든 등록 계획(planBulkImport). 미리보기의 선택은 이 계획만 바꾸고, state는 '일괄 등록'에서만 바뀐다.
+export let bulkImportPlan = { rows: [], newLocations: [] };
 
 export function openBulkImportModal() {
   bulkImportTextareaEl.value = "";
@@ -702,34 +933,54 @@ bulkImportBackBtn.addEventListener("click", () => {
   bulkImportStepPreviewEl.hidden = true;
 });
 
+// 미리보기 칩·선택창용 지점 이름: 등록된 지점이면 그 이름, 생성 예정이면 "·새 지점"을 붙인다.
+function bulkLocationLabel(locId) {
+  const loc = locationById(locId);
+  if (loc) return loc.name;
+  const pending = bulkImportPlan.newLocations.find((l) => l.id === locId);
+  return pending ? pending.name + "·새 지점" : "";
+}
+
+function renderBulkImportSummary() {
+  const rows = bulkImportPlan.rows;
+  const newNames = new Set(
+    rows
+      .filter((r) => r.choice === "__new__" && createsNewMember(r))
+      .map((r) => r.parsed.name),
+  );
+  const linked = new Set(
+    rows.filter((r) => memberById(r.choice)).map((r) => r.choice),
+  );
+  const unchosen = rows.filter((r) => r.choice === "").length;
+  const skipped = rows.filter((r) => r.choice === "__skip__").length;
+  const parts = [];
+  if (bulkImportPlan.newLocations.length)
+    parts.push(
+      "생성 예정 지점 " +
+        bulkImportPlan.newLocations.map((l) => l.name).join("·"),
+    );
+  parts.push("신규 회원 " + newNames.size + "명");
+  parts.push("기존 회원 연결 " + linked.size + "명");
+  if (unchosen) parts.push("동명이인 선택 필요 " + unchosen + "명");
+  parts.push("건너뛰기 " + skipped + "명");
+  bulkImportPreviewSummaryEl.textContent = "";
+  bulkImportPreviewSummaryEl.append(
+    parts.join(" · "),
+    document.createElement("br"),
+    "적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다. '일괄 등록'을 누르기 전에는 아무것도 바뀌지 않습니다.",
+  );
+}
+
 export function renderBulkImportPreview() {
-  const lines = parseBulkImportText(bulkImportTextareaEl.value);
-  if (lines.length === 0) {
+  const plan = planBulkImport(bulkImportTextareaEl.value);
+  if (plan.rows.length === 0) {
     alert("붙여넣은 내용이 없습니다.");
     return;
   }
-  bulkImportRows = lines.map((parsed) => {
-    const matches = findMembersByName(parsed.name);
-    // 신규 회원은 줄에 적힌 첫 지점을 기본 지점으로 제안한다.
-    const firstLoc = parsed.days.find((d) => d.locationId);
-    return {
-      parsed,
-      choice: matches.length >= 1 ? matches[0].id : "__new__",
-      newLocationId: firstLoc
-        ? firstLoc.locationId
-        : state.locations[0]
-          ? state.locations[0].id
-          : "",
-      newCategory: "등록",
-    };
-  });
-
+  bulkImportPlan = plan;
   bulkImportPreviewListEl.innerHTML = "";
-  let willApply = 0,
-    willCreate = 0,
-    willSkip = 0;
 
-  bulkImportRows.forEach((row) => {
+  plan.rows.forEach((row) => {
     const parsed = row.parsed;
     const matches = findMembersByName(parsed.name);
 
@@ -745,6 +996,13 @@ export function renderBulkImportPreview() {
     head.appendChild(nameEl);
 
     const select = document.createElement("select");
+    // 동명이인은 임의로 정하지 않는다 — 고르기 전에는 빈 값이라 적용이 막힌다.
+    if (matches.length > 1) {
+      const pickOpt = document.createElement("option");
+      pickOpt.value = "";
+      pickOpt.textContent = "동명이인 — 회원 선택";
+      select.appendChild(pickOpt);
+    }
     matches.forEach((m) => {
       const opt = document.createElement("option");
       opt.value = m.id;
@@ -754,8 +1012,10 @@ export function renderBulkImportPreview() {
         .map((l) => l.name)
         .join("·");
       opt.textContent =
-        "기존 회원 (" +
+        "기존 회원 연결 (" +
         (locNames || "지점 미지정") +
+        " · " +
+        (m.category || "구분 없음") +
         ")" +
         (matches.length > 1 ? " #" + m.id.slice(-4) : "");
       select.appendChild(opt);
@@ -769,21 +1029,23 @@ export function renderBulkImportPreview() {
     skipOpt.textContent = "건너뛰기";
     select.appendChild(skipOpt);
     select.value = row.choice;
-    select.classList.toggle("is-new-member", select.value === "__new__");
     select.addEventListener("change", () => {
       row.choice = select.value;
-      select.classList.toggle("is-new-member", select.value === "__new__");
       renderRowState();
+      renderBulkImportSummary();
     });
     const newFields = document.createElement("div");
     newFields.className = "bulk-preview-new-fields";
     const locSelect = document.createElement("select");
-    state.locations.forEach((loc) => {
-      const opt = document.createElement("option");
-      opt.value = loc.id;
-      opt.textContent = loc.name;
-      locSelect.appendChild(opt);
-    });
+    state.locations
+      .map((l) => l.id)
+      .concat(plan.newLocations.map((l) => l.id))
+      .forEach((locId) => {
+        const opt = document.createElement("option");
+        opt.value = locId;
+        opt.textContent = bulkLocationLabel(locId);
+        locSelect.appendChild(opt);
+      });
     if (row.newLocationId) locSelect.value = row.newLocationId;
     locSelect.addEventListener("change", () => {
       row.newLocationId = locSelect.value;
@@ -807,33 +1069,43 @@ export function renderBulkImportPreview() {
 
     const scheduleEl = document.createElement("div");
     scheduleEl.className = "bulk-preview-schedule";
-    if (parsed.days.length > 0) {
-      parsed.days.forEach((dayEntry) => {
-        const chip = document.createElement("span");
-        chip.className = "bulk-preview-day-chip";
-        const loc = locationById(dayEntry.locationId);
-        const dayEl = document.createElement("b");
-        dayEl.textContent = DAYS[dayEntry.day];
-        chip.append(
-          dayEl,
-          " " +
-            (loc ? "(" + loc.name + ") " : "") +
-            describeDaySpecs(dayEntry.specs),
-        );
-        scheduleEl.appendChild(chip);
-      });
-    } else if (parsed.clearAll) {
-      const chip = document.createElement("span");
-      chip.className = "bulk-preview-day-chip bulk-preview-day-chip-clear";
-      chip.textContent = "기존 가능 시간 전체 삭제";
-      scheduleEl.appendChild(chip);
-    } else {
+    rowEl.appendChild(scheduleEl);
+    function renderSchedule() {
+      scheduleEl.innerHTML = "";
+      if (parsed.days.length > 0) {
+        parsed.days.forEach((dayEntry) => {
+          const chip = document.createElement("span");
+          chip.className = "bulk-preview-day-chip";
+          const locName = bulkLocationLabel(dayEntry.locationId);
+          const dayEl = document.createElement("b");
+          dayEl.textContent = DAYS[dayEntry.day];
+          chip.append(
+            dayEl,
+            " " +
+              (locName ? "(" + locName + ") " : "") +
+              describeDaySpecs(dayEntry.specs),
+          );
+          scheduleEl.appendChild(chip);
+        });
+        return;
+      }
       const chip = document.createElement("span");
       chip.className = "bulk-preview-day-chip";
-      chip.textContent = "등록할 시간 없음";
+      const existing = memberById(row.choice);
+      if (parsed.clearAll && existing) {
+        // 기존 회원의 "이름 x": 그 회원의 기존 신청 시간을 모두 지운다.
+        const count = state.requests.filter(
+          (r) => r.memberId === existing.id,
+        ).length;
+        chip.classList.add("bulk-preview-day-chip-clear");
+        chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
+      } else if (parsed.clearAll && row.choice === "__new__") {
+        chip.textContent = "신청 시간 없이 회원만 등록";
+      } else {
+        chip.textContent = "등록할 시간 없음";
+      }
       scheduleEl.appendChild(chip);
     }
-    rowEl.appendChild(scheduleEl);
 
     parsed.warnings.forEach((w) => {
       const p = document.createElement("p");
@@ -850,26 +1122,15 @@ export function renderBulkImportPreview() {
 
     function renderRowState() {
       rowEl.classList.toggle("skip", row.choice === "__skip__");
+      select.classList.toggle("is-new-member", row.choice === "__new__");
       newFields.hidden = row.choice !== "__new__";
+      renderSchedule();
     }
     renderRowState();
 
     bulkImportPreviewListEl.appendChild(rowEl);
-
-    if (row.choice === "__skip__") willSkip++;
-    else if (row.choice === "__new__") willCreate++;
-    else willApply++;
   });
-
-  bulkImportPreviewSummaryEl.innerHTML =
-    "기존 회원 적용 " +
-    willApply +
-    "명 · 신규 등록 " +
-    willCreate +
-    "명 · 건너뛰기 " +
-    willSkip +
-    "명" +
-    "<br>적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다.";
+  renderBulkImportSummary();
 
   bulkImportStepInputEl.hidden = true;
   bulkImportStepPreviewEl.hidden = false;
@@ -878,127 +1139,35 @@ export function renderBulkImportPreview() {
 bulkImportPreviewBtn.addEventListener("click", renderBulkImportPreview);
 
 bulkImportApplyBtn.addEventListener("click", () => {
-  if (state.locations.length === 0) {
-    alert("설정 페이지에서 지점을 먼저 등록해주세요.");
+  const report = applyBulkImportPlan(bulkImportPlan);
+  if (report.error) {
+    alert(report.error);
     return;
   }
-  let createdCount = 0;
-  const zeroFitNames = []; // 파싱은 됐지만 마감 시간 등으로 실제 등록된 시간이 하나도 없는 회원
-  const emptyRowNames = []; // 신규 회원인데 등록할 시간이 없어 건너뛴 줄
-  const clearedNames = []; // 기존 회원이고 "이름 x"로 명시 지정해 기존 스케줄을 모두 지운 회원
-  const unparsedSkippedNames = []; // 기존 회원인데 오타 등으로 파싱이 안 돼(명시적 x가 아님) 건드리지 않고 건너뛴 줄
-
-  // 같은 회원을 가리키는 여러 줄(이름을 여러 줄로 나눠 붙여넣은 경우 등)이 서로의 스케줄을
-  // 덮어쓰지 않도록, 적용 대상 회원별로 파싱된 스케줄을 먼저 합친 뒤 회원당 한 번만 교체한다.
-  const entriesByMemberKey = new Map(); // memberId -> { member, isNew, days: Map<"day|locId", {day, locationId, specs[]}> }
-  bulkImportRows.forEach((row) => {
-    if (row.choice === "__skip__") return;
-    let member,
-      isNew = false;
-    if (row.choice === "__new__") {
-      // 신규 회원은 등록할 시간이 없으면 만들 이유가 없으니 건너뛴다.
-      if (row.parsed.days.length === 0) {
-        emptyRowNames.push(row.parsed.name);
-        return;
-      }
-      if (!row.newLocationId) return;
-      member = {
-        id: uid("m"),
-        name: row.parsed.name,
-        locationIds: [row.newLocationId],
-        category: row.newCategory,
-        memo: "",
-      };
-      isNew = true;
-    } else {
-      // 기존 회원은 "등록할 시간 없음"도 유효한 지정이다 — 아래에서 기존 스케줄을 모두 지운다.
-      member = memberById(row.choice);
-      if (!member) return;
-    }
-    if (!entriesByMemberKey.has(member.id)) {
-      entriesByMemberKey.set(member.id, {
-        member,
-        isNew,
-        days: new Map(),
-        explicitClear: false,
-      });
-    }
-    const entry = entriesByMemberKey.get(member.id);
-    if (row.parsed.clearAll) entry.explicitClear = true;
-    row.parsed.days.forEach((dayEntry) => {
-      const key = dayEntry.day + "|" + (dayEntry.locationId || "");
-      if (!entry.days.has(key))
-        entry.days.set(key, {
-          day: dayEntry.day,
-          locationId: dayEntry.locationId,
-          specs: [],
-        });
-      entry.days.get(key).specs.push(...dayEntry.specs);
-    });
-  });
-
-  let appliedCount = 0;
-  entriesByMemberKey.forEach((entry) => {
-    const member = entry.member;
-    if (entry.isNew) {
-      state.members.unshift(member);
-      createdCount++;
-    } else if (entry.days.size === 0 && !entry.explicitClear) {
-      // 기존 회원인데 파싱된 시간이 하나도 없고 "이름 x"로 명시 지정한 것도 아니면(오타·빈
-      // 시간 표기 등), 실수로 기존 스케줄을 지우는 일을 막기 위해 이 회원은 아예 건드리지
-      // 않고 건너뛴다.
-      unparsedSkippedNames.push(member.name);
-      return;
-    }
-    state.requests = state.requests.filter((r) => r.memberId !== member.id);
-    let addedForMember = 0;
-    // 연속된 매시 마크(예: 3,4,5시)는 그 사이 전부를 하나의 이어진 희망 구간으로 등록한다.
-    let day, locId;
-    function addRange(startSlot, endSlot) {
-      addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
-    }
-    function applyMarks(marks) {
-      groupConsecutiveMarks(marks).forEach((group) => {
-        addRange(
-          hourMarkToStartSlot(group[0]),
-          hourMarkToStartSlot(group[group.length - 1]),
-        );
-      });
-    }
-    // 지점 표기 없는 시간을 먼저 넣는다 — addDesiredRange는 이미 있는 신청에 지점을 더하기만
-    // 하므로, "(여의도)월89" 줄 뒤에 "월5678" 줄이 오면 월 8시가 여의도 전용으로 남는다.
-    [...entry.days.values()]
-      .sort((a, b) => !!a.locationId - !!b.locationId)
-      .forEach((dayEntry) => {
-        day = dayEntry.day;
-        locId = dayEntry.locationId;
-        dayEntry.specs.forEach((spec) => {
-          if (spec.type === "point") {
-            applyMarks(spec.marks);
-          } else if (spec.type === "openStart") {
-            applyMarks(spec.extraPoints || []);
-            addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
-          } else if (spec.type === "openEnd") {
-            addRange(0, hourMarkToStartSlot(spec.mark));
-            applyMarks(spec.extraPoints || []);
-          }
-        });
-      });
-    appliedCount++;
-    if (entry.days.size === 0) {
-      if (!entry.isNew) clearedNames.push(member.name);
-    } else if (addedForMember === 0) {
-      zeroFitNames.push(member.name);
-    }
-  });
-
   saveState();
+  if (report.createdLocations.length) {
+    renderLocationList();
+    renderTravelMatrix();
+    populateMemberLocationSelect();
+  }
   renderMemberTable();
   renderRequestList();
   closeBulkImportModal();
 
+  const {
+    zeroFitNames,
+    emptyRowNames,
+    clearedNames,
+    unparsedSkippedNames,
+  } = report;
   const notes = [];
-  if (createdCount) notes.push("신규 " + createdCount + "명");
+  if (report.createdLocations.length)
+    notes.push(
+      "지점 " +
+        report.createdLocations.map((l) => l.name).join("·") +
+        " 생성",
+    );
+  if (report.createdCount) notes.push("신규 " + report.createdCount + "명");
   if (zeroFitNames.length)
     notes.push(
       zeroFitNames.join(", ") +
@@ -1020,7 +1189,7 @@ bulkImportApplyBtn.addEventListener("click", () => {
     );
   const suffix = notes.length ? " (" + notes.join(" · ") + ")" : "";
   showToast(
-    appliedCount + "명 스케줄 등록 완료" + suffix,
+    report.appliedCount + "명 스케줄 등록 완료" + suffix,
     zeroFitNames.length ||
       emptyRowNames.length ||
       clearedNames.length ||

@@ -275,6 +275,23 @@ function migrateOldState(parsed) {
   };
 }
 
+// 지점 하나를 만든다 — 지점 등록 폼·붙여넣기 일괄 등록·첫 실행 기본 지점이 모두 이 함수를 쓴다. 색을 주지 않으면
+// fillLocationColors 규칙(기본 지점 이름의 색 → 다른 지점이 쓰지 않는 팔레트 색)으로 채운다. 이동 시간은 새 지점이
+// 낀 쌍에만 기본값(defaultTravelMinutesFor)을 넣는다 — 기존 지점끼리의 이동 시간 설정은 건드리지 않는다.
+export function addLocation(name, color, id = uid("loc")) {
+  const loc = { id, name, color };
+  state.locations.push(loc);
+  fillLocationColors(state.locations);
+  state.locations.forEach((other) => {
+    if (other.id !== loc.id)
+      state.travelTimes[pairKey(loc.id, other.id)] = defaultTravelMinutesFor(
+        loc.name,
+        other.name,
+      );
+  });
+  return loc;
+}
+
 // 지점 색상 이관·복구: 색이 없거나 팔레트 밖이면(schemaVersion 3 이전 저장분·구버전 백업·손상 값) 채운다 —
 // 기본 지점 이름이면 DEFAULT_LOCATION_COLORS, 아니면 다른 지점이 쓰지 않는 팔레트 색을 앞에서부터(모두 쓰였으면
 // 순환). 이미 고른 색은 바꾸지 않는다. 이름은 이 한 번의 채우기에만 쓰고 이후 색은 지점 id에 붙어 다닌다.
@@ -434,21 +451,7 @@ export function loadState() {
   // First-ever run: seed the trainer's usual branches, 지점 간 이동 시간, 근무 가능 시간
   // 이 비어있지 않도록 기본값을 채워둔다.
   if (!hadSavedState && state.locations.length === 0) {
-    state.locations = DEFAULT_LOCATION_NAMES.map((name) => ({
-      id: uid("loc"),
-      name,
-      color: DEFAULT_LOCATION_COLORS[name],
-    }));
-    for (let i = 0; i < state.locations.length; i++) {
-      for (let j = i + 1; j < state.locations.length; j++) {
-        const locA = state.locations[i],
-          locB = state.locations[j];
-        state.travelTimes[pairKey(locA.id, locB.id)] = defaultTravelMinutesFor(
-          locA.name,
-          locB.name,
-        );
-      }
-    }
+    DEFAULT_LOCATION_NAMES.forEach((name) => addLocation(name));
   }
   if (!hadSavedState && runtime.availableCells.size === 0) {
     DEFAULT_BUSINESS_DAY_INDICES.forEach((di) => {

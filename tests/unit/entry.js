@@ -31,6 +31,7 @@ export {
   PREVIOUS_STORAGE_KEY,
   LEGACY_STORAGE_KEY,
   LOCATION_PALETTE,
+  defaultTravelMinutesFor,
 } from "../../src/constants.js";
 export {
   searchMemberExclusions,
@@ -90,6 +91,9 @@ export {
 } from "../../src/engine/greedy.js";
 export {
   parseBulkImportLine,
+  planBulkImport,
+  applyBulkImportPlan,
+  requestAllowedLocationIds,
   describeDaySpecs,
   hourMarkToStartSlot,
   addDesiredRange,
@@ -114,6 +118,7 @@ export {
   candidateInputKey,
   loadState,
   fillLocationColors,
+  addLocation,
   runtime,
   GenerationCancelledError,
 } from "../../src/state.js";
