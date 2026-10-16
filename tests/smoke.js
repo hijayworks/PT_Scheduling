@@ -54,6 +54,7 @@ const SECTIONS = {
   "no-consecutive": "연속 배정 제외 설정 위치·선택 유지·후보 무효화·생성 적용",
   "previous-compat": "직전 버전(schemaVersion 2) 이관·지점 색상·백업",
   "candidate-display": "대표 후보 비교표·미배정 1명 추가 후보·지점 색·시간 표시·추가 탐색 중 후보 유지",
+  "bulk-import": "지점 제목 붙여넣기(빈 상태 지점·회원 생성·미리보기/취소 무변경·재등록·기존 회원 x·새로고침·백업 복원)",
   file: "file:// 저장·새로고침·브라우저 재실행",
 };
 const onlyArg = process.argv.indexOf("--only");
@@ -972,6 +973,125 @@ async function checkNoConsecutiveSetting(browser, site, failures) {
   }
 }
 
+// 지점 제목이 있는 붙여넣기(사용자 예시 원문)를 지점·회원이 하나도 없는 상태에서 등록한다.
+async function checkBulkImportSections(browser, site, failures) {
+  const assert = (cond, msg) => { if (!cond) failures.push("[지점 제목 붙여넣기] " + msg); };
+  const json = (v) => JSON.stringify(v);
+  const text = fs.readFileSync(path.join(__dirname, "fixtures", "bulk-import-sections.txt"), "utf8");
+  const seed = {
+    locations: [],
+    travelTimes: {},
+    members: [],
+    requests: [],
+    onceLimitedMemberIds3: [],
+    excludedMemberIds3: [],
+    availableCells: [],
+    currentPage: "schedule3",
+    startMinBase: 720,
+  };
+  const data = (s) => json({ locations: s.locations, members: s.members, requests: s.requests, travelTimes: s.travelTimes });
+  const page = await browser.newPage();
+  page.on("pageerror", (err) => assert(false, "페이지 런타임 에러: " + err.message));
+  const row = (name) => page.locator(".bulk-preview-row", { has: page.locator(".bulk-preview-name", { hasText: new RegExp("^" + name + "$") }) });
+  const openAndPreview = async (input) => {
+    await page.click("#bulkImportOpenBtn");
+    if (await page.locator("#bulkImportConfirmOverlay.open").count()) await page.click("#bulkImportJustAddBtn");
+    await page.waitForSelector("#bulkImportOverlay.open", { timeout: 5000 });
+    await page.fill("#bulkImportTextarea", input);
+    await page.click("#bulkImportPreviewBtn");
+    await page.waitForSelector("#bulkImportStepPreview:not([hidden])", { timeout: 5000 });
+    return page.locator("#bulkImportPreviewSummary").innerText();
+  };
+  try {
+    await openWithSeed(page, seed, site);
+    const empty = await readState(page);
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+
+    // 미리보기: 생성 예정 지점·회원과 시간별 지점을 보여 주고, 취소하면 아무것도 바뀌지 않는다.
+    let summary = await openAndPreview(text);
+    assert(summary.includes("생성 예정 지점 여의도점·상암점·마포점") && summary.includes("신규 회원 22명") && summary.includes("기존 회원 연결 0명"), "미리보기 요약: " + summary);
+    const hurChips = await row("허종원").locator(".bulk-preview-day-chip").allTextContents();
+    assert(
+      json(hurChips.slice(0, 2)) === json(["월 (여의도점·새 지점) 18:00", "월 (마포점·새 지점) 20:00~22:00"]) && hurChips.length === 8,
+      "허종원 시간별 지점 미리보기: " + json(hurChips)
+    );
+    assert((await row("최문열").locator(".bulk-preview-day-chip").textContent()) === "신청 시간 없이 회원만 등록", "신규 x 회원 미리보기");
+    assert((await row("한지원").locator(".bulk-preview-day-chip").first().textContent()).includes("(마포점·새 지점)"), "빈 줄 뒤 한지원 지점");
+    await row("진애화").locator(".bulk-preview-new-fields select").nth(1).selectOption("상담");
+    assert(data(await readState(page)) === data(empty), "미리보기에서 저장 데이터가 바뀜");
+    await page.click("#bulkImportCloseBtn");
+    await reloadChecked(page, "붙여넣기 취소 뒤 새로고침", failures);
+    assert(data(await readState(page)) === data(empty), "취소·새로고침 뒤 데이터가 바뀜");
+    assert((await page.locator("#memberTableBody tr").count()) === 0 || !(await page.locator("#memberTableBody").innerText()).includes("허종원"), "취소했는데 회원 목록에 회원이 생김");
+
+    // 적용: 미리보기에서 바꾼 구분까지 반영해 지점 3개·회원 22명을 만든다.
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    await openAndPreview(text);
+    await row("진애화").locator(".bulk-preview-new-fields select").nth(1).selectOption("상담");
+    await page.click("#bulkImportApplyBtn");
+    let saved = await readState(page);
+    assert(json(saved.locations.map((l) => l.name)) === json(["여의도점", "상암점", "마포점"]) && new Set(saved.locations.map((l) => l.color)).size === 3, "생성된 지점: " + json(saved.locations));
+    assert(Object.keys(saved.travelTimes).length === 3, "생성된 지점 이동시간: " + json(saved.travelTimes));
+    assert(saved.members.length === 22, "회원 수: " + saved.members.length);
+    const member = (name) => saved.members.find((m) => m.name === name);
+    assert(member("진애화").category === "상담" && member("서수민").category === "등록", "미리보기에서 고른 구분이 반영되지 않음");
+    ["최문열", "박다정", "김수연"].forEach((name) =>
+      assert(member(name) && !saved.requests.some((r) => r.memberId === member(name).id), name + "은 회원으로 남고 신청이 없어야 함")
+    );
+    const afterApply = data(saved);
+
+    // 새로고침 뒤 유지, 같은 내용을 다시 등록해도 중복이 없다.
+    await reloadChecked(page, "붙여넣기 적용 뒤 새로고침", failures);
+    assert(data(await readState(page)) === afterApply, "새로고침 뒤 결과가 달라짐");
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
+    summary = await openAndPreview(text);
+    assert(!summary.includes("생성 예정 지점") && summary.includes("신규 회원 0명") && summary.includes("기존 회원 연결 22명"), "재등록 미리보기: " + summary);
+    await page.click("#bulkImportApplyBtn");
+    saved = await readState(page);
+    const shape = (s) => json({
+      locations: s.locations,
+      members: s.members,
+      travelTimes: s.travelTimes,
+      requests: s.requests.map((r) => [r.memberId, r.day, r.startSlot, r.excludedLocationIds, r.extraLocationIds]).sort(),
+    });
+    assert(shape(saved) === shape(JSON.parse(afterApply)), "재등록 뒤 지점·회원·신청이 달라짐");
+
+    // 백업(이 시점) → 기존 회원 x로 신청 삭제(미리보기에 삭제 예정 표시) → 백업 복원으로 되돌아온다.
+    await page.click('.nav-item[data-page="settings"]');
+    const onPrompt = (d) => d.accept(d.type() === "prompt" ? BACKUP_PASSWORD : undefined);
+    page.on("dialog", onPrompt);
+    await page.click("#backupExportBtn");
+    await page.waitForSelector("#backupExportResult:not([hidden])", { timeout: 15000 });
+    page.off("dialog", onPrompt);
+    const backupCode = await page.inputValue("#backupExportTextarea");
+    const backedUp = data(saved);
+    const leeCount = saved.requests.filter((r) => r.memberId === member("이수진").id).length;
+
+    await page.click('.nav-item[data-page="memberSchedule"]');
+    await openAndPreview("[상암]\n이수진 x");
+    const clearChip = await row("이수진").locator(".bulk-preview-day-chip").textContent();
+    assert(clearChip === "기존 가능 시간 전체 삭제 예정 (" + leeCount + "개)" && leeCount > 0, "기존 회원 x 미리보기: " + clearChip);
+    await page.click("#bulkImportApplyBtn");
+    saved = await readState(page);
+    const lee = saved.members.find((m) => m.name === "이수진");
+    assert(lee && json(lee) === json(member("이수진")), "기존 회원 x가 회원 정보를 바꿈: " + json(lee));
+    assert(!saved.requests.some((r) => r.memberId === lee.id) && saved.locations.length === 3, "기존 회원 x 적용 결과");
+
+    await page.click('.nav-item[data-page="settings"]');
+    await openBackupImport(page, backupCode);
+    page.once("dialog", (d) => d.accept());
+    await page.click("#backupImportApplyBtn");
+    await page.waitForSelector(".restore-recovery-banner", { timeout: 15000 });
+    assert(data(await readState(page)) === backedUp, "백업 복원 뒤 붙여넣기 결과가 백업과 다름");
+    await reloadChecked(page, "백업 복원 뒤 새로고침", failures);
+    assert(data(await readState(page)) === backedUp, "백업 복원·새로고침 뒤 결과가 백업과 다름");
+  } finally {
+    await page.close();
+  }
+}
+
 async function clickGenerateAndWait(page, buttonSelector, timeoutMs) {
   await page.click(buttonSelector);
   await page.waitForFunction(
@@ -1437,6 +1557,7 @@ async function main() {
     if (want("no-consecutive")) await checkNoConsecutiveSetting(browser, site, failures);
     if (want("previous-compat")) await checkPreviousCompat(browser, site, failures);
     if (want("candidate-display")) await checkCandidateDisplay(browser, site, failures);
+    if (want("bulk-import")) await checkBulkImportSections(browser, site, failures);
 
     if (want("file")) {
       // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
