@@ -9625,7 +9625,7 @@
       );
       box.appendChild(title);
       const tooMany = amb.options.length > MAX_TIME_CHOICES;
-      const hintText = tooMany ? "해석이 " + amb.options.length + "가지 이상이라 고를 수 없습니다. '줄 수정'에서 쉼표(,)·물결(~)·콜론(:)으로 나눠 적어주세요. (예: 11,12 · 1~2 · 11:10)" : amb.options.some((o) => o.unordered) ? "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '줄 수정'으로 고쳐주세요." : "";
+      const hintText = tooMany ? "해석할 수 있는 경우가 너무 많아 고를 수 없습니다. '줄 수정'에서 쉼표(,)·물결(~)·콜론(:)으로 나눠 적어주세요. (예: 11,12 · 1~2 · 11:10)" : amb.options.some((o) => o.unordered) ? "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '줄 수정'으로 고쳐주세요." : "";
       if (hintText) {
         const hint = document.createElement("p");
         hint.className = "bulk-preview-ambiguity-hint";
@@ -9687,7 +9687,7 @@
       } else if (parsed.clearAll && row.choice === "__new__") {
         chip.textContent = "신청 시간 없이 회원만 등록";
       } else if (hasUnresolvedTime(row)) {
-        chip.textContent = "해석을 고르면 등록할 시간이 표시됩니다";
+        chip.textContent = "해석을 고르거나 줄을 고치면 등록할 시간이 표시됩니다";
       } else {
         chip.textContent = "등록할 시간 없음";
       }
