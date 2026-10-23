@@ -1216,15 +1216,32 @@ test("숫자열을 다르게 나누는 해석도 확인 대상이다", () => {
   const many = lib.parseBulkImportLine("홍길동 월1112").ambiguities[0];
   assert(many.options.length > lib.MAX_TIME_CHOICES, "1112 선택지 수: " + many.options.length);
 });
-test("반시각이 섞인 나열은 연속 구간으로 자동 확대하지 않고 확인한다", () => {
+test("반시각이 섞여 한 시간 넘게 떨어진 나열은 연속 구간으로 자동 확대하지 않고 확인한다", () => {
   lib.state.locations = bulkLocations();
   const summary = (line) => ambiguitySummary(lib.parseBulkImportLine(line));
   assertEqual(summary("홍길동 월6730"), ["6730 18:00 시작 · 19:30 시작 / 18:00~19:30 연속 가능 구간"]);
-  assertEqual(summary("홍길동 수목금 63078"), ["63078 18:30 시작 · 19:00~20:00 연속 가능 구간 / 18:30~20:00 연속 가능 구간"]);
   // 명시한 구분자는 그대로: 쉼표는 두 시각, 물결은 연속 구간.
-  assertEqual(summary("홍길동 월6,730 화6~730 수5530 목9101030"), []);
-  const chips = lib.parseBulkImportLine("홍길동 월6,730 화6~730 수5530 목9101030").days.map((d) => lib.describeDaySpecs(d.specs));
-  assertEqual(chips, ["18:00, 19:30", "18:00~19:30", "17:00, 17:30", "21:00~22:00, 22:30"]);
+  // 30분 이내로 붙은 시각도 쉼표·슬래시로 나누면 두 시각이다(이어 붙여 쓴 나열만 구간).
+  assertEqual(summary("홍길동 월6,730 화6~730 수5,530 목730/8"), []);
+  const chips = lib.parseBulkImportLine("홍길동 월6,730 화6~730 수5,530 목730/8").days.map((d) => lib.describeDaySpecs(d.specs));
+  assertEqual(chips, ["18:00, 19:30", "18:00~19:30", "17:00, 17:30", "19:30, 20:00"]);
+});
+test("30분 이내로 붙은 시각 나열은 확인 없이 연속 구간으로 등록한다", () => {
+  lib.state.locations = bulkLocations();
+  const line = "홍길동 월7308 화5530 수9101030 목55306 금63078";
+  assertEqual(ambiguitySummary(lib.parseBulkImportLine(line)), []);
+  assertEqual(
+    lib.parseBulkImportLine(line).days.map((d) => lib.describeDaySpecs(d.specs)),
+    ["19:30~20:00", "17:00~17:30", "21:00~22:30", "17:00~18:00", "18:30~20:00"],
+  );
+  resetBulkState();
+  lib.state.locations = bulkLocations();
+  lib.state.members = [{ id: "H", name: "홍길동", locationIds: ["M"], category: "등록", memo: "" }];
+  applyBulkText("홍길동 화7308");
+  assertEqual(
+    lib.state.requests.map((r) => r.day + " " + lib.slotLabel(r.startSlot)).sort(),
+    ["1 19:30", "1 19:40", "1 19:50", "1 20:00"],
+  );
 });
 test("단독 시간과 명확한 표기는 다른 분해가 있어도 확인하지 않는다", () => {
   lib.state.locations = bulkLocations();
@@ -1421,16 +1438,6 @@ function bulkMember(name) {
   assertEqual(found.length, 1, name + " 회원 수");
   return found[0];
 }
-// 사용자 예시 원문에서 해석 확인이 필요한 줄(반시각이 섞인 나열)은 예전 해석(연속 구간)을 고른다.
-const FIXTURE_PICKS = {
-  최진택: "17:00 시작 · 17:30~18:00 연속 가능 구간",
-  황민지: "18:30~20:00 연속 가능 구간",
-};
-function planFixture() {
-  const plan = lib.planBulkImport(BULK_SECTIONS_TEXT);
-  plan.rows.forEach((row) => row.parsed.ambiguities.forEach((a, i) => pickOption(plan, row, i, FIXTURE_PICKS[row.parsed.name])));
-  return plan;
-}
 function applyBulkText(text) {
   return applyBulkPlan(lib.planBulkImport(text));
 }
@@ -1440,20 +1447,14 @@ function applyBulkPlan(plan) {
   return report;
 }
 
-test("사용자 예시 원문에서는 반시각이 섞인 두 줄만 해석 확인이 필요하다", () => {
+test("사용자 예시 원문에는 해석 확인이 필요한 줄이 없다", () => {
   resetBulkState();
   const plan = lib.planBulkImport(BULK_SECTIONS_TEXT);
-  assertEqual(
-    plan.rows.filter((r) => r.parsed.ambiguities.length).map((r) => ambiguitySummary(r.parsed).join()),
-    [
-      "55306 17:00 시작 · 17:30 시작 · 18:00 시작 / 17:00 시작 · 17:30~18:00 연속 가능 구간",
-      "63078 18:30 시작 · 19:00~20:00 연속 가능 구간 / 18:30~20:00 연속 가능 구간",
-    ],
-  );
+  assertEqual(plan.rows.filter((r) => r.parsed.ambiguities.length).map((r) => r.parsed.raw), []);
 });
 test("지점 제목 붙여넣기: 빈 상태에서 지점 3개·회원 22명을 만든다", () => {
   resetBulkState();
-  applyBulkPlan(planFixture());
+  applyBulkPlan(lib.planBulkImport(BULK_SECTIONS_TEXT));
   assertEqual(lib.state.locations.map((l) => l.name), ["여의도점", "상암점", "마포점"]);
   // 신규 지점 색은 6색 팔레트에서 서로 다르게 자동 배정된다.
   assertEqual(lib.state.locations.map((l) => l.color), lib.LOCATION_PALETTE.slice(0, 3).map((p) => p.color));
@@ -1468,7 +1469,7 @@ test("지점 제목 붙여넣기: 빈 상태에서 지점 3개·회원 22명을 
 });
 test("지점 제목 붙여넣기: x인 신규 회원은 회원으로 남고 신청은 없다", () => {
   resetBulkState();
-  applyBulkPlan(planFixture());
+  applyBulkPlan(lib.planBulkImport(BULK_SECTIONS_TEXT));
   const M = lib.state.locations.find((l) => l.name === "마포점");
   ["최문열", "박다정", "김수연"].forEach((name) => {
     const m = bulkMember(name);
@@ -1478,7 +1479,7 @@ test("지점 제목 붙여넣기: x인 신규 회원은 회원으로 남고 신�
 });
 test("지점 제목 붙여넣기: 빈 줄 뒤의 한지원도 마포 소속이고 마포에서만 신청된다", () => {
   resetBulkState();
-  applyBulkPlan(planFixture());
+  applyBulkPlan(lib.planBulkImport(BULK_SECTIONS_TEXT));
   const M = lib.state.locations.find((l) => l.name === "마포점");
   const han = bulkMember("한지원");
   assertEqual(han.locationIds, [M.id]);
@@ -1489,7 +1490,7 @@ test("지점 제목 붙여넣기: 빈 줄 뒤의 한지원도 마포 소속이�
 });
 test("시간별 지점 지정은 그 시간에만 그 지점으로 신청되고 범위가 넓어지지 않는다", () => {
   resetBulkState();
-  applyBulkPlan(planFixture());
+  applyBulkPlan(lib.planBulkImport(BULK_SECTIONS_TEXT));
   const loc = (name) => lib.state.locations.find((l) => l.name === name).id;
   const hur = bulkMember("허종원");
   assertEqual(hur.locationIds, [loc("마포점")]);
@@ -1516,9 +1517,9 @@ test("붙여넣기 미리보기(계획)만으로는 데이터가 바뀌지 않�
 });
 test("같은 붙여넣기를 다시 등록해도 지점·회원·신청이 중복되지 않는다", () => {
   resetBulkState();
-  applyBulkPlan(planFixture());
+  applyBulkPlan(lib.planBulkImport(BULK_SECTIONS_TEXT));
   const first = bulkNormalized();
-  const plan = planFixture();
+  const plan = lib.planBulkImport(BULK_SECTIONS_TEXT);
   assertEqual(plan.newLocations, [], "기존 지점에 연결");
   assert(plan.rows.every((r) => lib.state.members.some((m) => m.id === r.choice)), "모두 기존 회원에 연결");
   const report = lib.applyBulkImportPlan(plan);

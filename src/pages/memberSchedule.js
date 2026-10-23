@@ -301,8 +301,10 @@ export function hourMarkLabel(mark) {
 // 뜻으로 보고 하나의 이어진 구간으로 묶는다(예: 3,4,5시 -> 3시~5시 사이 10분 단위로 전부
 // 희망 시작 시각이 됨). 시간이 하나라도 비면(연속이 아니면) 새 구간으로 나눈다.
 // 숫자 나열에서는 정시끼리만 묶는다 — "6730"(6시·7시30분)을 18:00~19:30으로 넓히지 않는다.
+// 단, 30분 이내로 붙은 시각("7308"의 7시30분·8시, "5530"의 5시·5시30분)은 사이 시각까지 이어서 묶는다.
 // continuous=true는 숫자 나열의 "연속" 해석 선택지로, 분이 붙은 시각도 한 시간 차이면 이어서 묶는다.
 // 명시한 범위("6~730")는 이 함수가 아니라 pointSpecGroups에서 시작~끝 한 구간으로 다룬다.
+const ADJACENT_MARK_MAX_GAP_MIN = 30; // 업무 정책값: 이 간격 이내의 나열은 이어진 구간으로 본다
 export function groupConsecutiveMarks(marks, continuous = false) {
   const groups = [];
   let current = [];
@@ -311,9 +313,12 @@ export function groupConsecutiveMarks(marks, continuous = false) {
       const prevHour24 = (current[current.length - 1].hour % 12) + 12;
       const hour24 = (mark.hour % 12) + 12;
       const prev = current[current.length - 1];
+      const gap = hour24 * 60 + mark.minute - (prevHour24 * 60 + prev.minute);
       const joinable =
-        continuous || (prev.minute === 0 && mark.minute === 0);
-      if (hour24 !== prevHour24 + 1 || !joinable) {
+        (gap > 0 && gap <= ADJACENT_MARK_MAX_GAP_MIN) ||
+        (hour24 === prevHour24 + 1 &&
+          (continuous || (prev.minute === 0 && mark.minute === 0)));
+      if (!joinable) {
         groups.push(current);
         current = [];
       }
@@ -1466,11 +1471,8 @@ function renderBulkPreviewRow(row) {
     const existing = memberById(row.choice);
     if (parsed.clearAll && existing) {
       // 기존 회원의 "이름 x": 그 회원의 기존 신청 시간을 모두 지운다.
-      const count = state.requests.filter(
-        (r) => r.memberId === existing.id,
-      ).length;
       chip.classList.add("bulk-preview-day-chip-clear");
-      chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
+      chip.textContent = "기존 가능 시간 전체 삭제";
     } else if (parsed.clearAll && row.choice === "__new__") {
       chip.textContent = "신청 시간 없이 회원만 등록";
     } else if (hasUnresolvedTime(row)) {
