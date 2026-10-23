@@ -1436,17 +1436,24 @@ function renderBulkPreviewRow(row) {
     // 해석이 너무 많으면 버튼 대신 구분자로 줄을 고치게 한다.
     const tooMany = amb.options.length > MAX_TIME_CHOICES;
     // 위계: 무엇을 정해야 하는지(제목) → 원문 위치(보조) → 선택지.
-    const title = document.createElement("p");
-    title.className = "bulk-preview-ambiguity-title";
-    title.textContent = amb.choice
-      ? "✓ " + amb.token + " — 해석 선택됨"
-      : "⚠ " +
+    // 고른 뒤에는 선택된 버튼의 체크가 상태를 보여 주므로 제목을 두지 않는다.
+    if (!amb.choice) {
+      const title = document.createElement("p");
+      title.className = "bulk-preview-ambiguity-title";
+      title.textContent =
+        "⚠ " +
         amb.token +
         (tooMany ? " — 해석 확인 필요" : " — 어떻게 등록할까요?");
+      box.appendChild(title);
+    }
+    // "원문"은 라벨, 뒤는 인용한 입력 내용으로 모양을 나눈다.
     const raw = document.createElement("p");
     raw.className = "bulk-preview-ambiguity-raw";
-    raw.append("원문 ", highlightedRaw(parsed, index));
-    box.append(title, raw);
+    const rawLabel = document.createElement("span");
+    rawLabel.className = "bulk-preview-ambiguity-raw-label";
+    rawLabel.textContent = "원문";
+    raw.append(rawLabel, highlightedRaw(parsed, index));
+    box.appendChild(raw);
     const hintText = tooMany
       ? "해석할 수 있는 경우가 너무 많아 고를 수 없습니다. '수정'에서 쉼표(,)·물결(~)·콜론(:)으로 나눠 적어주세요. (예: 11,12 · 1~2 · 11:10)"
       : amb.options.some((o) => o.unordered)

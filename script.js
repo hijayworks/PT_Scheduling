@@ -9649,13 +9649,19 @@
       box.className = "bulk-preview-ambiguity";
       box.classList.toggle("resolved", !!amb.choice);
       const tooMany = amb.options.length > MAX_TIME_CHOICES;
-      const title = document.createElement("p");
-      title.className = "bulk-preview-ambiguity-title";
-      title.textContent = amb.choice ? "✓ " + amb.token + " — 해석 선택됨" : "⚠ " + amb.token + (tooMany ? " — 해석 확인 필요" : " — 어떻게 등록할까요?");
+      if (!amb.choice) {
+        const title = document.createElement("p");
+        title.className = "bulk-preview-ambiguity-title";
+        title.textContent = "⚠ " + amb.token + (tooMany ? " — 해석 확인 필요" : " — 어떻게 등록할까요?");
+        box.appendChild(title);
+      }
       const raw = document.createElement("p");
       raw.className = "bulk-preview-ambiguity-raw";
-      raw.append("원문 ", highlightedRaw(parsed, index));
-      box.append(title, raw);
+      const rawLabel = document.createElement("span");
+      rawLabel.className = "bulk-preview-ambiguity-raw-label";
+      rawLabel.textContent = "원문";
+      raw.append(rawLabel, highlightedRaw(parsed, index));
+      box.appendChild(raw);
       const hintText = tooMany ? "해석할 수 있는 경우가 너무 많아 고를 수 없습니다. '수정'에서 쉼표(,)·물결(~)·콜론(:)으로 나눠 적어주세요. (예: 11,12 · 1~2 · 11:10)" : amb.options.some((o) => o.unordered) ? "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '수정'으로 고쳐주세요." : "";
       if (hintText) {
         const hint = document.createElement("p");

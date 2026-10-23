@@ -1032,6 +1032,7 @@ async function checkBulkImportAmbiguity(browser, site, failures) {
     assert(summary.includes("해석 확인 필요 1줄"), "요약에 해석 확인 필요가 없음: " + summary);
     assert((await page.locator(".bulk-preview-row.needs-review").count()) === 1 && (await row("이예림").getAttribute("class")).includes("needs-review"), "이예림 줄만 해석 확인 필요로 강조해야 함");
     assert((await row("이예림").locator(".bulk-preview-ambiguity-raw code").innerText()) === "이예림 화수금910,1030" && (await row("이예림").locator("mark").innerText()) === "910", "원문·문제 부분 강조");
+    assert((await row("이예림").locator(".bulk-preview-ambiguity-raw-label").innerText()) === "원문", "원문은 입력 내용과 구분된 라벨로 표시");
     assert(json(await options("이예림").allTextContents()) === json(["21:10 시작", "21:00~22:00 사이 시작"]), "해석 선택지: " + json(await options("이예림").allTextContents()));
     assert(json(await options("이예림").evaluateAll((els) => els.map((e) => e.getAttribute("aria-pressed")))) === json(["false", "false"]), "처음에는 어떤 해석도 고르지 않아야 함");
     assert(json(await chips("이예림")) === json(["화 (마포점) 22:30", "수 (마포점) 22:30", "금 (마포점) 22:30"]), "확인 전 미리보기 칩: " + json(await chips("이예림")));
@@ -1050,6 +1051,9 @@ async function checkBulkImportAmbiguity(browser, site, failures) {
     // 해석 선택 → 즉시 갱신, 다른 줄 선택 유지.
     await options("이예림").nth(0).click();
     assert((await options("이예림").nth(0).getAttribute("aria-pressed")) === "true" && !(await row("이예림").getAttribute("class")).includes("needs-review"), "해석 선택이 반영되지 않음");
+    // 고른 해석은 버튼 앞 체크로 보여 주고, 따로 "해석 선택됨" 제목을 두지 않는다.
+    assert((await options("이예림").nth(0).evaluate((el) => window.getComputedStyle(el, "::before").content)).includes("✓") && (await options("이예림").nth(1).evaluate((el) => window.getComputedStyle(el, "::before").content)) === "none", "선택한 해석 버튼에만 체크");
+    assert((await row("이예림").locator(".bulk-preview-ambiguity-title").count()) === 0, "해석을 고른 뒤에는 제목이 없어야 함");
     assert(json(await chips("이예림")) === json(["화 (마포점) 21:10, 22:30", "수 (마포점) 21:10, 22:30", "금 (마포점) 21:10, 22:30"]), "해석 선택 뒤 칩: " + json(await chips("이예림")));
     summary = await page.locator("#bulkImportPreviewSummary").innerText();
     assert(!summary.includes("해석 확인 필요"), "해석 선택 뒤 요약: " + summary);
