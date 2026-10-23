@@ -1087,7 +1087,7 @@ function pickOption(plan, row, index, label) {
 test("시+분과 이어 쓴 정시로 모두 읽히는 910·410은 확정하지 않고 해석 확인을 요구한다", () => {
   lib.state.locations = bulkLocations();
   const yerim = lib.parseBulkImportLine("이예림 화수금910,1030");
-  assertEqual(ambiguitySummary(yerim), ["910 21:10 시작 / 21:00~22:00 시작"]);
+  assertEqual(ambiguitySummary(yerim), ["910 21:10 시작 / 21:00~22:00 사이 시작"]);
   assertEqual(yerim.ambiguities[0].choice, null, "처음에는 선택하지 않는다");
   // 확인 전에는 모호한 부분을 등록하지 않는다(명확한 1030만 남는다).
   assertEqual(bulkSummary("이예림 화수금910,1030"), ["1||22:30", "2||22:30", "4||22:30"]);
@@ -1096,7 +1096,7 @@ test("시+분과 이어 쓴 정시로 모두 읽히는 910·410은 확정하지 
   assertEqual(ambiguitySummary(hong), ["410 16:10 시작 / 16:00 시작 · 22:00 시작"]);
   assertEqual(hong.days, []);
   assertEqual(ambiguitySummary(lib.parseBulkImportLine("홍길동 목2,410,420")), ["410 16:10 시작 / 16:00 시작 · 22:00 시작"]);
-  assertEqual(ambiguitySummary(lib.parseBulkImportLine("홍길동 금910늦은시간")), ["910 21:10 시작 · 22:30 시작 / 21:00~22:00 시작 · 22:30 시작"]);
+  assertEqual(ambiguitySummary(lib.parseBulkImportLine("홍길동 금910늦은시간")), ["910 21:10 시작 · 22:30 시작 / 21:00~22:00 사이 시작 · 22:30 시작"]);
 });
 test("해석이 하나뿐인 세·네 자리 숫자와 명확한 시:분 표기는 확인 없이 등록한다", () => {
   lib.state.locations = bulkLocations();
@@ -1182,7 +1182,7 @@ test("지점이 없는 상태에서 해석을 고르면 줄의 지점을 신규 
   kim.newLocationId = mapo;
   kim.newCategory = "상담";
   pickOption(plan, hong, 0, "21:10 시작");
-  pickOption(plan, kim, 0, "21:00~22:00 시작");
+  pickOption(plan, kim, 0, "21:00~22:00 사이 시작");
   assertEqual([kim.newLocationId, kim.newCategory], [mapo, "상담"], "해석을 골라도 사용자가 고른 지점·구분 유지");
   assertEqual(bulkDataSnapshot(), before);
   const report = lib.applyBulkImportPlan(plan);
@@ -1208,10 +1208,10 @@ test("줄을 고치는 중(적용·취소 전)에는 일괄 등록을 막고 데
 test("숫자열을 다르게 나누는 해석도 확인 대상이다", () => {
   lib.state.locations = bulkLocations();
   const summary = (line) => ambiguitySummary(lib.parseBulkImportLine(line));
-  assertEqual(summary("홍길동 월123"), ["123 12:00 시작 · 15:00 시작 / 13:00~15:00 시작"]);
-  assertEqual(summary("홍길동 월1230"), ["1230 12:30 시작 / 13:00 시작 · 14:30 시작 / 13:00~14:30 시작"]);
-  assertEqual(summary("홍길동 월1011"), ["1011 22:00~23:00 시작 / 22:00 시작 · 13:00 시작 · 13:00 시작(시간순 아님)"]);
-  assertEqual(summary("홍길동 금123~"), ["123 12:00 시작 · 15:00~마감 / 13:00~14:00 시작 · 15:00~마감"]);
+  assertEqual(summary("홍길동 월123"), ["123 12:00 시작 · 15:00 시작 / 13:00~15:00 사이 시작"]);
+  assertEqual(summary("홍길동 월1230"), ["1230 12:30 시작 / 13:00 시작 · 14:30 시작 / 13:00~14:30 사이 시작"]);
+  assertEqual(summary("홍길동 월1011"), ["1011 22:00~23:00 사이 시작 / 22:00 시작 · 13:00 시작 · 13:00 시작(시간순 아님)"]);
+  assertEqual(summary("홍길동 금123~"), ["123 12:00 시작 · 15:00~마감 / 13:00~14:00 사이 시작 · 15:00~마감"]);
   // 선택지가 너무 많으면 고르게 하지 않고 줄을 고치게 한다(미리보기 UI가 MAX_TIME_CHOICES로 판단).
   const many = lib.parseBulkImportLine("홍길동 월1112").ambiguities[0];
   assert(many.options.length > lib.MAX_TIME_CHOICES, "1112 선택지 수: " + many.options.length);
@@ -1219,7 +1219,7 @@ test("숫자열을 다르게 나누는 해석도 확인 대상이다", () => {
 test("반시각이 섞여 한 시간 넘게 떨어진 나열은 연속 구간으로 자동 확대하지 않고 확인한다", () => {
   lib.state.locations = bulkLocations();
   const summary = (line) => ambiguitySummary(lib.parseBulkImportLine(line));
-  assertEqual(summary("홍길동 월6730"), ["6730 18:00 시작 · 19:30 시작 / 18:00~19:30 시작"]);
+  assertEqual(summary("홍길동 월6730"), ["6730 18:00 시작 · 19:30 시작 / 18:00~19:30 사이 시작"]);
   // 명시한 구분자는 그대로: 쉼표는 두 시각, 물결은 연속 구간.
   // 30분 이내로 붙은 시각도 쉼표·슬래시로 나누면 두 시각이다(이어 붙여 쓴 나열만 구간).
   assertEqual(summary("홍길동 월6,730 화6~730 수5,530 목730/8"), []);
@@ -1258,12 +1258,12 @@ test("123·1230·6730은 확인 전 적용을 막고 기존 신청을 지키며,
     return out;
   };
   [
-    ["홍길동 월123", "13:00~15:00 시작", range(0, 13 * 60, 15 * 60)],
+    ["홍길동 월123", "13:00~15:00 사이 시작", range(0, 13 * 60, 15 * 60)],
     ["홍길동 월123", "12:00 시작 · 15:00 시작", ["0 12:00", "0 15:00"]],
     ["홍길동 월1230", "13:00 시작 · 14:30 시작", ["0 13:00", "0 14:30"]],
     ["홍길동 월1230", "12:30 시작", ["0 12:30"]],
     ["홍길동 월6730", "18:00 시작 · 19:30 시작", ["0 18:00", "0 19:30"]],
-    ["홍길동 월6730", "18:00~19:30 시작", range(0, 18 * 60, 19 * 60 + 30)],
+    ["홍길동 월6730", "18:00~19:30 사이 시작", range(0, 18 * 60, 19 * 60 + 30)],
   ].forEach(([line, label, expected]) => {
     resetBulkState();
     lib.state.locations = bulkLocations();
@@ -1344,7 +1344,7 @@ test("해석을 고르면 그 해석으로 등록하고 다른 줄의 회원 연
   assertEqual(row.parsed.ambiguities.map((a) => a.choice), ["21:10 시작"]);
   assertEqual(row.choice, "L", "같은 줄의 회원 연결 유지");
   // 다시 고를 수 있다.
-  pickOption(plan, row, 0, "21:00~22:00 시작");
+  pickOption(plan, row, 0, "21:00~22:00 사이 시작");
   assertEqual(
     [plan.rows[0].choice, plan.rows[1].choice, plan.rows[1].newLocationId, plan.rows[1].newCategory],
     ["K", "__new__", "Y", "상담"],
