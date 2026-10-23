@@ -8994,7 +8994,7 @@
   }
   function describeClockOption(spec) {
     const groups = (groupsOfMarks) => groupsOfMarks.map(
-      (group) => group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) + " 연속 가능 구간" : hourMarkLabel(group[0]) + " 시작"
+      (group) => group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) + " 사이 시작" : hourMarkLabel(group[0]) + " 시작"
     );
     const extra = groups(groupConsecutiveMarks(spec.extraPoints || []));
     let parts;
