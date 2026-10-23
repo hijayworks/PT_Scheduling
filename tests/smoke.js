@@ -1748,16 +1748,20 @@ async function main() {
 
     if (want("file")) {
       // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
+      // --allow-file-access-from-files: Linux Chromium은 부하가 크면 file:// 문서 하나에 가끔 다른(빈) localStorage를 붙인다
+      // (이슈 #32 진단 — 메모리 프로필에서도 재현, http 0건, 이 인자로 0건). 앱이 아닌 브라우저 동작이라, 이 구간은 앱의
+      // 저장·새로고침·재실행만 검증하도록 file:// 문서를 한 origin으로 다룬다. 유실 감지([환경 저장소 유실])는 그대로 둔다.
+      const fileLaunch = { args: ["--allow-file-access-from-files"] };
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-file-"));
       try {
         fs.writeFileSync(path.join(tmp, "blank.html"), BLANK_HTML);
         const fileSite = { blank: pathToFileURL(path.join(tmp, "blank.html")).href, index: pathToFileURL(path.join(ROOT, "index.html")).href };
         const profile = path.join(tmp, "profile");
-        let ctx = await chromium.launchPersistentContext(profile);
+        let ctx = await chromium.launchPersistentContext(profile, fileLaunch);
         const fp = ctx.pages()[0] || (await ctx.newPage());
         await checkSwapReload(fp, await openManualEditPage(fp, fileSite, failures), "file", failures);
         await ctx.close();
-        ctx = await chromium.launchPersistentContext(profile);
+        ctx = await chromium.launchPersistentContext(profile, fileLaunch);
         const rp = ctx.pages()[0] || (await ctx.newPage());
         await rp.goto(fileSite.index);
         const after = await rp.evaluate(({ key, logKey }) => ({ url: location.href, origin: location.origin, keys: Object.keys(localStorage), raw: localStorage.getItem(key), logged: localStorage.getItem(logKey) }), { key: STORAGE_KEY, logKey: SEED_LOG_KEY });
