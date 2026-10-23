@@ -8777,7 +8777,7 @@
     const hour24 = mark.hour % 12 + 12;
     return minutesLabel(hour24 * 60 + mark.minute);
   }
-  var ADJACENT_MARK_MAX_GAP_MIN = 30;
+  var JOINED_MARK_MAX_GAP_MIN = 60;
   function groupConsecutiveMarks(marks, continuous = false) {
     const groups = [];
     let current = [];
@@ -8787,7 +8787,7 @@
         const hour24 = mark.hour % 12 + 12;
         const prev = current[current.length - 1];
         const gap = hour24 * 60 + mark.minute - (prevHour24 * 60 + prev.minute);
-        const joinable = gap > 0 && gap <= ADJACENT_MARK_MAX_GAP_MIN || hour24 === prevHour24 + 1 && (continuous || prev.minute === 0 && mark.minute === 0);
+        const joinable = gap > 0 && gap <= JOINED_MARK_MAX_GAP_MIN || continuous && hour24 === prevHour24 + 1;
         if (!joinable) {
           groups.push(current);
           current = [];
@@ -8804,7 +8804,8 @@
     const leftAt = leftHour24 * 60 + leftMark.minute;
     const rightAt = rightHour24 * 60 + rightMark.minute;
     if (rightAt < leftAt) return null;
-    if (rightAt === leftAt) return [{ hour: leftMark.hour, minute: leftMark.minute }];
+    if (rightAt === leftAt)
+      return [{ hour: leftMark.hour, minute: leftMark.minute }];
     const marks = [];
     for (let h24 = leftHour24; h24 <= rightHour24; h24++) {
       const hour = h24 === 12 ? 12 : h24 - 12;
@@ -8843,7 +8844,10 @@
     const canFinish = (rest) => {
       if (rest === "") return true;
       if (!completable.has(rest))
-        completable.set(rest, pieces(rest).some((p) => canFinish(p.rest)));
+        completable.set(
+          rest,
+          pieces(rest).some((p) => canFinish(p.rest))
+        );
       return completable.get(rest);
     };
     const splits = [];
@@ -8864,7 +8868,8 @@
       const marks = parseHourMarks(s);
       return marks ? [marks] : [];
     }
-    if (/^(1[0-2]|[1-9])$/.test(s)) return [[{ hour: parseInt(s, 10), minute: 0 }]];
+    if (/^(1[0-2]|[1-9])$/.test(s))
+      return [[{ hour: parseInt(s, 10), minute: 0 }]];
     const readings = [];
     if (/^\d{3,4}$/.test(s)) {
       const hour = parseInt(s.slice(0, -2), 10);
@@ -8958,7 +8963,11 @@
       } else {
         ambiguousPart = rightStr;
         candidates = hourMarkReadings(rightStr).filter((marks) => marks.length > 0).map((marks) => ({
-          spec: { type: "openEnd", mark: marks[0], extraPoints: marks.slice(1) },
+          spec: {
+            type: "openEnd",
+            mark: marks[0],
+            extraPoints: marks.slice(1)
+          },
           unordered: !marksInTimeOrder(marks)
         }));
       }
@@ -8978,7 +8987,8 @@
     candidates.forEach(({ spec, unordered }) => {
       withLateMark(spec);
       const key = describeClockOption(spec);
-      if (!options.some((o) => o.key === key)) options.push({ key, spec, unordered });
+      if (!options.some((o) => o.key === key))
+        options.push({ key, spec, unordered });
     });
     if (options.length === 0) return { error: failMessage, warning };
     if (options.length === 1 && !options[0].unordered)
@@ -8988,6 +8998,35 @@
   var MAX_TIME_CHOICES = 4;
   function pointSpecGroups(spec) {
     return spec.range ? [spec.marks] : groupConsecutiveMarks(spec.marks, spec.continuous);
+  }
+  var markMinutes = (mark) => (mark.hour % 12 + 12) * 60 + mark.minute;
+  function daySpecItems(specs) {
+    const items = [];
+    specs.forEach((spec, specIndex) => {
+      const add = (groups) => groups.forEach((marks) => items.push({ marks, specIndex }));
+      const extra = groupConsecutiveMarks(spec.extraPoints || []);
+      if (spec.type === "point") {
+        add(pointSpecGroups(spec));
+        add(extra);
+      } else if (spec.type === "openStart") {
+        add(extra);
+        items.push({ openStart: spec.mark });
+      } else if (spec.type === "openEnd") {
+        items.push({ openEnd: spec.mark });
+        add(extra);
+      }
+    });
+    return items.reduce((joined, item) => {
+      const prev = joined[joined.length - 1];
+      const gap = prev && prev.marks && item.marks && prev.specIndex !== item.specIndex ? markMinutes(item.marks[0]) - markMinutes(prev.marks[prev.marks.length - 1]) : 0;
+      if (gap > 0 && gap <= JOINED_MARK_MAX_GAP_MIN)
+        joined[joined.length - 1] = {
+          marks: prev.marks.concat(item.marks),
+          specIndex: item.specIndex
+        };
+      else joined.push(item);
+      return joined;
+    }, []);
   }
   function groupLabel(group) {
     return group.length > 1 ? hourMarkLabel(group[0]) + "~" + hourMarkLabel(group[group.length - 1]) : hourMarkLabel(group[0]);
@@ -9119,7 +9158,11 @@
         sectionLocationId = resolveLocation(header);
         return;
       }
-      const parsed = parseBulkImportLine(line, resolveLocation, sectionLocationId);
+      const parsed = parseBulkImportLine(
+        line,
+        resolveLocation,
+        sectionLocationId
+      );
       if (!parsed) return;
       rows.push({
         parsed,
@@ -9167,7 +9210,8 @@
       resolutions
     );
     if (!parsed) return { error: "이름과 요일·시간을 적어주세요." };
-    if (parsed.name !== row.parsed.name) row.choice = bulkMemberChoice(parsed.name);
+    if (parsed.name !== row.parsed.name)
+      row.choice = bulkMemberChoice(parsed.name);
     if (!row.newLocationId)
       row.newLocationId = defaultNewLocationId(parsed, row.sectionLocationId);
     row.parsed = parsed;
@@ -9292,28 +9336,18 @@
       function addRange(startSlot, endSlot) {
         addedForMember += addDesiredRange(member, day, startSlot, endSlot, locId);
       }
-      function applyGroups(groups) {
-        groups.forEach((group) => {
-          addRange(
-            hourMarkToStartSlot(group[0]),
-            hourMarkToStartSlot(group[group.length - 1])
-          );
-        });
-      }
       [...entry.days.values()].sort((a, b) => !!a.locationId - !!b.locationId).forEach((dayEntry) => {
         day = dayEntry.day;
         locId = dayEntry.locationId;
-        dayEntry.specs.forEach((spec) => {
-          if (spec.type === "point") {
-            applyGroups(pointSpecGroups(spec));
-            applyGroups(groupConsecutiveMarks(spec.extraPoints || []));
-          } else if (spec.type === "openStart") {
-            applyGroups(groupConsecutiveMarks(spec.extraPoints || []));
-            addRange(hourMarkToStartSlot(spec.mark), SLOT_COUNT);
-          } else if (spec.type === "openEnd") {
-            addRange(0, hourMarkToStartSlot(spec.mark));
-            applyGroups(groupConsecutiveMarks(spec.extraPoints || []));
-          }
+        daySpecItems(dayEntry.specs).forEach((item) => {
+          if (item.marks)
+            addRange(
+              hourMarkToStartSlot(item.marks[0]),
+              hourMarkToStartSlot(item.marks[item.marks.length - 1])
+            );
+          else if (item.openStart)
+            addRange(hourMarkToStartSlot(item.openStart), SLOT_COUNT);
+          else addRange(0, hourMarkToStartSlot(item.openEnd));
         });
       });
       report.appliedCount++;
@@ -9325,24 +9359,10 @@
     });
     return report;
   }
-  function describeMarks(marks) {
-    return groupConsecutiveMarks(marks).map(groupLabel);
-  }
   function describeDaySpecs(specs) {
-    const parts = [];
-    specs.forEach((spec) => {
-      if (spec.type === "point") {
-        parts.push(...pointSpecGroups(spec).map(groupLabel));
-        parts.push(...describeMarks(spec.extraPoints || []));
-      } else if (spec.type === "openStart") {
-        parts.push(...describeMarks(spec.extraPoints || []));
-        parts.push(hourMarkLabel(spec.mark) + "~마감");
-      } else if (spec.type === "openEnd") {
-        parts.push("시작~" + hourMarkLabel(spec.mark));
-        parts.push(...describeMarks(spec.extraPoints || []));
-      }
-    });
-    return parts.join(", ");
+    return daySpecItems(specs).map(
+      (item) => item.marks ? groupLabel(item.marks) : item.openStart ? hourMarkLabel(item.openStart) + "~마감" : "시작~" + hourMarkLabel(item.openEnd)
+    ).join(", ");
   }
   function findMembersByName(name) {
     return state.members.filter((m) => m.name === name);
@@ -9769,12 +9789,7 @@
     renderMemberTable();
     renderRequestList();
     closeBulkImportModal();
-    const {
-      zeroFitNames,
-      emptyRowNames,
-      clearedNames,
-      unparsedSkippedNames
-    } = report;
+    const { zeroFitNames, emptyRowNames, clearedNames, unparsedSkippedNames } = report;
     const notes = [];
     if (report.createdLocations.length)
       notes.push(
@@ -10157,7 +10172,10 @@
       memoInput.classList.add("member-memo-input");
       memoInput.addEventListener("input", () => {
         const lineHeight = 20;
-        memoInput.rows = Math.max(1, Math.ceil(memoInput.scrollHeight / lineHeight));
+        memoInput.rows = Math.max(
+          1,
+          Math.ceil(memoInput.scrollHeight / lineHeight)
+        );
       });
       memoInput.addEventListener(
         "change",

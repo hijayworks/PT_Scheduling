@@ -1220,19 +1220,46 @@ test("반시각이 섞여 한 시간 넘게 떨어진 나열은 연속 구간으
   lib.state.locations = bulkLocations();
   const summary = (line) => ambiguitySummary(lib.parseBulkImportLine(line));
   assertEqual(summary("홍길동 월6730"), ["6730 18:00 시작 · 19:30 시작 / 18:00~19:30 사이 시작"]);
-  // 명시한 구분자는 그대로: 쉼표는 두 시각, 물결은 연속 구간.
-  // 30분 이내로 붙은 시각도 쉼표·슬래시로 나누면 두 시각이다(이어 붙여 쓴 나열만 구간).
-  assertEqual(summary("홍길동 월6,730 화6~730 수5,530 목730/8"), []);
-  const chips = lib.parseBulkImportLine("홍길동 월6,730 화6~730 수5,530 목730/8").days.map((d) => lib.describeDaySpecs(d.specs));
-  assertEqual(chips, ["18:00, 19:30", "18:00~19:30", "17:00, 17:30", "19:30, 20:00"]);
+  // 명시한 구분자: 한 시간 넘게 떨어진 쉼표는 두 시각, 물결은 연속 구간.
+  assertEqual(summary("홍길동 월6,730 화6~730"), []);
+  const chips = lib.parseBulkImportLine("홍길동 월6,730 화6~730").days.map((d) => lib.describeDaySpecs(d.specs));
+  assertEqual(chips, ["18:00, 19:30", "18:00~19:30"]);
 });
-test("30분 이내로 붙은 시각 나열은 확인 없이 연속 구간으로 등록한다", () => {
+test("구분자·띄어쓰기로 나눠 적어도 1시간 이내로 이어지는 시각은 연속 구간으로 등록한다", () => {
   lib.state.locations = bulkLocations();
-  const line = "홍길동 월7308 화5530 수9101030 목55306 금63078";
+  const line = "홍길동 월630 7 화5,530 수730/8 목7,8 금630,730 토6,730";
   assertEqual(ambiguitySummary(lib.parseBulkImportLine(line)), []);
   assertEqual(
     lib.parseBulkImportLine(line).days.map((d) => lib.describeDaySpecs(d.specs)),
-    ["19:30~20:00", "17:00~17:30", "21:00~22:30", "17:00~18:00", "18:30~20:00"],
+    ["18:30~19:00", "17:00~17:30", "19:30~20:00", "19:00~20:00", "18:30~19:30", "18:00, 19:30"],
+  );
+  // 물결 범위·여러 줄에 나눠 적은 시각도 이어지면 하나의 구간이고, 시간순이 아니면 잇지 않는다.
+  const more = "홍길동 월5~6,630 화8,7";
+  assertEqual(
+    lib.parseBulkImportLine(more).days.map((d) => lib.describeDaySpecs(d.specs)),
+    ["17:00~18:30", "20:00, 19:00"],
+  );
+  resetBulkState();
+  lib.state.locations = bulkLocations();
+  lib.state.members = [{ id: "H", name: "홍길동", locationIds: ["M"], category: "등록", memo: "" }];
+  applyBulkText("홍길동 화630 7");
+  assertEqual(
+    lib.state.requests.map((r) => r.day + " " + lib.slotLabel(r.startSlot)).sort(),
+    ["1 18:30", "1 18:40", "1 18:50", "1 19:00"],
+  );
+});
+test("붙여 쓴 시각도 1시간 이내로 이어지면 확인 없이 연속 구간으로 등록한다", () => {
+  lib.state.locations = bulkLocations();
+  const line = "홍길동 월7308 화5530 수9101030 목55306 금63078 토630730";
+  assertEqual(ambiguitySummary(lib.parseBulkImportLine(line)), []);
+  assertEqual(
+    lib.parseBulkImportLine(line).days.map((d) => lib.describeDaySpecs(d.specs)),
+    ["19:30~20:00", "17:00~17:30", "21:00~22:30", "17:00~18:00", "18:30~20:00", "18:30~19:30"],
+  );
+  // 나눠 적은 같은 시각과 결과가 같다 — 구분자와 상관없이 1시간 이내면 구간.
+  assertEqual(
+    lib.parseBulkImportLine("홍길동 월640740 화640,740").days.map((d) => lib.describeDaySpecs(d.specs)),
+    ["18:40~19:40", "18:40~19:40"],
   );
   resetBulkState();
   lib.state.locations = bulkLocations();
@@ -1353,8 +1380,8 @@ test("해석을 고르면 그 해석으로 등록하고 다른 줄의 회원 연
   assert(!report.error, report.error);
   const hours = [];
   [1, 2, 4].forEach((day) => {
-    for (let min = 21 * 60; min <= 22 * 60; min += 10) hours.push(day + " " + lib.minutesLabel(min));
-    hours.push(day + " 22:30");
+    // 21:00~22:00 뒤에 쉼표로 적은 1030(22:30)은 30분 차이라 21:00~22:30 한 구간이다.
+    for (let min = 21 * 60; min <= 22 * 60 + 30; min += 10) hours.push(day + " " + lib.minutesLabel(min));
   });
   assertEqual(requestsOf("L"), hours.sort());
   const created = bulkMember("신규회원");
