@@ -1248,13 +1248,18 @@ test("구분자·띄어쓰기로 나눠 적어도 1시간 이내로 이어지는
     ["1 18:30", "1 18:40", "1 18:50", "1 19:00"],
   );
 });
-test("30분 이내로 붙은 시각 나열은 확인 없이 연속 구간으로 등록한다", () => {
+test("붙여 쓴 시각도 1시간 이내로 이어지면 확인 없이 연속 구간으로 등록한다", () => {
   lib.state.locations = bulkLocations();
-  const line = "홍길동 월7308 화5530 수9101030 목55306 금63078";
+  const line = "홍길동 월7308 화5530 수9101030 목55306 금63078 토630730";
   assertEqual(ambiguitySummary(lib.parseBulkImportLine(line)), []);
   assertEqual(
     lib.parseBulkImportLine(line).days.map((d) => lib.describeDaySpecs(d.specs)),
-    ["19:30~20:00", "17:00~17:30", "21:00~22:30", "17:00~18:00", "18:30~20:00"],
+    ["19:30~20:00", "17:00~17:30", "21:00~22:30", "17:00~18:00", "18:30~20:00", "18:30~19:30"],
+  );
+  // 나눠 적은 같은 시각과 결과가 같다 — 구분자와 상관없이 1시간 이내면 구간.
+  assertEqual(
+    lib.parseBulkImportLine("홍길동 월640740 화640,740").days.map((d) => lib.describeDaySpecs(d.specs)),
+    ["18:40~19:40", "18:40~19:40"],
   );
   resetBulkState();
   lib.state.locations = bulkLocations();

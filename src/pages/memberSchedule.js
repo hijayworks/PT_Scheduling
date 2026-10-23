@@ -300,11 +300,12 @@ export function hourMarkLabel(mark) {
 // "월345"처럼 매시 정각이 연달아 이어진 마크들은, 회원이 그 사이 언제든 시작할 수 있다는
 // 뜻으로 보고 하나의 이어진 구간으로 묶는다(예: 3,4,5시 -> 3시~5시 사이 10분 단위로 전부
 // 희망 시작 시각이 됨). 시간이 하나라도 비면(연속이 아니면) 새 구간으로 나눈다.
-// 숫자 나열에서는 정시끼리만 묶는다 — "6730"(6시·7시30분)을 18:00~19:30으로 넓히지 않는다.
-// 단, 30분 이내로 붙은 시각("7308"의 7시30분·8시, "5530"의 5시·5시30분)은 사이 시각까지 이어서 묶는다.
-// continuous=true는 숫자 나열의 "연속" 해석 선택지로, 분이 붙은 시각도 한 시간 차이면 이어서 묶는다.
+// 1시간 이내로 이어지는 시각("7308"의 7시30분·8시, "630730"의 6시30분·7시30분)은 사이 시각까지 이어서 묶고,
+// 더 떨어지면 나눈다 — "6730"(6시·7시30분)을 18:00~19:30으로 넓히지 않는다.
+// continuous=true는 숫자 나열의 "연속" 해석 선택지로, 분이 붙은 시각도 시가 하나 차이면 이어서 묶는다.
 // 명시한 범위("6~730")는 이 함수가 아니라 pointSpecGroups에서 시작~끝 한 구간으로 다룬다.
-const ADJACENT_MARK_MAX_GAP_MIN = 30; // 업무 정책값: 이 간격 이내의 나열은 이어진 구간으로 본다
+// 업무 정책값: 이 간격 이내로 이어지는 시각은 붙여 쓰든(groupConsecutiveMarks) 나눠 쓰든(daySpecItems) 한 구간이다.
+const JOINED_MARK_MAX_GAP_MIN = 60;
 export function groupConsecutiveMarks(marks, continuous = false) {
   const groups = [];
   let current = [];
@@ -315,9 +316,8 @@ export function groupConsecutiveMarks(marks, continuous = false) {
       const prev = current[current.length - 1];
       const gap = hour24 * 60 + mark.minute - (prevHour24 * 60 + prev.minute);
       const joinable =
-        (gap > 0 && gap <= ADJACENT_MARK_MAX_GAP_MIN) ||
-        (hour24 === prevHour24 + 1 &&
-          (continuous || (prev.minute === 0 && mark.minute === 0)));
+        (gap > 0 && gap <= JOINED_MARK_MAX_GAP_MIN) ||
+        (continuous && hour24 === prevHour24 + 1);
       if (!joinable) {
         groups.push(current);
         current = [];
@@ -600,8 +600,7 @@ export function pointSpecGroups(spec) {
     : groupConsecutiveMarks(spec.marks, spec.continuous);
 }
 
-// 쉼표·슬래시·띄어쓰기로 나눠 적은 시각("630 7", "7,8")도 이 간격 이내로 이어지면 하나의 구간으로 본다.
-const SEPARATED_MARK_MAX_GAP_MIN = 60; // 업무 정책값
+// 쉼표·슬래시·띄어쓰기로 나눠 적은 시각("630 7", "7,8")도 JOINED_MARK_MAX_GAP_MIN 이내로 이어지면 하나의 구간으로 본다.
 const markMinutes = (mark) => ((mark.hour % 12) + 12) * 60 + mark.minute;
 
 // 하루치 스펙들을 등록·표시할 항목으로 바꾼다 — 미리보기 칩과 실제 등록이 같은 구간을 쓰도록 여기서만 정한다.
@@ -631,7 +630,7 @@ export function daySpecItems(specs) {
         ? markMinutes(item.marks[0]) -
           markMinutes(prev.marks[prev.marks.length - 1])
         : 0;
-    if (gap > 0 && gap <= SEPARATED_MARK_MAX_GAP_MIN)
+    if (gap > 0 && gap <= JOINED_MARK_MAX_GAP_MIN)
       joined[joined.length - 1] = {
         marks: prev.marks.concat(item.marks),
         specIndex: item.specIndex,

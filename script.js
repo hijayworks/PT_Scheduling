@@ -8777,7 +8777,7 @@
     const hour24 = mark.hour % 12 + 12;
     return minutesLabel(hour24 * 60 + mark.minute);
   }
-  var ADJACENT_MARK_MAX_GAP_MIN = 30;
+  var JOINED_MARK_MAX_GAP_MIN = 60;
   function groupConsecutiveMarks(marks, continuous = false) {
     const groups = [];
     let current = [];
@@ -8787,7 +8787,7 @@
         const hour24 = mark.hour % 12 + 12;
         const prev = current[current.length - 1];
         const gap = hour24 * 60 + mark.minute - (prevHour24 * 60 + prev.minute);
-        const joinable = gap > 0 && gap <= ADJACENT_MARK_MAX_GAP_MIN || hour24 === prevHour24 + 1 && (continuous || prev.minute === 0 && mark.minute === 0);
+        const joinable = gap > 0 && gap <= JOINED_MARK_MAX_GAP_MIN || continuous && hour24 === prevHour24 + 1;
         if (!joinable) {
           groups.push(current);
           current = [];
@@ -8999,7 +8999,6 @@
   function pointSpecGroups(spec) {
     return spec.range ? [spec.marks] : groupConsecutiveMarks(spec.marks, spec.continuous);
   }
-  var SEPARATED_MARK_MAX_GAP_MIN = 60;
   var markMinutes = (mark) => (mark.hour % 12 + 12) * 60 + mark.minute;
   function daySpecItems(specs) {
     const items = [];
@@ -9020,7 +9019,7 @@
     return items.reduce((joined, item) => {
       const prev = joined[joined.length - 1];
       const gap = prev && prev.marks && item.marks && prev.specIndex !== item.specIndex ? markMinutes(item.marks[0]) - markMinutes(prev.marks[prev.marks.length - 1]) : 0;
-      if (gap > 0 && gap <= SEPARATED_MARK_MAX_GAP_MIN)
+      if (gap > 0 && gap <= JOINED_MARK_MAX_GAP_MIN)
         joined[joined.length - 1] = {
           marks: prev.marks.concat(item.marks),
           specIndex: item.specIndex
