@@ -596,7 +596,8 @@ function groupLabel(group) {
     : hourMarkLabel(group[0]);
 }
 
-// 해석 선택지 문구: 떨어진 시각은 각각 "시작", 이어진 정시는 "연속 가능 구간", 열린 범위는 "~마감"·"시작~".
+// 해석 선택지 문구: 떨어진 시각은 각각 "21:10 시작", 이어진 구간은 "21:00~22:00 시작"(그 사이 언제든 시작),
+// 열린 범위는 "~마감"·"시작~". 이 문구가 선택지 key로도 쓰인다(미리보기 동안만, 저장 안 함).
 export function describeClockOption(spec) {
   const groups = (groupsOfMarks) =>
     groupsOfMarks.map((group) =>
@@ -604,7 +605,7 @@ export function describeClockOption(spec) {
         ? hourMarkLabel(group[0]) +
           "~" +
           hourMarkLabel(group[group.length - 1]) +
-          " 연속 가능 구간"
+          " 시작"
         : hourMarkLabel(group[0]) + " 시작",
     );
   const extra = groups(groupConsecutiveMarks(spec.extraPoints || []));
