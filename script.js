@@ -9203,7 +9203,7 @@
     const unresolved = active.filter(hasUnresolvedTime);
     if (unresolved.length)
       return {
-        error: "시간 해석을 확인해야 하는 줄이 있습니다. 미리보기에서 해석을 고르거나 줄을 고치거나 건너뛰기로 바꿔주세요: " + unresolved.map((r) => r.parsed.name).join(", ")
+        error: "시간 해석을 확인해야 하는 줄이 있습니다. 미리보기에서 해석을 고르거나, '수정'으로 줄을 고치거나, 건너뛰기로 바꿔주세요: " + unresolved.map((r) => r.parsed.name).join(", ")
       };
     const noLocation = active.filter(
       (r) => r.choice === "__new__" && createsNewMember(r) && !r.newLocationId
@@ -9559,7 +9559,7 @@
     const editBtn = document.createElement("button");
     editBtn.type = "button";
     editBtn.className = "btn btn-ghost btn-small bulk-preview-edit-btn";
-    editBtn.textContent = "줄 수정";
+    editBtn.textContent = "수정";
     head.appendChild(editBtn);
     rowEl.appendChild(head);
     const editor = document.createElement("div");
@@ -9626,15 +9626,15 @@
       const box = document.createElement("div");
       box.className = "bulk-preview-ambiguity";
       box.classList.toggle("resolved", !!amb.choice);
+      const tooMany = amb.options.length > MAX_TIME_CHOICES;
       const title = document.createElement("p");
       title.className = "bulk-preview-ambiguity-title";
-      title.append(
-        (amb.choice ? "✓ 해석 선택됨" : "⚠ 해석 확인 필요") + ": 원문 ",
-        highlightedRaw(parsed, index)
-      );
-      box.appendChild(title);
-      const tooMany = amb.options.length > MAX_TIME_CHOICES;
-      const hintText = tooMany ? "해석할 수 있는 경우가 너무 많아 고를 수 없습니다. '줄 수정'에서 쉼표(,)·물결(~)·콜론(:)으로 나눠 적어주세요. (예: 11,12 · 1~2 · 11:10)" : amb.options.some((o) => o.unordered) ? "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '줄 수정'으로 고쳐주세요." : "";
+      title.textContent = amb.choice ? "✓ " + amb.token + " — 해석 선택됨" : "⚠ " + amb.token + (tooMany ? " — 해석 확인 필요" : " — 어떻게 등록할까요?");
+      const raw = document.createElement("p");
+      raw.className = "bulk-preview-ambiguity-raw";
+      raw.append("원문 ", highlightedRaw(parsed, index));
+      box.append(title, raw);
+      const hintText = tooMany ? "해석할 수 있는 경우가 너무 많아 고를 수 없습니다. '수정'에서 쉼표(,)·물결(~)·콜론(:)으로 나눠 적어주세요. (예: 11,12 · 1~2 · 11:10)" : amb.options.some((o) => o.unordered) ? "적은 순서대로 시각이 늘어나지 않거나 같은 시각이 반복됩니다. 맞으면 고르고, 아니면 '수정'으로 고쳐주세요." : "";
       if (hintText) {
         const hint = document.createElement("p");
         hint.className = "bulk-preview-ambiguity-hint";
@@ -9696,7 +9696,8 @@
       } else if (parsed.clearAll && row.choice === "__new__") {
         chip.textContent = "신청 시간 없이 회원만 등록";
       } else if (hasUnresolvedTime(row)) {
-        chip.textContent = "해석을 고르거나 줄을 고치면 등록할 시간이 표시됩니다";
+        chip.className = "bulk-preview-schedule-hint";
+        chip.textContent = "해석을 고르거나 수정하면 등록할 시간이 표시됩니다";
       } else {
         chip.textContent = "등록할 시간 없음";
       }
