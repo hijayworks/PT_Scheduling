@@ -8777,6 +8777,7 @@
     const hour24 = mark.hour % 12 + 12;
     return minutesLabel(hour24 * 60 + mark.minute);
   }
+  var ADJACENT_MARK_MAX_GAP_MIN = 30;
   function groupConsecutiveMarks(marks, continuous = false) {
     const groups = [];
     let current = [];
@@ -8785,8 +8786,9 @@
         const prevHour24 = current[current.length - 1].hour % 12 + 12;
         const hour24 = mark.hour % 12 + 12;
         const prev = current[current.length - 1];
-        const joinable = continuous || prev.minute === 0 && mark.minute === 0;
-        if (hour24 !== prevHour24 + 1 || !joinable) {
+        const gap = hour24 * 60 + mark.minute - (prevHour24 * 60 + prev.minute);
+        const joinable = gap > 0 && gap <= ADJACENT_MARK_MAX_GAP_MIN || hour24 === prevHour24 + 1 && (continuous || prev.minute === 0 && mark.minute === 0);
+        if (!joinable) {
           groups.push(current);
           current = [];
         }
@@ -9688,11 +9690,8 @@
       chip.className = "bulk-preview-day-chip";
       const existing = memberById(row.choice);
       if (parsed.clearAll && existing) {
-        const count = state.requests.filter(
-          (r) => r.memberId === existing.id
-        ).length;
         chip.classList.add("bulk-preview-day-chip-clear");
-        chip.textContent = "기존 가능 시간 전체 삭제 예정 (" + count + "개)";
+        chip.textContent = "기존 가능 시간 전체 삭제";
       } else if (parsed.clearAll && row.choice === "__new__") {
         chip.textContent = "신청 시간 없이 회원만 등록";
       } else if (hasUnresolvedTime(row)) {
