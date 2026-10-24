@@ -9455,6 +9455,12 @@
     const pending = bulkImportPlan.newLocations.find((l) => l.id === locId);
     return pending ? pending.name + "·새 지점" : "";
   }
+  function bulkSummaryCounts(parts) {
+    const el2 = document.createElement("strong");
+    el2.className = "bulk-summary-counts";
+    el2.textContent = parts.join(" · ");
+    return el2;
+  }
   function renderBulkImportSummary() {
     const rows = bulkImportPlan.rows;
     const newNames = new Set(
@@ -9480,8 +9486,7 @@
     parts.push("건너뛰기 " + skipped + "명");
     bulkImportPreviewSummaryEl.textContent = "";
     bulkImportPreviewSummaryEl.append(
-      parts.join(" · "),
-      document.createElement("br"),
+      bulkSummaryCounts(parts),
       "적용 대상 회원의 기존 스케줄은 모두 지우고 아래 내용으로 교체합니다. '일괄 등록'을 누르기 전에는 아무것도 바뀌지 않습니다."
     );
   }
@@ -10441,7 +10446,7 @@
     const parts = [willAdd + "명 등록"];
     if (willSkip > 0) parts.push(willSkip + "명 건너뜀");
     if (willError > 0) parts.push(willError + "명 형식 오류");
-    memberBulkImportPreviewSummaryEl.textContent = parts.join(" · ");
+    memberBulkImportPreviewSummaryEl.replaceChildren(bulkSummaryCounts(parts));
     memberBulkImportApplyBtn.disabled = willAdd === 0;
   }
   memberBulkImportPreviewBtn.addEventListener("click", () => {
