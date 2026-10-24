@@ -1199,6 +1199,9 @@ async function checkBulkImportSections(browser, site, failures) {
     // 미리보기: 생성 예정 지점·회원과 시간별 지점을 보여 주고, 취소하면 아무것도 바뀌지 않는다.
     let summary = await openAndPreview(text);
     assert(summary.includes("생성 예정 지점 여의도점·상암점·마포점") && summary.includes("신규 회원 22명") && summary.includes("기존 회원 연결 0명") && !summary.includes("해석 확인 필요"), "미리보기 요약: " + summary);
+    // 인원 수 줄은 안내 문장과 나뉜 굵은 줄로 보여 위계가 드러난다.
+    const counts = await page.$eval("#bulkImportPreviewSummary .bulk-summary-counts", (el) => ({ text: el.textContent, weight: Number(window.getComputedStyle(el).fontWeight) }));
+    assert(counts.text.includes("신규 회원 22명") && !counts.text.includes("기존 스케줄") && counts.weight >= 600, "미리보기 인원 수 줄: " + JSON.stringify(counts));
     const hurChips = await row("허종원").locator(".bulk-preview-day-chip").allTextContents();
     assert(
       json(hurChips.slice(0, 2)) === json(["월 (여의도점·새 지점) 18:00", "월 (마포점·새 지점) 20:00~22:00"]) && hurChips.length === 8,
