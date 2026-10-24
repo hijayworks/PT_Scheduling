@@ -1198,7 +1198,7 @@ async function checkBulkImportSections(browser, site, failures) {
 
     // 미리보기: 생성 예정 지점·회원과 시간별 지점을 보여 주고, 취소하면 아무것도 바뀌지 않는다.
     let summary = await openAndPreview(text);
-    assert(summary.includes("생성 예정 지점 여의도점·상암점·마포점") && summary.includes("신규 회원 22명") && summary.includes("기존 회원 연결 0명") && !summary.includes("해석 확인 필요"), "미리보기 요약: " + summary);
+    assert(summary.includes("생성 예정 지점 여의도점·상암점·마포점") && summary.includes("신규 회원 22명") && summary.includes("기존 회원 0명") && !summary.includes("연결") && !summary.includes("해석 확인 필요"), "미리보기 요약: " + summary);
     // 인원 수 줄은 안내 문장과 나뉜 굵은 줄로 보여 위계가 드러난다.
     const counts = await page.$eval("#bulkImportPreviewSummary .bulk-summary-counts", (el) => ({ text: el.textContent, weight: Number(window.getComputedStyle(el).fontWeight) }));
     assert(counts.text.includes("신규 회원 22명") && !counts.text.includes("기존 스케줄") && counts.weight >= 600, "미리보기 인원 수 줄: " + JSON.stringify(counts));
@@ -1238,7 +1238,10 @@ async function checkBulkImportSections(browser, site, failures) {
     await page.click('.nav-item[data-page="memberSchedule"]');
     await page.waitForSelector("#pageMemberSchedule.active", { timeout: 5000 });
     summary = await openAndPreview(text);
-    assert(!summary.includes("생성 예정 지점") && summary.includes("신규 회원 0명") && summary.includes("기존 회원 연결 22명"), "재등록 미리보기: " + summary);
+    assert(!summary.includes("생성 예정 지점") && summary.includes("신규 회원 0명") && summary.includes("기존 회원 22명"), "재등록 미리보기: " + summary);
+    // 기존 회원 선택지는 '신규 회원'·'건너뛰기'와 같은 급의 이름으로 보인다(동작어 '연결'을 붙이지 않는다).
+    const linkedLabel = await row("허종원").locator(".bulk-preview-row-head > select option:checked").textContent();
+    assert(/^기존 회원 \(.+ · .+\)$/.test(linkedLabel), "기존 회원 선택지 문구: " + linkedLabel);
     await page.click("#bulkImportApplyBtn");
     saved = await readState(page);
     const shape = (s) => json({
