@@ -4,7 +4,8 @@
 // MCP의 대화형 Playwright 브라우저와는 별개의 독립 프로세스를 띄우므로 그 브라우저가
 // 사용 중이어도 영향받지 않는다.
 // 기본 검사는 로컬 HTTP 서버(127.0.0.1)에서 열고, README의 파일 직접 실행(file://)은 임시 persistent profile로
-// 저장·새로고침·브라우저 재실행만 따로 확인한다. 시드는 처음 한 번만 넣는다(새로고침은 저장된 데이터를 그대로 읽는다).
+// 열기·저장·새로고침만 따로 확인한다. 브라우저 재실행 뒤 유지는 http + persistent profile로 본다(이슈 #32).
+// 시드는 처음 한 번만 넣는다(새로고침은 저장된 데이터를 그대로 읽는다).
 //
 // 후보A(체인DP) 생성은 카드 3장 각각이 시간 예산제 다듬기(최대 90초/카드, 데이터 크기와
 // 무관하게 시간 비율로 식히는 방식)를 쓰므로 트리비얼한 입력에서도 수 분이 걸릴 수 있다.
@@ -56,7 +57,8 @@ const SECTIONS = {
   "candidate-display": "대표 후보 비교표·미배정 1명 추가 후보·지점 색·시간 표시·추가 탐색 중 후보 유지",
   "bulk-import": "지점 제목 붙여넣기(빈 상태 지점·회원 생성·미리보기/취소 무변경·재등록·기존 회원 x·새로고침·백업 복원)",
   "bulk-ambiguity": "붙여넣기 모호한 시간(해석 확인 표시·적용 차단·해석 선택·줄 수정/취소·수정 중 적용 차단·건너뛰기·다른 줄 선택 유지·1110 확인·빈 상태 괄호 지점·무변경)",
-  file: "file:// 저장·새로고침·브라우저 재실행",
+  file: "file:// 열기·저장·새로고침",
+  restart: "브라우저 재실행 후 저장 유지(http·디스크 프로필)",
 };
 const onlyArg = process.argv.indexOf("--only");
 const ONLY = onlyArg >= 0 ? String(process.argv[onlyArg + 1] || "").split(",").filter(Boolean) : null;
@@ -1747,24 +1749,41 @@ async function main() {
     if (want("bulk-ambiguity")) await checkBulkImportAmbiguity(browser, site, failures);
 
     if (want("file")) {
-      // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다.
+      // README의 파일 직접 실행(file://): 임시 persistent profile(디스크 저장소)에서 열기 → 저장 → 새로고침이 유지된다.
+      // --allow-file-access-from-files: Linux Chromium은 부하가 크면 file:// 문서에 가끔 영속되지 않는 별도 localStorage를
+      // 붙인다(이슈 #32 진단 — 메모리 프로필에서도 재현, http 0건). 이 인자로 같은 세션의 저장·새로고침은 0건이 되지만
+      // 브라우저를 다시 열면 세션 전체가 남지 않는 경우가 여전히 있어(2~14%), 재실행 유지는 아래 restart 구간(http)에서 본다.
+      // 앱이 아닌 브라우저 동작이라 검사에서 뺀다. 유실 감지([환경 저장소 유실])는 그대로 둔다.
       const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-file-"));
       try {
         fs.writeFileSync(path.join(tmp, "blank.html"), BLANK_HTML);
         const fileSite = { blank: pathToFileURL(path.join(tmp, "blank.html")).href, index: pathToFileURL(path.join(ROOT, "index.html")).href };
-        const profile = path.join(tmp, "profile");
-        let ctx = await chromium.launchPersistentContext(profile);
+        const ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), { args: ["--allow-file-access-from-files"] });
         const fp = ctx.pages()[0] || (await ctx.newPage());
         await checkSwapReload(fp, await openManualEditPage(fp, fileSite, failures), "file", failures);
         await ctx.close();
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+      }
+    }
+
+    if (want("restart")) {
+      // 임시 persistent profile(디스크 저장소)에서 저장 → 새로고침 → 브라우저를 닫고 다시 열어도 유지된다. http로 본다(이슈 #32).
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pt-smoke-restart-"));
+      try {
+        const profile = path.join(tmp, "profile");
+        let ctx = await chromium.launchPersistentContext(profile);
+        const fp = ctx.pages()[0] || (await ctx.newPage());
+        await checkSwapReload(fp, await openManualEditPage(fp, site, failures), "restart", failures);
+        await ctx.close();
         ctx = await chromium.launchPersistentContext(profile);
         const rp = ctx.pages()[0] || (await ctx.newPage());
-        await rp.goto(fileSite.index);
+        await rp.goto(site.index);
         const after = await rp.evaluate(({ key, logKey }) => ({ url: location.href, origin: location.origin, keys: Object.keys(localStorage), raw: localStorage.getItem(key), logged: localStorage.getItem(logKey) }), { key: STORAGE_KEY, logKey: SEED_LOG_KEY });
-        if (!after.logged) failures.push("[환경 저장소 유실] file:// 브라우저 재실행: 저장소가 비어 있음 " + JSON.stringify({ url: after.url, origin: after.origin, keys: after.keys }));
+        if (!after.logged) failures.push("[환경 저장소 유실] 브라우저 재실행: 저장소가 비어 있음 " + JSON.stringify({ url: after.url, origin: after.origin, keys: after.keys }));
         else {
           const c = after.raw && JSON.parse(after.raw).candidates[0];
-          assert(JSON.stringify(c && swapSummary(c)) === JSON.stringify(SWAPPED), "file:// 브라우저 재실행 후 저장값(배정·미배정·확정)이 다름: " + JSON.stringify(c && swapSummary(c)));
+          assert(JSON.stringify(c && swapSummary(c)) === JSON.stringify(SWAPPED), "브라우저 재실행 후 저장값(배정·미배정·확정)이 다름: " + JSON.stringify(c && swapSummary(c)));
         }
         await ctx.close();
       } finally {
@@ -1791,7 +1810,7 @@ async function main() {
     return;
   }
   console.log(
-    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 구버전 탭·백업과 저장 분리(이관·자동 저장·복원 거부)·비정상 신버전 저장분 보호와 백업 복원 해제, 연속 요일 배정 제외 설정 위치(수업 스케줄 생성)·선택 유지·후보 무효화·생성 적용, 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 새로고침·브라우저 재실행 유지, 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
+    "PASS — 스모크 테스트 통과 (" + aNote + ", 후보 생성·추천 카드, 확정 후보 보존(재생성·새로고침), 신청 변경 시 수정 후보 무효화, 후보 비교 패널, 재최적화 취소·변경 최소화 제안·버리기·전체 탐색 비교·적용·되돌리기·국소 실패 안내, 근무 시간 밖 드래그 차단·회원 교체 후 미배정 표시·설정 입력 보정, 옛 저장분 위반 후보만 정리, 구버전 탭·백업과 저장 분리(이관·자동 저장·복원 거부)·비정상 신버전 저장분 보호와 백업 복원 해제, 연속 요일 배정 제외 설정 위치(수업 스케줄 생성)·선택 유지·후보 무효화·생성 적용, 교체·새로고침 저장값 " + SWAP_REPEAT + "회(http)·file:// 열기·저장·새로고침·브라우저 재실행 유지(http), 모바일 가로 스크롤 없음, 회원 목록 렌더링 확인됨)"
   );
 }
 
