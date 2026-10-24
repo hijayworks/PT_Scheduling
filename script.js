@@ -9480,7 +9480,7 @@
         "생성 예정 지점 " + bulkImportPlan.newLocations.map((l) => l.name).join("·")
       );
     parts.push("신규 회원 " + newNames.size + "명");
-    parts.push("기존 회원 연결 " + linked.size + "명");
+    parts.push("기존 회원 " + linked.size + "명");
     if (unchosen) parts.push("동명이인 선택 필요 " + unchosen + "명");
     if (unresolved) parts.push("해석 확인 필요 " + unresolved + "줄");
     parts.push("건너뛰기 " + skipped + "명");
@@ -9532,7 +9532,7 @@
       const opt = document.createElement("option");
       opt.value = m.id;
       const locNames = m.locationIds.map((id) => locationById(id)).filter(Boolean).map((l) => l.name).join("·");
-      opt.textContent = "기존 회원 연결 (" + (locNames || "지점 미지정") + " · " + (m.category || "구분 없음") + ")" + (matches.length > 1 ? " #" + m.id.slice(-4) : "");
+      opt.textContent = "기존 회원 (" + (locNames || "지점 미지정") + " · " + (m.category || "구분 없음") + ")" + (matches.length > 1 ? " #" + m.id.slice(-4) : "");
       select.appendChild(opt);
     });
     const newOpt = document.createElement("option");
